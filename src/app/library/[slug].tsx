@@ -249,7 +249,7 @@ export default function LibraryWorkspaceScreen() {
                 告诉助手你想看的指标或图表，生成后展示在这里
               </Text>
               <Pressable
-                onPress={() => openOmniCapture(library.slug, 'text')}
+                onPress={() => openOmniCapture(library.slug, 'text', undefined, 'stats')}
                 style={[styles.emptyStatsBtn, { backgroundColor: tone.solid }]}
               >
                 <Text style={styles.emptyStatsBtnText}>去定制统计</Text>
@@ -289,18 +289,26 @@ export default function LibraryWorkspaceScreen() {
         ) : null}
       </ScrollView>
 
-      {/* 右下角统一圆形悬浮按钮（点击打开随手说，长按直接录音） */}
+      {/* 右下角场景化助手按钮（统计 Tab 直达数据分析师，其余视图进入本库助理） */}
       <Pressable
-        accessibilityLabel="随手说与智能助手"
-        onPress={() => openOmniCapture(library.slug, 'text')}
-        onLongPress={() => openOmniCapture(library.slug, 'voice')}
+        accessibilityLabel={activeTab === 'stats' ? '针对本库问数据或定制图表' : '本库随手说与智能助手'}
+        onPress={() =>
+          openOmniCapture(library.slug, 'text', undefined, activeTab === 'stats' ? 'stats' : 'library')
+        }
+        onLongPress={() =>
+          openOmniCapture(library.slug, 'voice', undefined, activeTab === 'stats' ? 'stats' : 'library')
+        }
         style={({ pressed }) => [
           styles.fabBtn,
           { bottom: Math.max(insets.bottom, 16) + 8, backgroundColor: tone.solid },
           pressed && { opacity: 0.9, transform: [{ scale: 0.94 }] },
         ]}
       >
-        <Feather name="message-circle" size={24} color={Palette.inkInverse} />
+        <Feather
+          name={activeTab === 'stats' ? 'bar-chart-2' : 'message-circle'}
+          size={activeTab === 'stats' ? 23 : 24}
+          color={Palette.inkInverse}
+        />
       </Pressable>
 
       <DynamicEntryFormModal

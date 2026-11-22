@@ -212,12 +212,12 @@ export default function HomeVaultScreen() {
         </View>
       </ScrollView>
 
-      {/* 右下角统一悬浮主按钮（点击打开随手说，长按直接开录音） */}
+      {/* 右下角统一悬浮主按钮（点击打开全局管家，长按直接开录音） */}
       <Pressable
         id="btn-open-omni-bar"
         accessibilityLabel="随手说与智能助手"
-        onPress={() => openOmniCapture(undefined, 'text')}
-        onLongPress={() => openOmniCapture(undefined, 'voice')}
+        onPress={() => openOmniCapture(undefined, 'text', undefined, 'home')}
+        onLongPress={() => openOmniCapture(undefined, 'voice', undefined, 'home')}
         style={({ pressed }) => [
           styles.omniFab,
           pressed && { opacity: 0.9, transform: [{ scale: 0.94 }] },

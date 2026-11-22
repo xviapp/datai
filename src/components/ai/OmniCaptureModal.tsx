@@ -21,13 +21,16 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   runUnifiedAssistant,
   type AssistantIntent,
+  type AssistantMode,
+  type AssistantScene,
+  type CaptureEntryContext,
   type UnifiedAssistantResult,
 } from '@/ai/agents';
 import { transcribeAudioWithDeepSeek } from '@/ai/deepseek-client';
 import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
-import type { ArchitectLibraryDiff } from '@/db/repository';
+import type { ArchitectLibraryDiff, LibraryRecord } from '@/db/repository';
 import { createId } from '@/engine/id';
 import { compressImageForAiVision } from '@/engine/image-storage';
 import type { FieldType } from '@/schema/field-defs';
@@ -54,11 +57,184 @@ const INTENT_LABELS: Record<AssistantIntent, string> = {
   analyst: '问数据',
 };
 
-const QUICK_EXAMPLES = [
-  { tag: '记一笔', text: '《长安的荔枝》今晚读了 40 分钟到第 185 页，节奏太紧凑了' },
-  { tag: '问数据', text: '算一下每件数码装备加上后续配件账单，总共花了多少钱？' },
-  { tag: '建记录本', text: '帮我建一套「宠物档案」和附属「疫苗医疗记录」，自动统计总花费' },
+const HOME_QUICK_EXAMPLES: Array<{ tag: string; mode?: AssistantMode; text: string }> = [
+  { tag: '记一笔', mode: 'capture', text: '《长安的荔枝》今晚读了 40 分钟到第 185 页，节奏太紧凑了' },
+  { tag: '问数据', mode: 'analyst', text: '算一下每件数码装备加上后续配件账单，总共花了多少钱？' },
+  { tag: '建记录本', mode: 'architect', text: '帮我建一套「宠物档案」和附属「疫苗医疗记录」，自动统计总花费' },
 ];
+
+const STATS_OVERVIEW_EXAMPLES: Array<{ tag: string; mode?: AssistantMode; text: string }> = [
+  { tag: '跨表汇总', mode: 'analyst', text: '算一下每件数码装备加上关联配件账单的总花费，并画柱状图' },
+  { tag: '分类占比', mode: 'analyst', text: '按消费分类统计日常账单支出占比，并生成饼图' },
+  { tag: '进度统计', mode: 'analyst', text: '统计阅读书架中每本书的累计阅读时长和记录条数' },
+];
+
+interface ModeOption {
+  mode: AssistantMode;
+  label: string;
+  icon: React.ComponentProps<typeof Feather>['name'];
+}
+
+function getDefaultModeForScene(
+  scene: AssistantScene,
+  entryContext?: CaptureEntryContext
+): AssistantMode {
+  if (scene === 'stats') return 'analyst';
+  if (scene === 'entry' && entryContext?.activeTab && entryContext.activeTab !== 'detail') {
+    return 'capture';
+  }
+  return 'auto';
+}
+
+function getModeOptionsForScene(
+  scene: AssistantScene,
+  entryContext?: CaptureEntryContext
+): ModeOption[] {
+  if (scene === 'stats') {
+    return [
+      { mode: 'analyst', label: '问数据', icon: 'bar-chart-2' },
+      { mode: 'capture', label: '记一笔', icon: 'edit-3' },
+      { mode: 'architect', label: '改结构', icon: 'sliders' },
+    ];
+  }
+  if (scene === 'library') {
+    return [
+      { mode: 'auto', label: '自动', icon: 'zap' },
+      { mode: 'capture', label: '记一条', icon: 'edit-3' },
+      { mode: 'analyst', label: '问本库', icon: 'bar-chart-2' },
+      { mode: 'architect', label: '调结构', icon: 'sliders' },
+    ];
+  }
+  if (scene === 'entry') {
+    if (entryContext?.activeTab && entryContext.activeTab !== 'detail') {
+      return [
+        { mode: 'capture', label: '记关联', icon: 'plus-circle' },
+        { mode: 'analyst', label: '问此记录', icon: 'bar-chart-2' },
+      ];
+    }
+    return [
+      { mode: 'auto', label: '自动', icon: 'zap' },
+      { mode: 'capture', label: '记关联', icon: 'plus-circle' },
+      { mode: 'analyst', label: '问此记录', icon: 'bar-chart-2' },
+    ];
+  }
+  return [
+    { mode: 'auto', label: '自动', icon: 'zap' },
+    { mode: 'capture', label: '记一笔', icon: 'edit-3' },
+    { mode: 'analyst', label: '问数据', icon: 'bar-chart-2' },
+    { mode: 'architect', label: '建记录本', icon: 'sliders' },
+  ];
+}
+
+function buildContextualExamples(params: {
+  scene: AssistantScene;
+  mode: AssistantMode;
+  targetLib?: LibraryRecord;
+  entryContext?: CaptureEntryContext;
+  childLibs: LibraryRecord[];
+  reverseRelLibs: LibraryRecord[];
+}): Array<{ tag: string; mode?: AssistantMode; text: string }> {
+  const { scene, mode, targetLib, entryContext, childLibs, reverseRelLibs } = params;
+
+  if (scene === 'stats') {
+    if (targetLib) {
+      const numField = targetLib.fields.find(
+        (f) => f.type === 'currency' || f.type === 'number'
+      );
+      const selectField = targetLib.fields.find((f) => f.type === 'select');
+      const dateField = targetLib.fields.find((f) => f.type === 'date');
+      const items: Array<{ tag: string; mode?: AssistantMode; text: string }> = [];
+
+      if (selectField && numField) {
+        items.push({
+          tag: '分类占比',
+          mode: 'analyst',
+          text: `按「${selectField.label}」汇总「${targetLib.name}」的${numField.label}，并画柱状图`,
+        });
+      } else if (selectField) {
+        items.push({
+          tag: '分布统计',
+          mode: 'analyst',
+          text: `统计「${targetLib.name}」各「${selectField.label}」的记录数量占比并画饼图`,
+        });
+      }
+      if (dateField && numField) {
+        items.push({
+          tag: '时间趋势',
+          mode: 'analyst',
+          text: `按「${dateField.label}」统计「${targetLib.name}」的${numField.label}变化趋势`,
+        });
+      }
+      items.push({
+        tag: '核心指标',
+        mode: 'analyst',
+        text: `帮我汇总「${targetLib.name}」的关键统计指标并生成一张总览数字卡`,
+      });
+      return items.slice(0, 3);
+    }
+    return STATS_OVERVIEW_EXAMPLES;
+  }
+
+  if (scene === 'entry' && entryContext) {
+    const primaryRelatedLib =
+      (entryContext.activeChildSlug
+        ? childLibs.find((c) => c.slug === entryContext.activeChildSlug)
+        : undefined) ??
+      childLibs[0] ??
+      reverseRelLibs[0];
+
+    const items: Array<{ tag: string; mode?: AssistantMode; text: string }> = [];
+    if (mode !== 'analyst') {
+      if (primaryRelatedLib) {
+        items.push({
+          tag: `记${primaryRelatedLib.name}`,
+          mode: 'capture',
+          text: `为「${entryContext.title}」记一条新的${primaryRelatedLib.name}`,
+        });
+      } else {
+        items.push({
+          tag: '记关联',
+          mode: 'capture',
+          text: `围绕「${entryContext.title}」补充一条新的关联记录`,
+        });
+      }
+    }
+    items.push({
+      tag: '问此记录',
+      mode: 'analyst',
+      text: `汇总分析「${entryContext.title}」的全部关联明细与核心数据`,
+    });
+    return items;
+  }
+
+  if (scene === 'library' && targetLib) {
+    const items: Array<{ tag: string; mode?: AssistantMode; text: string }> = [];
+    if (mode === 'auto' || mode === 'capture') {
+      items.push({
+        tag: '记一条',
+        mode: 'capture',
+        text: `在「${targetLib.name}」中快速记录一条今天的新条目`,
+      });
+    }
+    if (mode === 'auto' || mode === 'analyst') {
+      items.push({
+        tag: '问本库',
+        mode: 'analyst',
+        text: `帮我统计分析「${targetLib.name}」的数据分布并画一张图表`,
+      });
+    }
+    if (mode === 'auto' || mode === 'architect') {
+      items.push({
+        tag: '调结构',
+        mode: 'architect',
+        text: `给「${targetLib.name}」新增实用字段、自动汇总或提醒高亮规则`,
+      });
+    }
+    return items;
+  }
+
+  return HOME_QUICK_EXAMPLES;
+}
 
 export function OmniCaptureModal() {
   const router = useRouter();
@@ -68,6 +244,7 @@ export function OmniCaptureModal() {
     libraries,
     hasApiKey,
     omniModalVisible,
+    omniScene,
     omniTargetSlug,
     omniEntryContext,
     clearOmniEntryContext,
@@ -84,7 +261,12 @@ export function OmniCaptureModal() {
   const [result, setResult] = useState<UnifiedAssistantResult | null>(null);
   const [drafts, setDrafts] = useState<DraftEntryItem[]>([]);
   const [isRecording, setIsRecording] = useState(false);
-  const [prevModalVisible, setPrevModalVisible] = useState(omniModalVisible);
+
+  const sessionSignature = `${omniModalVisible ? 'open' : 'closed'}::${omniScene}::${omniTargetSlug ?? ''}::${omniEntryContext?.entryId ?? ''}::${omniEntryContext?.activeTab ?? ''}`;
+  const [selectedMode, setSelectedMode] = useState<AssistantMode>(() =>
+    getDefaultModeForScene(omniScene, omniEntryContext)
+  );
+  const [prevSessionSig, setPrevSessionSig] = useState(sessionSignature);
   const didTriggerActionRef = useRef(false);
 
   // 原生 PCM 音频流直录标准 16kHz 16-bit 单声道 WAV，兼容 DeepSeek /v1/tools/asr
@@ -94,8 +276,9 @@ export function OmniCaptureModal() {
     encoding: 'int16',
   });
 
-  if (prevModalVisible !== omniModalVisible) {
-    setPrevModalVisible(omniModalVisible);
+  if (prevSessionSig !== sessionSignature) {
+    setPrevSessionSig(sessionSignature);
+    setSelectedMode(getDefaultModeForScene(omniScene, omniEntryContext));
     if (!omniModalVisible) {
       setErrorMsg(null);
       setSuccessMsg(null);
@@ -105,6 +288,11 @@ export function OmniCaptureModal() {
       if (isRecording) {
         setIsRecording(false);
       }
+    } else {
+      setErrorMsg(null);
+      setSuccessMsg(null);
+      setResult(null);
+      setDrafts([]);
     }
   }
 
@@ -205,10 +393,43 @@ export function OmniCaptureModal() {
     }
   };
 
-  const handleSend = async (forceIntent?: AssistantIntent) => {
+  const libMap = new Map(libraries.map((l) => [l.slug, l]));
+  const existingSlugs = new Set(libraries.map((l) => l.slug));
+  const targetLib = omniTargetSlug ? libMap.get(omniTargetSlug) : undefined;
+
+  const entryParentSlug = omniEntryContext?.librarySlug;
+  const childLibs = entryParentSlug
+    ? libraries.filter((l) => l.parentLibrarySlug === entryParentSlug)
+    : [];
+  const childSlugSet = new Set(childLibs.map((c) => c.slug));
+  const reverseRelLibs = entryParentSlug
+    ? libraries.filter(
+        (l) =>
+          !childSlugSet.has(l.slug) &&
+          l.fields.some(
+            (f) =>
+              f.type === 'relation' && f.relationConfig?.targetLibrarySlug === entryParentSlug
+          )
+      )
+    : [];
+
+  const modeOptions = getModeOptionsForScene(omniScene, omniEntryContext);
+  const activeMode: AssistantMode = modeOptions.some((o) => o.mode === selectedMode)
+    ? selectedMode
+    : (modeOptions[0]?.mode ?? 'auto');
+
+  const showCaptureTools = activeMode === 'auto' || activeMode === 'capture';
+
+  const handleSend = async (explicitForceIntent?: AssistantIntent) => {
     if (!repo) return;
-    if (!inputText.trim() && !imageDataUrl) {
-      setErrorMsg('请输入一句话，或先录音、拍张照片');
+    const effectiveForce =
+      explicitForceIntent ?? (activeMode === 'auto' ? undefined : activeMode);
+    if (!inputText.trim() && (!showCaptureTools || !imageDataUrl)) {
+      setErrorMsg(
+        effectiveForce === 'analyst'
+          ? '请输入你想统计的问题或图表需求，也可以直接语音提问'
+          : '请输入一句话，或先录音、拍张照片'
+      );
       return;
     }
     try {
@@ -221,13 +442,14 @@ export function OmniCaptureModal() {
         repo,
         {
           text: inputText,
-          imageBase64DataUrl: imageDataUrl,
-          useWebSearch,
+          imageBase64DataUrl: showCaptureTools ? imageDataUrl : undefined,
+          useWebSearch: showCaptureTools ? useWebSearch : false,
+          scene: omniScene,
           targetLibrarySlug: omniTargetSlug,
           entryContext: omniEntryContext,
         },
         (msg) => setLoadingStep(msg),
-        forceIntent
+        effectiveForce
       );
 
       setResult(outcome);
@@ -282,8 +504,13 @@ export function OmniCaptureModal() {
   const handlePinWidget = (w: DashboardWidget) => {
     if (!repo) return;
     try {
-      repo.saveDashboardWidget({ ...w, id: createId('wdg') }, null);
-      setSuccessMsg(`已将「${w.title}」固定到统计总览！`);
+      const targetSlugForWidget = omniTargetSlug ?? null;
+      repo.saveDashboardWidget({ ...w, id: createId('wdg') }, targetSlugForWidget);
+      setSuccessMsg(
+        targetSlugForWidget && targetLib
+          ? `已将「${w.title}」固定到「${targetLib.name}」与统计总览！`
+          : `已将「${w.title}」固定到统计总览！`
+      );
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
@@ -293,11 +520,91 @@ export function OmniCaptureModal() {
     setDrafts((prev) => prev.filter((_, i) => i !== idx));
   };
 
-  const libMap = new Map(libraries.map((l) => [l.slug, l]));
-  const existingSlugs = new Set(libraries.map((l) => l.slug));
+  const headerConfig = (() => {
+    if (omniScene === 'stats') {
+      return {
+        icon: 'bar-chart-2' as const,
+        title: targetLib ? `问数据 · ${targetLib.name}` : '问数据 · 统计总览',
+        roleBadge: '数据分析师',
+      };
+    }
+    if (omniScene === 'entry' && omniEntryContext) {
+      return {
+        icon: 'link-2' as const,
+        title: `${omniEntryContext.libraryIcon} ${omniEntryContext.title}`,
+        roleBadge: '随行助理',
+      };
+    }
+    if (omniScene === 'library' && targetLib) {
+      return {
+        icon: 'layers' as const,
+        title: `${targetLib.icon} ${targetLib.name}`,
+        roleBadge: '本库助理',
+      };
+    }
+    return {
+      icon: 'message-circle' as const,
+      title: '随手说',
+      roleBadge: '全能管家',
+    };
+  })();
+
+  const inputPlaceholder = (() => {
+    if (activeMode === 'analyst') {
+      if (omniScene === 'entry' && omniEntryContext) {
+        return `针对「${omniEntryContext.title}」提问明细、累计数据或趋势分析...`;
+      }
+      if (targetLib) {
+        return `向「${targetLib.name}」提问统计，或描述想画的图表（柱状图/折线图/占比/数字卡）...`;
+      }
+      return '问任何跨表统计、趋势对比，或直接说出你想定制的图表...';
+    }
+    if (activeMode === 'architect') {
+      if (targetLib) {
+        return `说明想给「${targetLib.name}」新增的字段、自动公式、预警高亮或附属子表...`;
+      }
+      return '描述你想新建的记录本、字段结构、跨表关联或自动汇总公式...';
+    }
+    if (omniScene === 'entry' && omniEntryContext) {
+      if (omniEntryContext.activeChildName) {
+        return `为「${omniEntryContext.title}」快速记一条${omniEntryContext.activeChildName}，支持文字、语音或拍照...`;
+      }
+      if (childLibs.length > 0) {
+        return `围绕「${omniEntryContext.title}」记录${childLibs[0].name}，或直接提问汇总数据...`;
+      }
+      if (reverseRelLibs.length > 0) {
+        return `围绕「${omniEntryContext.title}」记录关联${reverseRelLibs[0].name}，或提问明细统计...`;
+      }
+      return `围绕「${omniEntryContext.title}」补充关联记录，或针对这条记录提问...`;
+    }
+    if (omniScene === 'library' && targetLib) {
+      return activeMode === 'capture'
+        ? `说一句话或拍张照，自动整理并存入「${targetLib.name}」...`
+        : `在「${targetLib.name}」里记一条、调整字段样式，或统计本库数据...`;
+    }
+    return '记一笔、建记录本、查开销、画图表或拍张小票，直接说就行...';
+  })();
+
+  const contextualExamples = buildContextualExamples({
+    scene: omniScene,
+    mode: activeMode,
+    targetLib,
+    entryContext: omniEntryContext,
+    childLibs,
+    reverseRelLibs,
+  });
+
+  const primarySendLabel =
+    activeMode === 'analyst'
+      ? '开始分析'
+      : activeMode === 'architect'
+        ? '生成方案'
+        : activeMode === 'capture'
+          ? '整理草稿'
+          : '发送';
 
   const renderFallbackBar = (currentIntent: AssistantIntent) => {
-    const others = (['capture', 'architect', 'analyst'] as AssistantIntent[]).filter(
+    const others = (['capture', 'analyst', 'architect'] as AssistantIntent[]).filter(
       (i) => i !== currentIntent
     );
     return (
@@ -333,15 +640,13 @@ export function OmniCaptureModal() {
         <View style={styles.sheet}>
           <View style={styles.header}>
             <View style={styles.headerTitleRow}>
-              <Feather name="message-circle" size={18} color={Palette.brand} />
+              <Feather name={headerConfig.icon} size={18} color={Palette.brand} />
               <Text style={styles.headerTitle} numberOfLines={1}>
-                随手说
-                {omniEntryContext
-                  ? ` · ${omniEntryContext.title}`
-                  : omniTargetSlug
-                    ? ` · ${libMap.get(omniTargetSlug)?.name ?? ''}`
-                    : ''}
+                {headerConfig.title}
               </Text>
+              <View style={styles.roleBadge}>
+                <Text style={styles.roleBadgeText}>{headerConfig.roleBadge}</Text>
+              </View>
             </View>
             <Pressable onPress={closeOmniCapture} style={styles.closeBtn}>
               <Feather name="x" size={20} color={Palette.inkSecondary} />
@@ -368,11 +673,37 @@ export function OmniCaptureModal() {
               </Pressable>
             ) : null}
 
+            {/* 场景模式切换条（默认聚焦当前角色，随时可切换） */}
+            <View style={styles.modeBar}>
+              {modeOptions.map((opt) => {
+                const active = activeMode === opt.mode;
+                return (
+                  <Pressable
+                    key={opt.mode}
+                    onPress={() => setSelectedMode(opt.mode)}
+                    style={[styles.modePill, active && styles.modePillActive]}
+                  >
+                    <Feather
+                      name={opt.icon}
+                      size={12}
+                      color={active ? Palette.inkInverse : Palette.inkSecondary}
+                    />
+                    <Text style={[styles.modePillText, active && styles.modePillTextActive]}>
+                      {opt.label}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
             {omniEntryContext ? (
               <View style={styles.contextBanner}>
                 <Feather name="link-2" size={14} color={Palette.brand} />
                 <Text style={styles.contextBannerText} numberOfLines={1}>
-                  当前关联：{omniEntryContext.libraryIcon} {omniEntryContext.title}
+                  当前聚焦：{omniEntryContext.libraryIcon} {omniEntryContext.title}
+                  {omniEntryContext.activeChildName
+                    ? ` · ${omniEntryContext.activeChildName}`
+                    : ''}
                 </Text>
                 <Pressable hitSlop={8} onPress={clearOmniEntryContext}>
                   <Feather name="x" size={15} color={Palette.inkMuted} />
@@ -384,27 +715,28 @@ export function OmniCaptureModal() {
               value={inputText}
               onChangeText={setInputText}
               multiline
-              placeholder={
-                omniEntryContext
-                  ? `针对「${omniEntryContext.title}」记一笔进度、书摘随感或拍张书页照...`
-                  : '记一笔、建记录本、查开销、画图表或拍张小票，直接说就行...'
-              }
+              placeholder={inputPlaceholder}
               placeholderTextColor={Palette.inkMuted}
               style={styles.omniInput}
             />
 
-            {/* 多模态工具条 */}
+            {/* 按角色裁剪的工具条（分析师/改结构聚焦语音与文字，不展示拍照与联网杂项） */}
             <View style={styles.toolsRow}>
-              <Pressable onPress={() => handlePickPhoto(false)} style={styles.toolChip}>
-                <Feather name="image" size={15} color={Palette.brand} />
-                <Text style={styles.toolChipText}>选照片</Text>
-              </Pressable>
-              {Platform.OS !== 'web' ? (
-                <Pressable onPress={() => handlePickPhoto(true)} style={styles.toolChip}>
-                  <Feather name="camera" size={15} color={Palette.brand} />
-                  <Text style={styles.toolChipText}>拍照</Text>
-                </Pressable>
+              {showCaptureTools ? (
+                <>
+                  <Pressable onPress={() => handlePickPhoto(false)} style={styles.toolChip}>
+                    <Feather name="image" size={15} color={Palette.brand} />
+                    <Text style={styles.toolChipText}>选照片</Text>
+                  </Pressable>
+                  {Platform.OS !== 'web' ? (
+                    <Pressable onPress={() => handlePickPhoto(true)} style={styles.toolChip}>
+                      <Feather name="camera" size={15} color={Palette.brand} />
+                      <Text style={styles.toolChipText}>拍照</Text>
+                    </Pressable>
+                  ) : null}
+                </>
               ) : null}
+
               <Pressable
                 onPress={handleToggleVoice}
                 style={[styles.toolChip, isRecording && styles.toolChipRecording]}
@@ -419,17 +751,25 @@ export function OmniCaptureModal() {
                 </Text>
               </Pressable>
 
-              <View style={styles.webSwitchWrap}>
-                <Text style={styles.webSwitchLabel}>联网补充</Text>
-                <Switch
-                  value={useWebSearch}
-                  onValueChange={setUseWebSearch}
-                  trackColor={{ false: Palette.borderStrong, true: Palette.brand }}
-                />
-              </View>
+              {showCaptureTools ? (
+                <View style={styles.webSwitchWrap}>
+                  <Text style={styles.webSwitchLabel}>联网补充</Text>
+                  <Switch
+                    value={useWebSearch}
+                    onValueChange={setUseWebSearch}
+                    trackColor={{ false: Palette.borderStrong, true: Palette.brand }}
+                  />
+                </View>
+              ) : (
+                <Text style={styles.modeSafetyHint}>
+                  {activeMode === 'analyst'
+                    ? '仅只读查询本地记录，不会改动数据'
+                    : '先预览字段变更差异，确认后再应用'}
+                </Text>
+              )}
             </View>
 
-            {imageDataUrl ? (
+            {showCaptureTools && imageDataUrl ? (
               <View style={styles.attachedImgRow}>
                 <Image source={{ uri: imageDataUrl }} style={styles.attachedThumb} contentFit="cover" />
                 <View style={{ flex: 1 }} />
@@ -439,11 +779,20 @@ export function OmniCaptureModal() {
               </View>
             ) : null}
 
-            {/* 快捷示例（无结果时展示） */}
-            {!result && !loadingStep && !omniEntryContext ? (
+            {/* 场景化快捷示例（无结果时展示） */}
+            {!result && !loadingStep && contextualExamples.length > 0 ? (
               <View style={styles.examplesBox}>
-                {QUICK_EXAMPLES.map((ex, i) => (
-                  <Pressable key={i} onPress={() => setInputText(ex.text)} style={styles.examplePill}>
+                {contextualExamples.map((ex, i) => (
+                  <Pressable
+                    key={i}
+                    onPress={() => {
+                      setInputText(ex.text);
+                      if (ex.mode && modeOptions.some((o) => o.mode === ex.mode)) {
+                        setSelectedMode(ex.mode);
+                      }
+                    }}
+                    style={styles.examplePill}
+                  >
                     <Text style={styles.exampleTag}>{ex.tag}</Text>
                     <Text style={styles.exampleText} numberOfLines={1}>
                       {ex.text}
@@ -480,12 +829,12 @@ export function OmniCaptureModal() {
                   <Text style={styles.assistantNote}>{result.capture.assistantNote}</Text>
                 ) : null}
                 {drafts.map((d, idx) => {
-                  const targetLib = libMap.get(d.librarySlug);
+                  const draftLib = libMap.get(d.librarySlug);
                   return (
                     <View key={idx} style={styles.resultCard}>
                       <View style={styles.draftHeader}>
                         <Text style={styles.draftLibBadge}>
-                          {targetLib ? `${targetLib.icon} ${targetLib.name}` : d.librarySlug}
+                          {draftLib ? `${draftLib.icon} ${draftLib.name}` : d.librarySlug}
                         </Text>
                         <Pressable onPress={() => removeDraftAt(idx)}>
                           <Feather name="x" size={16} color={Palette.inkMuted} />
@@ -494,7 +843,7 @@ export function OmniCaptureModal() {
                       {d.reason ? <Text style={styles.draftReason}>{d.reason}</Text> : null}
                       <View style={styles.draftFieldsGrid}>
                         {Object.entries(d.data).map(([k, v]) => {
-                          const fDef = targetLib?.fields.find((f) => f.key === k);
+                          const fDef = draftLib?.fields.find((f) => f.key === k);
                           const formatDraftVal = (rawVal: unknown): string => {
                             if (Array.isArray(rawVal)) {
                               return rawVal
@@ -722,8 +1071,12 @@ export function OmniCaptureModal() {
                   (Boolean(loadingStep) || isRecording) && { opacity: 0.5 },
                 ]}
               >
-                <Feather name="send" size={15} color={Palette.inkInverse} />
-                <Text style={styles.primaryBtnText}>发送</Text>
+                <Feather
+                  name={activeMode === 'analyst' ? 'bar-chart-2' : 'send'}
+                  size={15}
+                  color={Palette.inkInverse}
+                />
+                <Text style={styles.primaryBtnText}>{primarySendLabel}</Text>
               </Pressable>
             )}
           </View>
@@ -762,12 +1115,24 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    marginRight: 8,
   },
   headerTitle: {
-    flex: 1,
-    fontSize: 17,
+    flexShrink: 1,
+    fontSize: 16,
     fontWeight: '700',
     color: Palette.inkPrimary,
+  },
+  roleBadge: {
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+  roleBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.brand,
   },
   closeBtn: {
     padding: 4,
@@ -776,8 +1141,38 @@ const styles = StyleSheet.create({
     paddingHorizontal: 20,
   },
   bodyContent: {
-    paddingVertical: 16,
-    gap: 13,
+    paddingVertical: 14,
+    gap: 12,
+  },
+  modeBar: {
+    flexDirection: 'row',
+    backgroundColor: Palette.bgCanvas,
+    borderRadius: 12,
+    padding: 3,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    gap: 3,
+  },
+  modePill: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingVertical: 7,
+    paddingHorizontal: 6,
+    borderRadius: 9,
+  },
+  modePillActive: {
+    backgroundColor: Palette.brand,
+  },
+  modePillText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.inkSecondary,
+  },
+  modePillTextActive: {
+    color: Palette.inkInverse,
   },
   contextBanner: {
     flexDirection: 'row',
@@ -853,6 +1248,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: Palette.inkSecondary,
+  },
+  modeSafetyHint: {
+    flex: 1,
+    textAlign: 'right',
+    fontSize: 11,
+    fontWeight: '600',
+    color: Palette.inkMuted,
   },
   attachedImgRow: {
     flexDirection: 'row',

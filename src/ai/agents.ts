@@ -22,6 +22,8 @@ import {
 import { getAiPreferences } from './settings-store';
 
 export type AssistantIntent = 'architect' | 'analyst' | 'capture';
+export type AssistantScene = 'home' | 'stats' | 'library' | 'entry';
+export type AssistantMode = 'auto' | AssistantIntent;
 
 export interface CaptureEntryContext {
   entryId: string;
@@ -29,6 +31,9 @@ export interface CaptureEntryContext {
   librarySlug: string;
   libraryName: string;
   libraryIcon: string;
+  activeTab?: string;
+  activeChildSlug?: string;
+  activeChildName?: string;
 }
 
 export type UnifiedAssistantResult =
@@ -40,22 +45,49 @@ const IntentRouterSchema = z.object({
   intent: z.enum(['architect', 'analyst', 'capture']),
 });
 
+const SCENE_LABELS: Record<AssistantScene, string> = {
+  home: '首页全局总入口',
+  stats: '统计分析看板',
+  library: '记录本列表工作台',
+  entry: '单条记录详情页',
+};
+
 /**
  * 自动识别用户输入意图：定制/修改记录本（architect）、统计/查数据/画图（analyst）、还是记录一条具体事件（capture）
  */
 export async function detectAssistantIntent(
   repo: OmniRepository,
   userPrompt: string,
-  entryContext?: CaptureEntryContext
+  context?: {
+    scene?: AssistantScene;
+    targetLibrarySlug?: string;
+    entryContext?: CaptureEntryContext;
+  }
 ): Promise<AssistantIntent> {
-  const libNames = repo
-    .listLibraries()
-    .map((l) => `${l.name}(${l.slug})`)
-    .join('、');
+  const allLibs = repo.listLibraries();
+  const libNames = allLibs.map((l) => `${l.name}(${l.slug})`).join('、');
 
-  const ctxLine = entryContext
-    ? `\n当前所在详情页：${entryContext.libraryName}「${entryContext.title}」`
-    : '';
+  const contextLines: string[] = [];
+  if (context?.scene) {
+    contextLines.push(`当前所在页面：${SCENE_LABELS[context.scene]}`);
+  }
+  if (context?.entryContext) {
+    const tabHint = context.entryContext.activeChildName
+      ? `（正在看附属「${context.entryContext.activeChildName}」标签页）`
+      : context.entryContext.activeTab === 'backlinks'
+        ? '（正在看「关联记录」标签页）'
+        : '';
+    contextLines.push(
+      `当前所在详情页：${context.entryContext.libraryName}「${context.entryContext.title}」${tabHint}`
+    );
+  } else if (context?.targetLibrarySlug) {
+    const targetLib = allLibs.find((l) => l.slug === context.targetLibrarySlug);
+    if (targetLib) {
+      contextLines.push(`当前所在记录本：${targetLib.name}(${targetLib.slug})`);
+    }
+  }
+
+  const ctxBlock = contextLines.length > 0 ? `\n${contextLines.join('\n')}` : '';
 
   const { message } = await callDeepSeekChat({
     thinking: false,
@@ -64,15 +96,15 @@ export async function detectAssistantIntent(
     messages: [
       {
         role: 'system',
-        content: `你是个人记录 App 的意图路由器。根据用户输入，输出单个 JSON：{"intent":"architect"|"analyst"|"capture"}。
+        content: `你是个人记录 App 的意图路由器。根据用户输入与当前所在页面，输出单个 JSON：{"intent":"architect"|"analyst"|"capture"}。
 判定规则：
-- "architect"：用户想新建记录本/数据表，或给现有记录本新增/修改字段、公式、提醒高亮规则、卡片样式（哪怕同时顺带要一张图表）。
+- "architect"：用户想新建记录本/数据表，或给当前/已有记录本新增、修改字段、公式、提醒高亮规则、附属子表或卡片样式（哪怕同时顺带要一张图表）。
 - "analyst"：用户想查询、统计、汇总、排名、对比、排查已有记录的数据，或基于已有记录画统计图表。
-- "capture"：用户想录入一条具体的日常记录、进度打卡、书摘随感或跨表新建条目（例如刚买了某物花了多少钱、某本书读到多少页、刚吃了某种药）。`,
+- "capture"：用户想录入一条具体的日常记录、进度打卡、书摘随感或跨表关联流水（例如刚买了某物花了多少钱、某本书读到多少页、刚吃了某种药）。`,
       },
       {
         role: 'user',
-        content: `当前已有记录本：${libNames || '无'}${ctxLine}\n用户输入：${userPrompt}`,
+        content: `当前已有记录本：${libNames || '无'}${ctxBlock}\n用户输入：${userPrompt}`,
       },
     ],
   });
@@ -82,7 +114,7 @@ export async function detectAssistantIntent(
 }
 
 /**
- * 统一智能助手入口：支持文字 / 语音转写 / 图片 / 联网，自动识别意图并执行对应能力（也支持手动指定 forceIntent 重跑）
+ * 统一智能助手入口：支持文字 / 语音转写 / 图片 / 联网，结合当前页面场景自动识别意图并注入全链路上下文（也支持 forceIntent 直达）
  */
 export async function runUnifiedAssistant(
   repo: OmniRepository,
@@ -90,6 +122,7 @@ export async function runUnifiedAssistant(
     text: string;
     imageBase64DataUrl?: string;
     useWebSearch?: boolean;
+    scene?: AssistantScene;
     targetLibrarySlug?: string;
     entryContext?: CaptureEntryContext;
   },
@@ -102,26 +135,37 @@ export async function runUnifiedAssistant(
   if (!intent) {
     if (params.imageBase64DataUrl && !cleanText) {
       intent = 'capture';
+    } else if (params.scene === 'stats') {
+      intent = 'analyst';
     } else {
       onProgress?.('正在理解你的想法...');
-      intent = await detectAssistantIntent(repo, cleanText, params.entryContext);
+      intent = await detectAssistantIntent(repo, cleanText, {
+        scene: params.scene,
+        targetLibrarySlug: params.targetLibrarySlug,
+        entryContext: params.entryContext,
+      });
     }
   }
 
   if (intent === 'architect') {
-    onProgress?.('已识别为「定制记录本」，正在构思结构与样式...');
-    const plan = await runArchitectAgent(repo, cleanText, onProgress);
+    onProgress?.('正在构思记录本结构与样式...');
+    const plan = await runArchitectAgent(repo, cleanText, onProgress, {
+      targetLibrarySlug: params.targetLibrarySlug,
+    });
     return { intent: 'architect', plan };
   }
 
   if (intent === 'capture') {
-    onProgress?.('已识别为「记一笔」，正在整理记录草稿...');
+    onProgress?.('正在整理记录草稿...');
     const capture = await runOmniCaptureAgent(repo, params, onProgress);
     return { intent: 'capture', capture };
   }
 
-  onProgress?.('已识别为「问数据」，正在核对你的本地记录...');
-  const answer = await runAnalystAgent(repo, cleanText, onProgress);
+  onProgress?.('正在核对你的本地记录...');
+  const answer = await runAnalystAgent(repo, cleanText, onProgress, {
+    targetLibrarySlug: params.targetLibrarySlug,
+    entryContext: params.entryContext,
+  });
   return { intent: 'analyst', answer };
 }
 
@@ -132,12 +176,14 @@ export async function runUnifiedAssistant(
 export async function runArchitectAgent(
   repo: OmniRepository,
   userPrompt: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  context?: { targetLibrarySlug?: string }
 ): Promise<ArchitectPlan> {
   const prefs = await getAiPreferences();
   onProgress?.('正在构思记录本结构与样式...');
 
-  const existingLibs = repo.listLibraries().map((l) => ({
+  const allLibs = repo.listLibraries();
+  const existingLibs = allLibs.map((l) => ({
     slug: l.slug,
     name: l.name,
     description: l.description,
@@ -166,7 +212,14 @@ ${schemaSpec}
    - 将附属子表设置 parentLibrarySlug 指向主表 slug，并默认设 showOnHome: false（收纳进主表内部，保持首页清爽），同时在附属子表中定义指向主表的 type="relation" 字段（allowMultiple: false）。
    - 对于书摘、随感、复盘、长备注等段落文本字段，设置 type="text" 且 multiline: true。`;
 
-  const userMessage = `当前已有库结构 JSON：\n${JSON.stringify(existingLibs)}\n\n用户的建模/修改需求：\n${userPrompt}`;
+  const focusLib = context?.targetLibrarySlug
+    ? allLibs.find((l) => l.slug === context.targetLibrarySlug)
+    : undefined;
+  const focusBlock = focusLib
+    ? `\n\n[当前所在记录本]：用户正停留在「${focusLib.icon} ${focusLib.name}」(slug: "${focusLib.slug}")。若用户未明确指定其他记录本（例如说“新增一个字段/加个公式/建个附属记录本”），请默认围绕 "${focusLib.slug}" 进行增量演进并完整保留其原有字段。`
+    : '';
+
+  const userMessage = `当前已有库结构 JSON：\n${JSON.stringify(existingLibs)}${focusBlock}\n\n用户的建模/修改需求：\n${userPrompt}`;
 
   const { message } = await callDeepSeekChat({
     thinking: true,
@@ -191,6 +244,7 @@ export async function runOmniCaptureAgent(
     text: string;
     imageBase64DataUrl?: string;
     useWebSearch?: boolean;
+    scene?: AssistantScene;
     targetLibrarySlug?: string;
     entryContext?: CaptureEntryContext;
   },
@@ -231,16 +285,50 @@ ${schemaSpec}
 
   let contextBlock = '';
   if (params.entryContext) {
+    const allLibs = repo.listLibraries();
     const childLibs = repo.listChildLibraries(params.entryContext.librarySlug);
+    const childSlugs = new Set(childLibs.map((c) => c.slug));
+    const reverseRelLibs = allLibs.filter(
+      (l) =>
+        !childSlugs.has(l.slug) &&
+        l.fields.some(
+          (f) =>
+            f.type === 'relation' &&
+            f.relationConfig?.targetLibrarySlug === params.entryContext!.librarySlug
+        )
+    );
+
+    const activeChildHint = params.entryContext.activeChildSlug
+      ? `用户当前正停留在附属子库「${params.entryContext.activeChildName ?? params.entryContext.activeChildSlug}」(slug: "${params.entryContext.activeChildSlug}") 标签页，请优先归入 "${params.entryContext.activeChildSlug}" 并在对应关联字段自动填入 ["${params.entryContext.entryId}"]！\n`
+      : '';
     const childHint =
       childLibs.length > 0
-        ? `该记录所属主库关联的附属子库有：${childLibs
+        ? `该记录所属主库的附属子库有：${childLibs
             .map((c) => `${c.icon} ${c.name}(slug: "${c.slug}")`)
             .join('、')}。若用户输入是在记录该主体的进度打卡、书摘笔记或附属流水，请优先归入对应附属子库，并在关联字段自动填入 ["${params.entryContext.entryId}"]！\n`
         : '';
-    contextBlock = `[当前详情页绑定记录]：用户正停留在「${params.entryContext.libraryIcon} ${params.entryContext.libraryName}」(slug: ${params.entryContext.librarySlug}) 的记录「${params.entryContext.title}」(ID: "${params.entryContext.entryId}")。\n${childHint}`;
+    const reverseHint =
+      reverseRelLibs.length > 0
+        ? `以下记录本可通过关联字段指向当前主库：${reverseRelLibs
+            .map((r) => {
+              const rf = r.fields.find(
+                (f) =>
+                  f.type === 'relation' &&
+                  f.relationConfig?.targetLibrarySlug === params.entryContext!.librarySlug
+              );
+              return `${r.icon} ${r.name}(slug: "${r.slug}", 关联字段: "${rf?.key ?? ''}")`;
+            })
+            .join('、')}。若用户输入属于这些关联流水（如配件账单、服药打卡等），请自动在对应关联字段填入 ["${params.entryContext.entryId}"]！\n`
+        : '';
+    contextBlock = `[当前详情页绑定记录]：用户正停留在「${params.entryContext.libraryIcon} ${params.entryContext.libraryName}」(slug: ${params.entryContext.librarySlug}) 的记录「${params.entryContext.title}」(ID: "${params.entryContext.entryId}")。\n${activeChildHint}${childHint}${reverseHint}`;
   } else if (params.targetLibrarySlug) {
-    contextBlock = `用户指定优先归入库: ${params.targetLibrarySlug}\n`;
+    const targetLib = repo.getLibraryBySlug(params.targetLibrarySlug);
+    const childLibs = repo.listChildLibraries(params.targetLibrarySlug);
+    const childSuffix =
+      childLibs.length > 0
+        ? `（或其附属子库：${childLibs.map((c) => `${c.name}[${c.slug}]`).join('、')}）`
+        : '';
+    contextBlock = `[当前所在记录本]：用户正停留在「${targetLib?.name ?? params.targetLibrarySlug}」(slug: "${params.targetLibrarySlug}")${childSuffix}，若语义匹配请优先归入该库。\n`;
   }
 
   const promptBody = `今天日期（本地时区）: ${todayStr}\n\n${catalog}\n\n${contextBlock}用户输入: ${params.text || '（请识别图片内容并提取入库记录）'}${webContext}`;
@@ -275,7 +363,11 @@ ${schemaSpec}
 export async function runAnalystAgent(
   repo: OmniRepository,
   question: string,
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string) => void,
+  context?: {
+    targetLibrarySlug?: string;
+    entryContext?: CaptureEntryContext;
+  }
 ): Promise<AnalystAnswer> {
   const todayStr = formatLocalDate();
   const catalog = repo.getAiCatalogPrompt(false);
@@ -294,12 +386,25 @@ export async function runAnalystAgent(
 ${answerSchemaSpec}
 4. 如果该问题适合用数字卡（kpi_number）、柱状图（bar）、折线图（line）或饼图（pie）展示，请一并填写 \`suggestedWidget\`，其 \`readonlySql\` 必须是你刚刚通过工具验证成功的 SQL，且 \`xKey\`/\`yKey\` 与 SQL 返回别名完全一致！`;
 
+  let focusContext = '';
+  if (context?.entryContext) {
+    focusContext = `\n\n[当前详情页聚焦记录]：用户正查看「${context.entryContext.libraryIcon} ${context.entryContext.libraryName}」(逻辑视图 \`v_${context.entryContext.librarySlug}\`) 中的单条记录「${context.entryContext.title}」(entry_id = '${context.entryContext.entryId}')。若用户提问未指明范围，请优先围绕该 entry_id 及其在 \`entry_relations\` 中关联的记录进行分析。`;
+  } else if (context?.targetLibrarySlug) {
+    const lib = repo.getLibraryBySlug(context.targetLibrarySlug);
+    const childLibs = repo.listChildLibraries(context.targetLibrarySlug);
+    const childDesc =
+      childLibs.length > 0
+        ? `（关联附属子表视图：${childLibs.map((c) => `\`v_${c.slug}\``).join('、')}）`
+        : '';
+    focusContext = `\n\n[当前聚焦记录本]：用户正停留在「${lib ? `${lib.icon} ${lib.name}` : context.targetLibrarySlug}」(逻辑视图 \`v_${context.targetLibrarySlug}\`)${childDesc}。若用户未指定其他数据表，请默认分析该记录本及其关联数据，并优先产出适合固定到该记录本统计页的图表。`;
+  }
+
   const { finalContent } = await runDeepSeekToolLoop({
     reasoningEffort: 'high',
     onProgress,
     initialMessages: [
       { role: 'system', content: `${systemPrompt}\n\n${catalog}` },
-      { role: 'user', content: `今天日期（本地时区）：${todayStr}\n\n${question}` },
+      { role: 'user', content: `今天日期（本地时区）：${todayStr}${focusContext}\n\n${question}` },
     ],
     tools: [
       {

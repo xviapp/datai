@@ -81,6 +81,13 @@ export default function StatsScreen() {
   ];
 
   const safeActiveIndex = Math.min(activeIndex, Math.max(0, tabs.length - 1));
+  const currentTab = tabs[safeActiveIndex];
+  const activeStatsLibSlug =
+    currentTab?.kind === 'library' ? currentTab.library.slug : undefined;
+  const activeStatsTone =
+    currentTab?.kind === 'library'
+      ? (ToneMap[currentTab.library.color] ?? ToneMap.teal)
+      : ToneMap.teal;
 
   const scrollChipIntoView = (idx: number) => {
     const layout = chipLayoutsRef.current[idx];
@@ -283,7 +290,7 @@ export default function StatsScreen() {
                   </Text>
                   {allWidgets.length === 0 ? (
                     <Pressable
-                      onPress={() => openOmniCapture(undefined, 'text')}
+                      onPress={() => openOmniCapture(activeStatsLibSlug, 'text', undefined, 'stats')}
                       style={styles.emptyCtaBtn}
                     >
                       <Text style={styles.emptyCtaText}>定制第一张统计图</Text>
@@ -366,17 +373,18 @@ export default function StatsScreen() {
         })}
       </ScrollView>
 
-      {/* 右下角统一悬浮主按钮（可随时提问统计或加图） */}
+      {/* 右下角数据分析师入口（自动聚焦当前总览或对应记录本） */}
       <Pressable
         accessibilityLabel="问数据或定制统计"
-        onPress={() => openOmniCapture(undefined, 'text')}
-        onLongPress={() => openOmniCapture(undefined, 'voice')}
+        onPress={() => openOmniCapture(activeStatsLibSlug, 'text', undefined, 'stats')}
+        onLongPress={() => openOmniCapture(activeStatsLibSlug, 'voice', undefined, 'stats')}
         style={({ pressed }) => [
           styles.statsFab,
+          { backgroundColor: activeStatsTone.solid },
           pressed && { opacity: 0.9, transform: [{ scale: 0.94 }] },
         ]}
       >
-        <Feather name="message-circle" size={24} color={Palette.inkInverse} />
+        <Feather name="bar-chart-2" size={23} color={Palette.inkInverse} />
       </Pressable>
     </View>
   );

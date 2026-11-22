@@ -1,5 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import type { CaptureEntryContext } from '@/ai/agents';
+import type { AssistantScene, CaptureEntryContext } from '@/ai/agents';
 import { getDeepSeekApiKey } from '@/ai/settings-store';
 import { getPlatformSqlDriver } from '@/db/driver';
 import { OmniRepository, type LibraryRecord } from '@/db/repository';
@@ -17,6 +17,7 @@ interface OmniContextValue {
   hasApiKey: boolean;
   refreshApiKeyState: () => Promise<void>;
   omniModalVisible: boolean;
+  omniScene: AssistantScene;
   omniTargetSlug?: string;
   omniEntryContext?: CaptureEntryContext;
   clearOmniEntryContext: () => void;
@@ -24,7 +25,8 @@ interface OmniContextValue {
   openOmniCapture: (
     targetSlug?: string,
     initialAction?: OmniLaunchAction,
-    entryContext?: CaptureEntryContext
+    entryContext?: CaptureEntryContext,
+    scene?: AssistantScene
   ) => void;
   closeOmniCapture: () => void;
 }
@@ -40,6 +42,7 @@ const OmniContext = createContext<OmniContextValue>({
   hasApiKey: false,
   refreshApiKeyState: async () => {},
   omniModalVisible: false,
+  omniScene: 'home',
   omniTargetSlug: undefined,
   omniEntryContext: undefined,
   clearOmniEntryContext: () => {},
@@ -57,6 +60,7 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
   const [revision, setRevision] = useState(0);
   const [hasApiKey, setHasApiKey] = useState(false);
   const [omniModalVisible, setOmniModalVisible] = useState(false);
+  const [omniScene, setOmniScene] = useState<AssistantScene>('home');
   const [omniTargetSlug, setOmniTargetSlug] = useState<string | undefined>(undefined);
   const [omniEntryContext, setOmniEntryContext] = useState<CaptureEntryContext | undefined>(
     undefined
@@ -108,8 +112,12 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
     (
       targetSlug?: string,
       initialAction: OmniLaunchAction = 'text',
-      entryContext?: CaptureEntryContext
+      entryContext?: CaptureEntryContext,
+      scene?: AssistantScene
     ) => {
+      const resolvedScene: AssistantScene =
+        scene ?? (entryContext ? 'entry' : targetSlug ? 'library' : 'home');
+      setOmniScene(resolvedScene);
       setOmniTargetSlug(targetSlug);
       setOmniEntryContext(entryContext);
       setOmniInitialAction(initialAction);
@@ -120,7 +128,8 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
 
   const clearOmniEntryContext = useCallback(() => {
     setOmniEntryContext(undefined);
-  }, []);
+    setOmniScene((prev) => (prev === 'entry' ? (omniTargetSlug ? 'library' : 'home') : prev));
+  }, [omniTargetSlug]);
 
   const closeOmniCapture = useCallback(() => {
     setOmniModalVisible(false);
@@ -140,6 +149,7 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
       hasApiKey,
       refreshApiKeyState,
       omniModalVisible,
+      omniScene,
       omniTargetSlug,
       omniEntryContext,
       clearOmniEntryContext,
@@ -158,6 +168,7 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
       hasApiKey,
       refreshApiKeyState,
       omniModalVisible,
+      omniScene,
       omniTargetSlug,
       omniEntryContext,
       clearOmniEntryContext,

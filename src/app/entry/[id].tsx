@@ -253,6 +253,9 @@ export default function EntryDetailScreen() {
     librarySlug: library.slug,
     libraryName: library.name,
     libraryIcon: library.icon,
+    activeTab: activeTabKey,
+    activeChildSlug: activeChildTab?.section.childLibrary.slug,
+    activeChildName: activeChildTab?.section.childLibrary.name,
   };
 
   const renderChildSection = (section: ChildLibrarySection) => {
@@ -927,11 +930,11 @@ export default function EntryDetailScreen() {
           : null}
       </ScrollView>
 
-      {/* 右下角悬浮随手说：自动携带当前主记录上下文（点击打字/拍书页，长按语音） */}
+      {/* 右下角随行助理：自动携带当前主记录与所在 Tab 上下文 */}
       <Pressable
-        accessibilityLabel="针对当前记录随手说"
-        onPress={() => openOmniCapture(library.slug, 'text', entryAiContext)}
-        onLongPress={() => openOmniCapture(library.slug, 'voice', entryAiContext)}
+        accessibilityLabel="针对当前记录使用随行助理"
+        onPress={() => openOmniCapture(library.slug, 'text', entryAiContext, 'entry')}
+        onLongPress={() => openOmniCapture(library.slug, 'voice', entryAiContext, 'entry')}
         style={({ pressed }) => [
           styles.fabBtn,
           { bottom: Math.max(insets.bottom, 16) + 8, backgroundColor: tone.solid },
