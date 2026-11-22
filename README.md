@@ -1,56 +1,33 @@
-# Welcome to your Expo app 👋
+# 万象记 OmniVault — AI 原生个人全能记录库
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+类似 Memento Database 的 **纯单机离线优先（Local-First）** 个人全能数据库手机应用，采用 **Expo SDK 58 + TypeScript + `expo-sqlite` + `Zod v4` + `deepseek-flash` (V4.1 全家桶 API)** 构建。
 
-## Get started
+## 核心特性
 
-1. Install dependencies
+1. **自定义数据模型与声明式显示样式（Schema & View DSL）**
+   - 物理表采用 `SQLite (WAL + JSON1)` 存储，增删改字段零 `ALTER TABLE` 迁移风险。
+   - 每次修改库结构自动同步生成原生逻辑 SQL 视图 `v_<slug>`。
+   - 支持 **卡片流（含槽位映射与条件预警高亮）、海报画廊、交互日历、离线统计看板** 4 种视图。
+2. **跨表双向引用、Rollup 汇总与零 `eval` 公式引擎**
+   - 独立关系边表 `entry_relations` 支持正向引用与反向反链（Backlinks）穿梭。
+   - 支持正向与 `reverse:<slug>.<fieldKey>` 反向跨表 `SUM / AVG / COUNT / MIN / MAX` 汇总。
+   - 内置递归下降安全公式解析器（如 `DAYS_SINCE`、`DAYS_UNTIL`、`ROUND`、`IF`）。
+3. **DeepSeek V4.1 (`deepseek-flash`) 全家桶赋能（纯单机 BYOK）**
+   - **AI 建筑师**：自然语言创建或增量修改多表关联结构、视图槽位与统计图表，带 Diff 预览确认与一键时光机回滚（Snapshot Undo）。
+   - **AI 全局万能快记（Omni-Bar）**：支持文字、拍照小票/封面（原生视觉）、16kHz WAV 语音转写（`/v1/tools/asr`）、链接联网补全（`deepseek_read_url` / `deepseek_web_search`），支持 `@prev:0` 跨库原子入库。
+   - **AI 数据分析师**：挂载 `PRAGMA query_only = ON` 本地只读 SQLite 工具多轮验证真实结果，杜绝算术幻觉，支持将生成的图表一键钉到首页看板。
 
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **src/app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## 本地运行与测试
 
 ```bash
-npm run reset-project
+# 1. 运行核心 SQLite + 公式 + 双向关联引擎自动化测试与类型检查
+npm run typecheck
+npm run test:engine
+
+# 2. 启动 Web 实时预览（自动使用 WASM SQLite 持久化驱动）
+npm run web
+
+# 3. 编译 Android / iOS 纯离线原生安装包（使用 expo-sqlite JSI 双连接引擎）
+npx expo run:android
+npx expo run:ios
 ```
-
-This command will move the starter code to the **example** directory and create a blank **src/app** directory where you can start developing.
-
-### Other setup steps
-
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
