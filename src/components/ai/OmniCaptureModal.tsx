@@ -1,9 +1,9 @@
 import { Feather } from '@expo/vector-icons';
-import { AudioModule, RecordingPresets, useAudioRecorder } from 'expo-audio';
+import { AudioModule, useAudioStream } from 'expo-audio';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -18,16 +18,44 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { runOmniCaptureAgent } from '@/ai/agents';
+import {
+  runUnifiedAssistant,
+  type AssistantIntent,
+  type UnifiedAssistantResult,
+} from '@/ai/agents';
 import { transcribeAudioWithDeepSeek } from '@/ai/deepseek-client';
+import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
-import type { DraftEntryItem } from '@/schema/view-dsl';
+import { createId } from '@/engine/id';
+import type { FieldType } from '@/schema/field-defs';
+import type { DashboardWidget, DraftEntryItem } from '@/schema/view-dsl';
+
+const FIELD_TYPE_NAMES: Record<FieldType, string> = {
+  text: '文本',
+  number: '数字',
+  currency: '金额',
+  date: '日期',
+  select: '单选',
+  multi_select: '多选',
+  rating: '评分',
+  checkbox: '开关',
+  image: '图片',
+  relation: '关联',
+  rollup: '自动汇总',
+  formula: '自动计算',
+};
+
+const INTENT_LABELS: Record<AssistantIntent, string> = {
+  capture: '记一笔',
+  architect: '定制记录本',
+  analyst: '问数据',
+};
 
 const QUICK_EXAMPLES = [
-  '刚用招商信用卡给 Sony 微单买了一块滤镜花了 328 元',
-  '今天看完了电影《星际穿越》，评分 5 星，诺兰硬科幻神作',
-  '鼻炎犯了刚吃了 1 片氯雷他定，今天状态 4 分',
+  { tag: '记一笔', text: '刚用招商信用卡给 Sony 微单买了一块滤镜花了 328 元' },
+  { tag: '问数据', text: '算一下每件数码装备加上后续配件账单，总共花了多少钱？' },
+  { tag: '建记录本', text: '帮我建一套「宠物档案」和「疫苗记录」，自动统计总医疗花费' },
 ];
 
 export function OmniCaptureModal() {
@@ -39,6 +67,7 @@ export function OmniCaptureModal() {
     hasApiKey,
     omniModalVisible,
     omniTargetSlug,
+    omniInitialAction,
     closeOmniCapture,
   } = useOmni();
 
@@ -47,36 +76,48 @@ export function OmniCaptureModal() {
   const [useWebSearch, setUseWebSearch] = useState(false);
   const [loadingStep, setLoadingStep] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [assistantNote, setAssistantNote] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [result, setResult] = useState<UnifiedAssistantResult | null>(null);
   const [drafts, setDrafts] = useState<DraftEntryItem[]>([]);
   const [isRecording, setIsRecording] = useState(false);
+  const didTriggerActionRef = useRef(false);
 
-  // Native WAV 16kHz 16-bit PCM preset compliant with DeepSeek POST /v1/tools/asr
-  const recorder = useAudioRecorder({
-    ...RecordingPresets.HIGH_QUALITY,
-    extension: '.wav',
+  // 原生 PCM 音频流直录标准 16kHz 16-bit 单声道 WAV，兼容 DeepSeek /v1/tools/asr
+  const { stream: audioStream } = useAudioStream({
     sampleRate: 16000,
-    numberOfChannels: 1,
-    ios: {
-      ...RecordingPresets.HIGH_QUALITY.ios,
-      extension: '.wav',
-      outputFormat: 'lpcm',
-      audioQuality: 127,
-      sampleRate: 16000,
-      linearPCMBitDepth: 16,
-      linearPCMIsBigEndian: false,
-      linearPCMIsFloat: false,
-    },
+    channels: 1,
+    encoding: 'int16',
   });
 
   useEffect(() => {
     if (!omniModalVisible) {
+      didTriggerActionRef.current = false;
       setErrorMsg(null);
+      setSuccessMsg(null);
       setLoadingStep(null);
+      setResult(null);
       setDrafts([]);
-      setAssistantNote(null);
+      if (isRecording) {
+        audioStream?.stop();
+        setIsRecording(false);
+      }
+      return;
     }
-  }, [omniModalVisible]);
+
+    if (didTriggerActionRef.current || omniInitialAction === 'text') return;
+    didTriggerActionRef.current = true;
+
+    const timer = setTimeout(() => {
+      if (omniInitialAction === 'camera') {
+        handlePickPhoto(Platform.OS !== 'web');
+      } else if (omniInitialAction === 'voice') {
+        handleStartVoice();
+      }
+    }, 180);
+
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [omniModalVisible, omniInitialAction]);
 
   const handlePickPhoto = async (fromCamera: boolean) => {
     try {
@@ -104,48 +145,69 @@ export function OmniCaptureModal() {
     }
   };
 
-  const handleToggleVoice = async () => {
-    if (Platform.OS === 'web') {
+  const handleStartVoice = async () => {
+    if (Platform.OS === 'web' || !audioStream) {
       setErrorMsg('网页预览暂不支持录音，请直接打字或选择图片（手机端支持语音输入）');
       return;
     }
     try {
-      if (!isRecording) {
-        const perm = await AudioModule.requestRecordingPermissionsAsync();
-        if (!perm.granted) {
-          setErrorMsg('需要麦克风权限才能使用语音记录');
-          return;
-        }
-        await recorder.prepareToRecordAsync();
-        recorder.record();
-        setIsRecording(true);
-      } else {
-        await recorder.stop();
-        setIsRecording(false);
-        if (recorder.uri) {
-          setLoadingStep('正在听写语音...');
-          const text = await transcribeAudioWithDeepSeek(recorder.uri);
-          setInputText((prev) => (prev ? `${prev} ${text}` : text));
-          setLoadingStep(null);
-        }
+      setErrorMsg(null);
+      const perm = await AudioModule.requestRecordingPermissionsAsync();
+      if (!perm.granted) {
+        setErrorMsg('需要麦克风权限才能使用语音记录');
+        return;
       }
+      await audioStream.start();
+      await audioStream.startFileRecordingAsync({ format: 'wav', directory: 'cache' });
+      setIsRecording(true);
     } catch (err) {
+      audioStream.stop();
+      setIsRecording(false);
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleToggleVoice = async () => {
+    if (!isRecording) {
+      await handleStartVoice();
+      return;
+    }
+    if (!audioStream) return;
+    try {
+      const rec = await audioStream.stopFileRecordingAsync();
+      audioStream.stop();
+      setIsRecording(false);
+
+      if (!rec.uri || rec.size <= 44) {
+        setErrorMsg('录音时间太短，请说完后再点停止');
+        return;
+      }
+
+      setLoadingStep('正在听写语音...');
+      const text = await transcribeAudioWithDeepSeek(rec.uri, 'speech.wav');
+      setInputText((prev) => (prev ? `${prev} ${text}` : text));
+      setLoadingStep(null);
+    } catch (err) {
+      audioStream.stop();
       setIsRecording(false);
       setLoadingStep(null);
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   };
 
-  const handleParseWithAi = async () => {
+  const handleSend = async (forceIntent?: AssistantIntent) => {
     if (!repo) return;
     if (!inputText.trim() && !imageDataUrl) {
-      setErrorMsg('请输入一句话描述，或上传一张小票/封面照片');
+      setErrorMsg('请输入一句话，或先录音、拍张照片');
       return;
     }
     try {
       setErrorMsg(null);
+      setSuccessMsg(null);
+      setResult(null);
       setDrafts([]);
-      const result = await runOmniCaptureAgent(
+
+      const outcome = await runUnifiedAssistant(
         repo,
         {
           text: inputText,
@@ -153,10 +215,14 @@ export function OmniCaptureModal() {
           useWebSearch,
           targetLibrarySlug: omniTargetSlug,
         },
-        (msg) => setLoadingStep(msg)
+        (msg) => setLoadingStep(msg),
+        forceIntent
       );
-      setAssistantNote(result.assistantNote);
-      setDrafts(result.drafts);
+
+      setResult(outcome);
+      if (outcome.intent === 'capture') {
+        setDrafts(outcome.capture.drafts);
+      }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     } finally {
@@ -167,11 +233,40 @@ export function OmniCaptureModal() {
   const handleCommitDrafts = () => {
     if (!repo || drafts.length === 0) return;
     try {
-      repo.commitOmniDrafts(drafts, `AI 快记：${inputText.slice(0, 24) || '图片识别入库'}`);
+      repo.commitOmniDrafts(drafts, `随手记：${inputText.slice(0, 24) || '图片识别'}`);
       setInputText('');
       setImageDataUrl(undefined);
       setDrafts([]);
+      setResult(null);
       closeOmniCapture();
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleConfirmPlan = () => {
+    if (!repo || result?.intent !== 'architect') return;
+    try {
+      const plan = result.plan;
+      repo.applyArchitectPlan(plan);
+      const firstSlug = plan.libraries[0]?.slug;
+      setInputText('');
+      setImageDataUrl(undefined);
+      setResult(null);
+      closeOmniCapture();
+      if (firstSlug) {
+        router.push(`/library/${firstSlug}`);
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handlePinWidget = (w: DashboardWidget) => {
+    if (!repo) return;
+    try {
+      repo.saveDashboardWidget({ ...w, id: createId('wdg') }, null);
+      setSuccessMsg(`已将「${w.title}」固定到统计总览！`);
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
@@ -182,6 +277,30 @@ export function OmniCaptureModal() {
   };
 
   const libMap = new Map(libraries.map((l) => [l.slug, l]));
+  const existingSlugs = new Set(libraries.map((l) => l.slug));
+
+  const renderFallbackBar = (currentIntent: AssistantIntent) => {
+    const others = (['capture', 'architect', 'analyst'] as AssistantIntent[]).filter(
+      (i) => i !== currentIntent
+    );
+    return (
+      <View style={styles.fallbackBar}>
+        <Text style={styles.fallbackHint}>按「{INTENT_LABELS[currentIntent]}」处理</Text>
+        <View style={styles.fallbackBtns}>
+          {others.map((alt) => (
+            <Pressable
+              key={alt}
+              disabled={Boolean(loadingStep)}
+              onPress={() => handleSend(alt)}
+              style={styles.fallbackChip}
+            >
+              <Text style={styles.fallbackChipText}>改「{INTENT_LABELS[alt]}」</Text>
+            </Pressable>
+          ))}
+        </View>
+      </View>
+    );
+  };
 
   return (
     <Modal
@@ -197,9 +316,9 @@ export function OmniCaptureModal() {
         <View style={styles.sheet}>
           <View style={styles.header}>
             <View style={styles.headerTitleRow}>
-              <Feather name="edit-3" size={18} color={Palette.brand} />
+              <Feather name="message-circle" size={18} color={Palette.brand} />
               <Text style={styles.headerTitle}>
-                随手记{omniTargetSlug ? ` · ${libMap.get(omniTargetSlug)?.name ?? ''}` : ''}
+                随手说{omniTargetSlug ? ` · ${libMap.get(omniTargetSlug)?.name ?? ''}` : ''}
               </Text>
             </View>
             <Pressable onPress={closeOmniCapture} style={styles.closeBtn}>
@@ -222,7 +341,7 @@ export function OmniCaptureModal() {
               >
                 <Feather name="key" size={15} color={Palette.warning} />
                 <Text style={styles.keyNoticeText}>
-                  还未填写 API Key，点这里去「设置」连接后就能自动整理记录 →
+                  还未填写 API Key，点这里去「设置」连接后即可使用 →
                 </Text>
               </Pressable>
             ) : null}
@@ -231,12 +350,12 @@ export function OmniCaptureModal() {
               value={inputText}
               onChangeText={setInputText}
               multiline
-              placeholder="随口记一句、粘贴链接，或拍张小票，会自动帮你归类整理..."
+              placeholder="记一笔、建记录本、查开销、画图表或拍张小票，直接说就行..."
               placeholderTextColor={Palette.inkMuted}
               style={styles.omniInput}
             />
 
-            {/* 工具条 */}
+            {/* 多模态工具条 */}
             <View style={styles.toolsRow}>
               <Pressable onPress={() => handlePickPhoto(false)} style={styles.toolChip}>
                 <Feather name="image" size={15} color={Palette.brand} />
@@ -275,21 +394,22 @@ export function OmniCaptureModal() {
             {imageDataUrl ? (
               <View style={styles.attachedImgRow}>
                 <Image source={{ uri: imageDataUrl }} style={styles.attachedThumb} contentFit="cover" />
-                <Text style={styles.attachedHint}>已选好图片，提交后会自动识别内容</Text>
+                <Text style={styles.attachedHint}>已选好图片，发送后自动识别内容</Text>
                 <Pressable onPress={() => setImageDataUrl(undefined)}>
                   <Feather name="trash-2" size={16} color={Palette.danger} />
                 </Pressable>
               </View>
             ) : null}
 
-            {/* 快捷示例 */}
-            {drafts.length === 0 ? (
+            {/* 快捷示例（无结果时展示） */}
+            {!result && !loadingStep ? (
               <View style={styles.examplesBox}>
-                <Text style={styles.examplesLabel}>试着记一句：</Text>
+                <Text style={styles.examplesLabel}>试试这样说：</Text>
                 {QUICK_EXAMPLES.map((ex, i) => (
-                  <Pressable key={i} onPress={() => setInputText(ex)} style={styles.examplePill}>
+                  <Pressable key={i} onPress={() => setInputText(ex.text)} style={styles.examplePill}>
+                    <Text style={styles.exampleTag}>{ex.tag}</Text>
                     <Text style={styles.exampleText} numberOfLines={1}>
-                      “{ex}”
+                      {ex.text}
                     </Text>
                   </Pressable>
                 ))}
@@ -302,6 +422,13 @@ export function OmniCaptureModal() {
               </View>
             ) : null}
 
+            {successMsg ? (
+              <View style={styles.successBanner}>
+                <Feather name="check-circle" size={15} color={Palette.success} />
+                <Text style={styles.successText}>{successMsg}</Text>
+              </View>
+            ) : null}
+
             {loadingStep ? (
               <View style={styles.loadingCard}>
                 <ActivityIndicator size="small" color={Palette.brand} />
@@ -309,14 +436,16 @@ export function OmniCaptureModal() {
               </View>
             ) : null}
 
-            {/* 草稿预览确认卡 */}
-            {drafts.length > 0 ? (
-              <View style={styles.draftsSection}>
-                {assistantNote ? <Text style={styles.assistantNote}>{assistantNote}</Text> : null}
+            {/* 结果 1：记一笔草稿 */}
+            {result?.intent === 'capture' ? (
+              <View style={styles.resultSection}>
+                {result.capture.assistantNote ? (
+                  <Text style={styles.assistantNote}>{result.capture.assistantNote}</Text>
+                ) : null}
                 {drafts.map((d, idx) => {
                   const targetLib = libMap.get(d.librarySlug);
                   return (
-                    <View key={idx} style={styles.draftCard}>
+                    <View key={idx} style={styles.resultCard}>
                       <View style={styles.draftHeader}>
                         <Text style={styles.draftLibBadge}>
                           {targetLib ? `${targetLib.icon} ${targetLib.name}` : d.librarySlug}
@@ -325,7 +454,7 @@ export function OmniCaptureModal() {
                           <Feather name="x" size={16} color={Palette.inkMuted} />
                         </Pressable>
                       </View>
-                      <Text style={styles.draftReason}>{d.reason}</Text>
+                      {d.reason ? <Text style={styles.draftReason}>{d.reason}</Text> : null}
                       <View style={styles.draftFieldsGrid}>
                         {Object.entries(d.data).map(([k, v]) => {
                           const fDef = targetLib?.fields.find((f) => f.key === k);
@@ -342,29 +471,131 @@ export function OmniCaptureModal() {
                     </View>
                   );
                 })}
+                {renderFallbackBar('capture')}
+              </View>
+            ) : null}
+
+            {/* 结果 2：定制记录本方案预览 */}
+            {result?.intent === 'architect' ? (
+              <View style={styles.resultSection}>
+                <Text style={styles.sectionTitle}>方案预览（确认前不会改动数据）</Text>
+                <Text style={styles.summaryText}>{result.plan.summary}</Text>
+                {result.plan.libraries.map((bp) => {
+                  const isUpdate = existingSlugs.has(bp.slug);
+                  return (
+                    <View key={bp.slug} style={styles.resultCard}>
+                      <View style={styles.draftHeader}>
+                        <Text style={styles.draftLibBadge}>
+                          {bp.icon} {bp.name}
+                        </Text>
+                        <View
+                          style={[
+                            styles.opBadge,
+                            { backgroundColor: isUpdate ? Palette.infoSoft : Palette.successSoft },
+                          ]}
+                        >
+                          <Text
+                            style={{
+                              fontSize: 11,
+                              fontWeight: '700',
+                              color: isUpdate ? Palette.info : Palette.success,
+                            }}
+                          >
+                            {isUpdate ? '更新' : '新建'}
+                          </Text>
+                        </View>
+                      </View>
+                      <View style={styles.fieldsWrap}>
+                        {bp.fields.map((f) => (
+                          <View key={f.key} style={styles.fieldChip}>
+                            <Text style={styles.fieldChipText}>
+                              {f.label} · {FIELD_TYPE_NAMES[f.type] ?? f.type}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  );
+                })}
+                {result.plan.dashboardWidgets.length > 0 ? (
+                  <Text style={styles.assistantNote}>
+                    同时会在统计页添加 {result.plan.dashboardWidgets.length} 张配套图表
+                  </Text>
+                ) : null}
+                {renderFallbackBar('architect')}
+              </View>
+            ) : null}
+
+            {/* 结果 3：问数据统计结论与图表 */}
+            {result?.intent === 'analyst' ? (
+              <View style={styles.resultSection}>
+                <View style={styles.resultCard}>
+                  <View style={styles.insightHeader}>
+                    <Feather name="check-circle" size={15} color={Palette.brand} />
+                    <Text style={styles.insightHeaderTitle}>统计结果</Text>
+                  </View>
+                  <Text style={styles.insightBody}>{result.answer.markdownInsight}</Text>
+                </View>
+
+                {result.answer.suggestedWidget ? (
+                  <SqlWidgetCard
+                    widget={result.answer.suggestedWidget}
+                    onPin={handlePinWidget}
+                  />
+                ) : null}
+                {renderFallbackBar('analyst')}
               </View>
             ) : null}
           </ScrollView>
 
           <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
-            {drafts.length > 0 ? (
+            {result?.intent === 'capture' && drafts.length > 0 ? (
               <>
-                <Pressable onPress={() => setDrafts([])} style={styles.secondaryBtn}>
-                  <Text style={styles.secondaryBtnText}>重新整理</Text>
+                <Pressable onPress={() => setResult(null)} style={styles.secondaryBtn}>
+                  <Text style={styles.secondaryBtnText}>重新来</Text>
                 </Pressable>
                 <Pressable onPress={handleCommitDrafts} style={styles.primaryBtn}>
                   <Feather name="check" size={16} color={Palette.inkInverse} />
                   <Text style={styles.primaryBtnText}>保存记录 ({drafts.length})</Text>
                 </Pressable>
               </>
+            ) : result?.intent === 'architect' ? (
+              <>
+                <Pressable onPress={() => setResult(null)} style={styles.secondaryBtn}>
+                  <Text style={styles.secondaryBtnText}>取消</Text>
+                </Pressable>
+                <Pressable onPress={handleConfirmPlan} style={styles.primaryBtn}>
+                  <Feather name="check" size={16} color={Palette.inkInverse} />
+                  <Text style={styles.primaryBtnText}>确认应用</Text>
+                </Pressable>
+              </>
+            ) : result?.intent === 'analyst' ? (
+              <>
+                <Pressable
+                  onPress={() => {
+                    setResult(null);
+                    setSuccessMsg(null);
+                  }}
+                  style={styles.secondaryBtn}
+                >
+                  <Text style={styles.secondaryBtnText}>继续问</Text>
+                </Pressable>
+                <Pressable onPress={closeOmniCapture} style={styles.primaryBtn}>
+                  <Text style={styles.primaryBtnText}>完成</Text>
+                </Pressable>
+              </>
             ) : (
               <Pressable
-                disabled={Boolean(loadingStep)}
-                onPress={handleParseWithAi}
-                style={[styles.primaryBtn, { flex: 1 }, Boolean(loadingStep) && { opacity: 0.5 }]}
+                disabled={Boolean(loadingStep) || isRecording}
+                onPress={() => handleSend()}
+                style={[
+                  styles.primaryBtn,
+                  { flex: 1 },
+                  (Boolean(loadingStep) || isRecording) && { opacity: 0.5 },
+                ]}
               >
-                <Feather name="arrow-up-circle" size={16} color={Palette.inkInverse} />
-                <Text style={styles.primaryBtnText}>帮我整理归类</Text>
+                <Feather name="send" size={15} color={Palette.inkInverse} />
+                <Text style={styles.primaryBtnText}>发送</Text>
               </Pressable>
             )}
           </View>
@@ -384,7 +615,7 @@ const styles = StyleSheet.create({
     backgroundColor: Palette.bgSurface,
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
-    maxHeight: '88%',
+    maxHeight: '90%',
     width: '100%',
     maxWidth: 680,
     alignSelf: 'center',
@@ -416,7 +647,7 @@ const styles = StyleSheet.create({
   },
   bodyContent: {
     paddingVertical: 16,
-    gap: 14,
+    gap: 13,
   },
   keyNotice: {
     flexDirection: 'row',
@@ -433,7 +664,7 @@ const styles = StyleSheet.create({
     color: Palette.warning,
   },
   omniInput: {
-    minHeight: 92,
+    minHeight: 88,
     backgroundColor: Palette.bgCanvas,
     borderWidth: 1,
     borderColor: Palette.borderHairline,
@@ -442,6 +673,7 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: Palette.inkPrimary,
     textAlignVertical: 'top',
+    lineHeight: 22,
   },
   toolsRow: {
     flexDirection: 'row',
@@ -496,7 +728,7 @@ const styles = StyleSheet.create({
     color: Palette.inkSecondary,
   },
   examplesBox: {
-    gap: 6,
+    gap: 7,
   },
   examplesLabel: {
     fontSize: 12,
@@ -504,14 +736,27 @@ const styles = StyleSheet.create({
     color: Palette.inkMuted,
   },
   examplePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
     backgroundColor: Palette.bgCanvas,
     paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 10,
+    paddingVertical: 9,
+    borderRadius: 11,
     borderWidth: 1,
     borderColor: Palette.borderHairline,
   },
+  exampleTag: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.brand,
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
   exampleText: {
+    flex: 1,
     fontSize: 12,
     color: Palette.inkSecondary,
   },
@@ -524,6 +769,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: Palette.danger,
+  },
+  successBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: Palette.successSoft,
+    padding: 12,
+    borderRadius: 12,
+  },
+  successText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    color: Palette.success,
   },
   loadingCard: {
     flexDirection: 'row',
@@ -539,26 +798,37 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: Palette.brand,
   },
-  draftsSection: {
+  resultSection: {
     gap: 10,
+  },
+  sectionTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: Palette.inkPrimary,
+  },
+  summaryText: {
+    fontSize: 13,
+    color: Palette.inkSecondary,
+    lineHeight: 20,
   },
   assistantNote: {
     fontSize: 13,
     fontWeight: '600',
     color: Palette.brand,
   },
-  draftCard: {
+  resultCard: {
     backgroundColor: Palette.bgCanvas,
     borderRadius: 14,
     padding: 14,
     borderWidth: 1,
-    borderColor: Palette.borderStrong,
-    gap: 6,
+    borderColor: Palette.borderHairline,
+    gap: 8,
   },
   draftHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: 8,
   },
   draftLibBadge: {
     fontSize: 14,
@@ -571,7 +841,7 @@ const styles = StyleSheet.create({
   },
   draftFieldsGrid: {
     gap: 4,
-    marginTop: 4,
+    marginTop: 2,
   },
   draftKvRow: {
     flexDirection: 'row',
@@ -588,11 +858,77 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: Palette.inkPrimary,
   },
+  opBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+  fieldsWrap: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  fieldChip: {
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+  },
+  fieldChipText: {
+    fontSize: 11,
+    color: Palette.inkSecondary,
+    fontWeight: '600',
+  },
+  insightHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  insightHeaderTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: Palette.brand,
+  },
+  insightBody: {
+    fontSize: 14,
+    lineHeight: 22,
+    color: Palette.inkPrimary,
+  },
+  fallbackBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    flexWrap: 'wrap',
+    gap: 8,
+    paddingTop: 4,
+  },
+  fallbackHint: {
+    fontSize: 11,
+    color: Palette.inkMuted,
+    fontWeight: '600',
+  },
+  fallbackBtns: {
+    flexDirection: 'row',
+    gap: 6,
+  },
+  fallbackChip: {
+    backgroundColor: Palette.bgSubtle,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  fallbackChipText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.inkSecondary,
+  },
   footer: {
     flexDirection: 'row',
     gap: 10,
     paddingHorizontal: 20,
-    paddingVertical: 14,
+    paddingTop: 12,
     borderTopWidth: 1,
     borderTopColor: Palette.borderHairline,
   },

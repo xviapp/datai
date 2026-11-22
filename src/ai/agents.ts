@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { OmniRepository } from '@/db/repository';
 import {
   AnalystAnswerSchema,
@@ -18,6 +19,96 @@ import {
   type ChatContentBlock,
 } from './deepseek-client';
 import { getAiPreferences } from './settings-store';
+
+export type AssistantIntent = 'architect' | 'analyst' | 'capture';
+
+export type UnifiedAssistantResult =
+  | { intent: 'architect'; plan: ArchitectPlan }
+  | { intent: 'analyst'; answer: AnalystAnswer }
+  | { intent: 'capture'; capture: OmniCaptureResult };
+
+const IntentRouterSchema = z.object({
+  intent: z.enum(['architect', 'analyst', 'capture']),
+});
+
+/**
+ * 自动识别用户输入意图：定制/修改记录本（architect）、统计/查数据/画图（analyst）、还是记录一条具体事件（capture）
+ */
+export async function detectAssistantIntent(
+  repo: OmniRepository,
+  userPrompt: string
+): Promise<AssistantIntent> {
+  const libNames = repo
+    .listLibraries()
+    .map((l) => `${l.name}(${l.slug})`)
+    .join('、');
+
+  const { message } = await callDeepSeekChat({
+    thinking: false,
+    jsonMode: true,
+    maxTokens: 64,
+    messages: [
+      {
+        role: 'system',
+        content: `你是个人记录 App 的意图路由器。根据用户输入，输出单个 JSON：{"intent":"architect"|"analyst"|"capture"}。
+判定规则：
+- "architect"：用户想新建记录本/数据表，或给现有记录本新增/修改字段、公式、提醒高亮规则、卡片样式（哪怕同时顺带要一张图表）。
+- "analyst"：用户想查询、统计、汇总、排名、对比、排查已有记录的数据，或基于已有记录画统计图表。
+- "capture"：用户想录入一条具体的日常记录（例如刚买了某物花了多少钱、刚看完某部电影、刚吃了某种药）。`,
+      },
+      {
+        role: 'user',
+        content: `当前已有记录本：${libNames || '无'}\n用户输入：${userPrompt}`,
+      },
+    ],
+  });
+
+  const parsed = parseAndValidateAiJson(message.content ?? '{}', IntentRouterSchema);
+  return parsed.intent;
+}
+
+/**
+ * 统一智能助手入口：支持文字 / 语音转写 / 图片 / 联网，自动识别意图并执行对应能力（也支持手动指定 forceIntent 重跑）
+ */
+export async function runUnifiedAssistant(
+  repo: OmniRepository,
+  params: {
+    text: string;
+    imageBase64DataUrl?: string;
+    useWebSearch?: boolean;
+    targetLibrarySlug?: string;
+  },
+  onProgress?: (msg: string) => void,
+  forceIntent?: AssistantIntent
+): Promise<UnifiedAssistantResult> {
+  const cleanText = params.text.trim();
+  let intent = forceIntent;
+
+  if (!intent) {
+    if (params.imageBase64DataUrl && !cleanText) {
+      intent = 'capture';
+    } else {
+      onProgress?.('正在理解你的想法...');
+      intent = await detectAssistantIntent(repo, cleanText);
+    }
+  }
+
+  if (intent === 'architect') {
+    onProgress?.('已识别为「定制记录本」，正在构思结构与样式...');
+    const plan = await runArchitectAgent(repo, cleanText, onProgress);
+    return { intent: 'architect', plan };
+  }
+
+  if (intent === 'capture') {
+    onProgress?.('已识别为「记一笔」，正在整理记录草稿...');
+    const capture = await runOmniCaptureAgent(repo, params, onProgress);
+    return { intent: 'capture', capture };
+  }
+
+  onProgress?.('已识别为「问数据」，正在核对你的本地记录...');
+  const answer = await runAnalystAgent(repo, cleanText, onProgress);
+  return { intent: 'analyst', answer };
+}
 
 /**
  * 1. AI 建筑师（Architect Agent）

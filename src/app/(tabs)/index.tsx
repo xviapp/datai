@@ -10,7 +10,6 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
 import { SchemaEditorModal } from '@/components/dynamic-renderer/SchemaEditorModal';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
@@ -23,10 +22,6 @@ export default function HomeVaultScreen() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [managingLibrary, setManagingLibrary] = useState<LibraryRecord | null>(null);
 
-  const widgets = !repo || revision < 0 ? [] : repo.listDashboardWidgets(null);
-
-  const kpiWidgets = widgets.filter((w) => w.chartType === 'kpi_number');
-  const chartWidgets = widgets.filter((w) => w.chartType !== 'kpi_number');
   const totalEntryCount = libraries.reduce((sum, l) => sum + l.entryCount, 0);
 
   const searchHits = (() => {
@@ -139,9 +134,6 @@ export default function HomeVaultScreen() {
         {/* 我的记录本 */}
         <View style={styles.sectionRow}>
           <Text style={styles.sectionHeading}>记录本</Text>
-          <Pressable hitSlop={8} onPress={() => router.push('/(tabs)/ai-studio')}>
-            <Text style={styles.linkAction}>让助手定制 →</Text>
-          </Pressable>
         </View>
 
         <View style={styles.libGrid}>
@@ -187,58 +179,21 @@ export default function HomeVaultScreen() {
             </Pressable>
           ) : null}
         </View>
-
-        {/* 统计一览 */}
-        <View style={styles.sectionRow}>
-          <Text style={styles.sectionHeading}>统计一览</Text>
-          <Pressable hitSlop={8} onPress={() => router.push('/(tabs)/ai-studio')}>
-            <Text style={styles.linkAction}>提问生成 →</Text>
-          </Pressable>
-        </View>
-
-        {kpiWidgets.length > 0 ? (
-          <View style={styles.kpiRow}>
-            {kpiWidgets.map((w) => (
-              <SqlWidgetCard
-                key={w.id}
-                widget={w}
-                compact
-                onDelete={(id) => repo?.deleteDashboardWidget(id)}
-              />
-            ))}
-          </View>
-        ) : null}
-
-        <View style={styles.chartsStack}>
-          {chartWidgets.map((w) => (
-            <SqlWidgetCard
-              key={w.id}
-              widget={w}
-              onDelete={(id) => repo?.deleteDashboardWidget(id)}
-            />
-          ))}
-        </View>
       </ScrollView>
 
-      {/* 底部随手记唤醒条 */}
-      <View style={styles.omniDockWrap}>
-        <Pressable
-          id="btn-open-omni-bar"
-          onPress={() => openOmniCapture(undefined)}
-          style={({ pressed }) => [styles.omniDockBtn, pressed && { opacity: 0.92, transform: [{ scale: 0.99 }] }]}
-        >
-          <View style={styles.omniSparkIcon}>
-            <Feather name="edit-3" size={15} color={Palette.inkInverse} />
-          </View>
-          <Text style={styles.omniDockPlaceholder} numberOfLines={1}>
-            记一笔... 说句话、拍小票或贴链接
-          </Text>
-          <View style={styles.omniRightIcons}>
-            <Feather name="mic" size={16} color={Palette.inkMuted} />
-            <Feather name="camera" size={16} color={Palette.brand} />
-          </View>
-        </Pressable>
-      </View>
+      {/* 右下角统一悬浮主按钮（点击打开随手说，长按直接开录音） */}
+      <Pressable
+        id="btn-open-omni-bar"
+        accessibilityLabel="随手说与智能助手"
+        onPress={() => openOmniCapture(undefined, 'text')}
+        onLongPress={() => openOmniCapture(undefined, 'voice')}
+        style={({ pressed }) => [
+          styles.omniFab,
+          pressed && { opacity: 0.9, transform: [{ scale: 0.94 }] },
+        ]}
+      >
+        <Feather name="message-circle" size={24} color={Palette.inkInverse} />
+      </Pressable>
 
       <SchemaEditorModal
         visible={createModalOpen || Boolean(managingLibrary)}
@@ -497,57 +452,20 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: Palette.inkMuted,
   },
-  kpiRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 12,
-  },
-  chartsStack: {
-    gap: 12,
-  },
-  omniDockWrap: {
+  omniFab: {
     position: 'absolute',
-    left: 16,
-    right: 16,
-    bottom: 14,
-    alignItems: 'center',
-  },
-  omniDockBtn: {
-    width: '100%',
-    maxWidth: 680,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 11,
-    backgroundColor: Palette.bgSurface,
-    paddingLeft: 10,
-    paddingRight: 16,
-    paddingVertical: 10,
-    borderRadius: 999,
-    borderWidth: 1,
-    borderColor: Palette.borderHairline,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.1,
-    shadowRadius: 18,
-    elevation: 6,
-  },
-  omniSparkIcon: {
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    right: 20,
+    bottom: 20,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     backgroundColor: Palette.brand,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  omniDockPlaceholder: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: '500',
-    color: Palette.inkSecondary,
-  },
-  omniRightIcons: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
+    shadowColor: '#0F766E',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.28,
+    shadowRadius: 14,
+    elevation: 8,
   },
 });

@@ -1,6 +1,6 @@
 import { Feather } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Pressable,
   ScrollView,
@@ -20,7 +20,6 @@ import {
 import { SchemaEditorModal } from '@/components/dynamic-renderer/SchemaEditorModal';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
-import type { DashboardWidget } from '@/schema/view-dsl';
 
 type ViewTab = 'card' | 'gallery' | 'calendar' | 'stats';
 
@@ -38,66 +37,9 @@ export default function LibraryWorkspaceScreen() {
   const library = !repo || revision < 0 || !slug ? null : repo.getLibraryBySlug(String(slug));
   const entries = !repo || revision < 0 || !library ? [] : repo.listHydratedEntries(library.slug, searchText);
 
-  // 自动为任意自定义库生成实时统计卡片（数值/金额求和均值 + 分类分组柱图）
-  const autoStatsWidgets = useMemo<DashboardWidget[]>(() => {
-    if (!library) return [];
-    const list: DashboardWidget[] = [
-      {
-        id: `auto_cnt_${library.slug}`,
-        title: '记录总数',
-        subtitle: library.name,
-        chartType: 'kpi_number',
-        readonlySql: `SELECT COUNT(*) AS cnt FROM v_${library.slug}`,
-        yKey: 'cnt',
-        unitSuffix: ' 条',
-        accentTone: library.color,
-      },
-    ];
-
-    const numField = library.fields.find(
-      (f) => f.type === 'currency' || f.type === 'number'
-    );
-    if (numField) {
-      list.push({
-        id: `auto_sum_${library.slug}`,
-        title: `${numField.label}合计`,
-        subtitle: '全部记录累计',
-        chartType: 'kpi_number',
-        readonlySql: `SELECT ROUND(COALESCE(SUM(${numField.key}), 0), 2) AS s FROM v_${library.slug}`,
-        yKey: 's',
-        unitPrefix: numField.type === 'currency' ? '¥' : undefined,
-        unitSuffix: numField.type !== 'currency' && numField.unit ? ` ${numField.unit}` : undefined,
-        accentTone: library.color,
-      });
-    }
-
-    const selectField = library.fields.find((f) => f.type === 'select');
-    if (selectField && numField) {
-      list.push({
-        id: `auto_grp_${library.slug}`,
-        title: `按${selectField.label}统计${numField.label}`,
-        chartType: 'bar',
-        readonlySql: `SELECT COALESCE(NULLIF(${selectField.key}, ''), '未分类') AS grp, ROUND(SUM(${numField.key}), 2) AS val FROM v_${library.slug} GROUP BY grp ORDER BY val DESC`,
-        xKey: 'grp',
-        yKey: 'val',
-        unitPrefix: numField.type === 'currency' ? '¥' : undefined,
-        accentTone: library.color,
-      });
-    } else if (selectField) {
-      list.push({
-        id: `auto_grp_cnt_${library.slug}`,
-        title: `按${selectField.label}统计占比`,
-        chartType: 'pie',
-        readonlySql: `SELECT COALESCE(NULLIF(${selectField.key}, ''), '未分类') AS grp, COUNT(*) AS val FROM v_${library.slug} GROUP BY grp ORDER BY val DESC`,
-        xKey: 'grp',
-        yKey: 'val',
-        unitSuffix: ' 条',
-        accentTone: library.color,
-      });
-    }
-
-    return list;
-  }, [library]);
+  // 仅展示该记录本已设计过的统计图表
+  const designedStatsWidgets =
+    !repo || revision < 0 || !library ? [] : repo.listWidgetsForLibrary(library.slug);
 
   if (!library) {
     return (
@@ -227,34 +169,68 @@ export default function LibraryWorkspaceScreen() {
         ) : null}
 
         {activeTab === 'stats' ? (
-          <View style={styles.statsWrap}>
-            <View style={styles.kpiRow}>
-              {autoStatsWidgets
-                .filter((w) => w.chartType === 'kpi_number')
+          designedStatsWidgets.length === 0 ? (
+            <View style={styles.emptyStatsCard}>
+              <View style={[styles.emptyStatsIcon, { backgroundColor: tone.soft }]}>
+                <Feather name="bar-chart-2" size={20} color={tone.solid} />
+              </View>
+              <Text style={styles.emptyStatsTitle}>还没有为「{library.name}」定制统计</Text>
+              <Text style={styles.emptyStatsDesc}>
+                有需要统计的指标时，告诉助手你想看什么图表，生成后就会展示在这里。
+              </Text>
+              <Pressable
+                onPress={() => openOmniCapture(library.slug, 'text')}
+                style={[styles.emptyStatsBtn, { backgroundColor: tone.solid }]}
+              >
+                <Text style={styles.emptyStatsBtnText}>去定制统计</Text>
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.statsWrap}>
+              {designedStatsWidgets.some((w) => w.chartType === 'kpi_number') ? (
+                <View style={styles.kpiRow}>
+                  {designedStatsWidgets
+                    .filter((w) => w.chartType === 'kpi_number')
+                    .map((w) => (
+                      <SqlWidgetCard
+                        key={w.id}
+                        widget={w}
+                        compact
+                        pinnedOverview={w.pinnedOverview}
+                        onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
+                        onDelete={(id) => repo?.deleteDashboardWidget(id)}
+                      />
+                    ))}
+                </View>
+              ) : null}
+              {designedStatsWidgets
+                .filter((w) => w.chartType !== 'kpi_number')
                 .map((w) => (
-                  <SqlWidgetCard key={w.id} widget={w} compact />
+                  <SqlWidgetCard
+                    key={w.id}
+                    widget={w}
+                    pinnedOverview={w.pinnedOverview}
+                    onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
+                    onDelete={(id) => repo?.deleteDashboardWidget(id)}
+                  />
                 ))}
             </View>
-            {autoStatsWidgets
-              .filter((w) => w.chartType !== 'kpi_number')
-              .map((w) => (
-                <SqlWidgetCard key={w.id} widget={w} />
-              ))}
-          </View>
+          )
         ) : null}
       </ScrollView>
 
-      {/* 悬浮随手记按钮 */}
+      {/* 右下角统一圆形悬浮按钮（点击打开随手说，长按直接录音） */}
       <Pressable
-        onPress={() => openOmniCapture(library.slug)}
+        accessibilityLabel="随手说与智能助手"
+        onPress={() => openOmniCapture(library.slug, 'text')}
+        onLongPress={() => openOmniCapture(library.slug, 'voice')}
         style={({ pressed }) => [
           styles.fabBtn,
           { bottom: Math.max(insets.bottom, 16) + 8, backgroundColor: tone.solid },
-          pressed && { opacity: 0.9, transform: [{ scale: 0.97 }] },
+          pressed && { opacity: 0.9, transform: [{ scale: 0.94 }] },
         ]}
       >
-        <Feather name="mic" size={16} color={Palette.inkInverse} />
-        <Text style={styles.fabText}>随手记</Text>
+        <Feather name="message-circle" size={24} color={Palette.inkInverse} />
       </Pressable>
 
       <DynamicEntryFormModal
@@ -374,22 +350,16 @@ const styles = StyleSheet.create({
   fabBtn: {
     position: 'absolute',
     right: 20,
-    flexDirection: 'row',
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 18,
-    paddingVertical: 13,
-    borderRadius: 999,
+    justifyContent: 'center',
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.16,
-    shadowRadius: 12,
-    elevation: 6,
-  },
-  fabText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Palette.inkInverse,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 14,
+    elevation: 8,
   },
   searchBox: {
     flexDirection: 'row',
@@ -410,6 +380,45 @@ const styles = StyleSheet.create({
   },
   statsWrap: {
     gap: 12,
+  },
+  emptyStatsCard: {
+    backgroundColor: Palette.bgSurface,
+    borderRadius: 18,
+    padding: 26,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    alignItems: 'center',
+    gap: 10,
+  },
+  emptyStatsIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyStatsTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: Palette.inkPrimary,
+    textAlign: 'center',
+  },
+  emptyStatsDesc: {
+    fontSize: 13,
+    color: Palette.inkMuted,
+    textAlign: 'center',
+    lineHeight: 19,
+  },
+  emptyStatsBtn: {
+    marginTop: 4,
+    paddingHorizontal: 18,
+    paddingVertical: 10,
+    borderRadius: 999,
+  },
+  emptyStatsBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: Palette.inkInverse,
   },
   kpiRow: {
     flexDirection: 'row',

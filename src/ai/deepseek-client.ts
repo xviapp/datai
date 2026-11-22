@@ -237,9 +237,22 @@ export async function enrichTextWithDeepSeekWeb(
   }
 }
 
+function inferAudioMeta(uri: string, fallbackName: string): { name: string; mime: string } {
+  const clean = uri.split('?')[0].toLowerCase();
+  if (clean.endsWith('.wav')) return { name: 'speech.wav', mime: 'audio/wav' };
+  if (clean.endsWith('.ogg') || clean.endsWith('.opus')) {
+    return { name: 'speech.ogg', mime: 'audio/ogg' };
+  }
+  if (clean.endsWith('.m4a') || clean.endsWith('.mp4')) {
+    return { name: 'speech.m4a', mime: 'audio/mp4' };
+  }
+  if (clean.endsWith('.webm')) return { name: 'speech.webm', mime: 'audio/webm' };
+  if (clean.endsWith('.mp3')) return { name: 'speech.mp3', mime: 'audio/mpeg' };
+  return { name: fallbackName, mime: 'audio/wav' };
+}
+
 /**
  * 调用 DeepSeek 全家桶官方语音识别接口 POST /v1/tools/asr
- * 要求：16 位 PCM WAV 或 Ogg Opus
  */
 export async function transcribeAudioWithDeepSeek(
   audioUriOrBlob: string | Blob,
@@ -249,11 +262,15 @@ export async function transcribeAudioWithDeepSeek(
   const formData = new FormData();
 
   if (typeof audioUriOrBlob === 'string') {
-    // React Native FormData 文件对象约定
+    const { name, mime } = inferAudioMeta(audioUriOrBlob, filename);
+    // Expo SDK 58 WinterCG fetch 要求 FormData 文件项为 Blob 或实现 bytes() 的对象（如 expo-file-system File）
+    const { File } = await import('expo-file-system');
+    const localFile = new File(audioUriOrBlob);
+    const audioBytes = await localFile.bytes();
     formData.append('file', {
-      uri: audioUriOrBlob,
-      name: filename,
-      type: 'audio/wav',
+      name,
+      type: mime,
+      bytes: async () => audioBytes,
     } as unknown as Blob);
   } else {
     formData.append('file', audioUriOrBlob, filename);
@@ -267,7 +284,14 @@ export async function transcribeAudioWithDeepSeek(
     body: formData,
   });
 
-  const json = (await res.json()) as { text?: string; error?: { message?: string } };
+  const rawText = await res.text();
+  let json: { text?: string; error?: { message?: string } } = {};
+  try {
+    json = JSON.parse(rawText) as { text?: string; error?: { message?: string } };
+  } catch {
+    throw new Error(`语音识别响应异常 (HTTP ${res.status}): ${rawText.slice(0, 140)}`);
+  }
+
   if (!res.ok || !json.text) {
     throw new Error(json.error?.message || `语音转写失败 (HTTP ${res.status})`);
   }

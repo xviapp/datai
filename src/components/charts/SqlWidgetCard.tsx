@@ -10,6 +10,13 @@ interface SqlWidgetCardProps {
   widget: DashboardWidget;
   onDelete?: (id: string) => void;
   onPin?: (widget: DashboardWidget) => void;
+  pinnedOverview?: boolean;
+  onToggleOverview?: (id: string, nextPinned: boolean) => void;
+  manageMode?: boolean;
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
+  onMoveUp?: () => void;
+  onMoveDown?: () => void;
   compact?: boolean;
 }
 
@@ -31,7 +38,19 @@ function describeArc(cx: number, cy: number, r: number, startAngle: number, endA
   return `M ${start.x} ${start.y} A ${r} ${r} 0 ${largeArc} 0 ${end.x} ${end.y}`;
 }
 
-export function SqlWidgetCard({ widget, onDelete, onPin, compact }: SqlWidgetCardProps) {
+export function SqlWidgetCard({
+  widget,
+  onDelete,
+  onPin,
+  pinnedOverview,
+  onToggleOverview,
+  manageMode = false,
+  canMoveUp = false,
+  canMoveDown = false,
+  onMoveUp,
+  onMoveDown,
+  compact,
+}: SqlWidgetCardProps) {
   const { repo, revision } = useOmni();
   const tone = ToneMap[widget.accentTone ?? 'teal'] ?? ToneMap.teal;
 
@@ -49,12 +68,71 @@ export function SqlWidgetCard({ widget, onDelete, onPin, compact }: SqlWidgetCar
 
   const { rows, error } = queryOutcome;
 
+  const renderHeaderActions = () => (
+    <View style={styles.actionsRow}>
+      {manageMode && (onMoveUp || onMoveDown) ? (
+        <View style={styles.moveGroup}>
+          <Pressable
+            hitSlop={6}
+            disabled={!canMoveUp}
+            onPress={onMoveUp}
+            style={[styles.moveBtn, !canMoveUp && styles.actionDisabled]}
+          >
+            <Feather
+              name={compact ? 'chevron-left' : 'chevron-up'}
+              size={14}
+              color={Palette.inkSecondary}
+            />
+          </Pressable>
+          <Pressable
+            hitSlop={6}
+            disabled={!canMoveDown}
+            onPress={onMoveDown}
+            style={[styles.moveBtn, !canMoveDown && styles.actionDisabled]}
+          >
+            <Feather
+              name={compact ? 'chevron-right' : 'chevron-down'}
+              size={14}
+              color={Palette.inkSecondary}
+            />
+          </Pressable>
+        </View>
+      ) : null}
+
+      {onToggleOverview ? (
+        <Pressable
+          hitSlop={8}
+          onPress={() => onToggleOverview(widget.id, !pinnedOverview)}
+          style={[styles.starBtn, pinnedOverview && styles.starBtnActive]}
+          accessibilityLabel={pinnedOverview ? '从总览移除' : '加入总览'}
+        >
+          <Text style={[styles.starGlyph, pinnedOverview && styles.starGlyphActive]}>
+            {pinnedOverview ? '★' : '☆'}
+          </Text>
+        </Pressable>
+      ) : null}
+
+      {onDelete && (manageMode || !onToggleOverview) ? (
+        <Pressable hitSlop={8} onPress={() => onDelete(widget.id)} style={styles.iconBtn}>
+          <Feather name="trash-2" size={14} color={Palette.danger} />
+        </Pressable>
+      ) : null}
+
+      {onPin ? (
+        <Pressable onPress={() => onPin(widget)} style={[styles.pinBtn, { backgroundColor: tone.soft }]}>
+          <Feather name="bookmark" size={13} color={tone.ink} />
+          <Text style={[styles.pinText, { color: tone.ink }]}>固定到统计</Text>
+        </Pressable>
+      ) : null}
+    </View>
+  );
+
   if (widget.chartType === 'kpi_number') {
     const firstRow = rows[0] ?? {};
     const val = firstRow[widget.yKey] ?? Object.values(firstRow)[0] ?? 0;
 
     return (
-      <View style={[styles.card, compact && styles.cardCompact]}>
+      <View style={[styles.card, compact && styles.cardCompact, manageMode && styles.cardManage]}>
         <View style={styles.headerRow}>
           <View style={styles.titleWrap}>
             <Text style={styles.kpiLabel} numberOfLines={1}>
@@ -66,17 +144,7 @@ export function SqlWidgetCard({ widget, onDelete, onPin, compact }: SqlWidgetCar
               </Text>
             ) : null}
           </View>
-          {onDelete ? (
-            <Pressable hitSlop={8} onPress={() => onDelete(widget.id)} style={styles.iconBtn}>
-              <Feather name="x" size={15} color={Palette.inkMuted} />
-            </Pressable>
-          ) : null}
-          {onPin ? (
-            <Pressable onPress={() => onPin(widget)} style={[styles.pinBtn, { backgroundColor: tone.soft }]}>
-              <Feather name="bookmark" size={13} color={tone.ink} />
-              <Text style={[styles.pinText, { color: tone.ink }]}>固定到首页</Text>
-            </Pressable>
-          ) : null}
+          {renderHeaderActions()}
         </View>
         {error ? (
           <Text style={styles.errorText}>{error}</Text>
@@ -103,23 +171,13 @@ export function SqlWidgetCard({ widget, onDelete, onPin, compact }: SqlWidgetCar
   const sumVal = points.reduce((acc, p) => acc + p.value, 0);
 
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, manageMode && styles.cardManage]}>
       <View style={styles.headerRow}>
         <View style={styles.titleWrap}>
           <Text style={styles.chartTitle}>{widget.title}</Text>
           {widget.subtitle ? <Text style={styles.subtitle}>{widget.subtitle}</Text> : null}
         </View>
-        {onDelete ? (
-          <Pressable hitSlop={8} onPress={() => onDelete(widget.id)} style={styles.iconBtn}>
-            <Feather name="trash-2" size={15} color={Palette.inkMuted} />
-          </Pressable>
-        ) : null}
-        {onPin ? (
-          <Pressable onPress={() => onPin(widget)} style={[styles.pinBtn, { backgroundColor: tone.soft }]}>
-            <Feather name="bookmark" size={13} color={tone.ink} />
-            <Text style={[styles.pinText, { color: tone.ink }]}>固定到首页</Text>
-          </Pressable>
-        ) : null}
+        {renderHeaderActions()}
       </View>
 
       {error ? (
@@ -241,6 +299,49 @@ const styles = StyleSheet.create({
   cardCompact: {
     flex: 1,
     minWidth: 155,
+  },
+  cardManage: {
+    borderColor: Palette.borderStrong,
+  },
+  actionsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  moveGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  moveBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 8,
+    backgroundColor: Palette.bgSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  actionDisabled: {
+    opacity: 0.3,
+  },
+  starBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: Palette.bgSubtle,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  starBtnActive: {
+    backgroundColor: '#FEF3C7',
+  },
+  starGlyph: {
+    fontSize: 15,
+    color: Palette.inkMuted,
+    lineHeight: 18,
+  },
+  starGlyphActive: {
+    color: '#D97706',
   },
   headerRow: {
     flexDirection: 'row',

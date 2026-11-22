@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS dashboard_widgets (
   unit_prefix TEXT,
   unit_suffix TEXT,
   accent_tone TEXT NOT NULL DEFAULT 'teal',
+  pinned_overview INTEGER NOT NULL DEFAULT 1,
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL
 );
@@ -74,4 +75,12 @@ CREATE TABLE IF NOT EXISTS ai_snapshots (
 
 export function runCoreMigrations(driver: SyncSqlDriver): void {
   driver.execSync(CORE_MIGRATION_SQL);
+
+  // 兼容旧版数据库：补齐 dashboard_widgets.pinned_overview 列
+  const cols = driver.getAllSync<{ name: string }>('PRAGMA table_info(dashboard_widgets)');
+  if (!cols.some((c) => c.name === 'pinned_overview')) {
+    driver.execSync(
+      'ALTER TABLE dashboard_widgets ADD COLUMN pinned_overview INTEGER NOT NULL DEFAULT 1;'
+    );
+  }
 }

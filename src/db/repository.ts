@@ -66,6 +66,12 @@ export interface AiSnapshotItem {
   createdAt: number;
 }
 
+export interface SavedDashboardWidget extends DashboardWidget {
+  librarySlug: string | null;
+  pinnedOverview: boolean;
+  sortOrder: number;
+}
+
 export interface FullBackupBundle {
   version: 1;
   exportedAt: string;
@@ -744,16 +750,66 @@ export class OmniRepository {
     }));
   }
 
+  listAllDashboardWidgets(): SavedDashboardWidget[] {
+    const rows = this.driver.getAllSync<{
+      id: string;
+      library_slug: string | null;
+      title: string;
+      subtitle: string | null;
+      chart_type: DashboardWidget['chartType'];
+      readonly_sql: string;
+      x_key: string | null;
+      y_key: string;
+      unit_prefix: string | null;
+      unit_suffix: string | null;
+      accent_tone: AccentTone;
+      pinned_overview: number;
+      sort_order: number;
+    }>('SELECT * FROM dashboard_widgets ORDER BY sort_order ASC, created_at ASC');
+
+    return rows.map((r) => ({
+      id: r.id,
+      librarySlug: r.library_slug ?? null,
+      title: r.title,
+      subtitle: r.subtitle ?? undefined,
+      chartType: r.chart_type,
+      readonlySql: r.readonly_sql,
+      xKey: r.x_key ?? undefined,
+      yKey: r.y_key,
+      unitPrefix: r.unit_prefix ?? undefined,
+      unitSuffix: r.unit_suffix ?? undefined,
+      accentTone: r.accent_tone,
+      pinnedOverview: r.pinned_overview !== 0,
+      sortOrder: Number(r.sort_order ?? 0),
+    }));
+  }
+
+  listWidgetsForLibrary(slug: string): SavedDashboardWidget[] {
+    const all = this.listAllDashboardWidgets();
+    const viewToken = `v_${slug}`;
+    return all.filter(
+      (w) => w.librarySlug === slug || w.readonlySql.includes(viewToken)
+    );
+  }
+
   private saveDashboardWidgetInternal(
     w: DashboardWidget,
     librarySlug: string | null = null,
-    sortOrder = 99
+    sortOrder?: number,
+    pinnedOverview = true
   ): void {
     const id = w.id || createId('wdg');
+    let order = sortOrder;
+    if (order === undefined) {
+      const maxRow = this.driver.getFirstSync<{ max_order: number | null }>(
+        'SELECT MAX(sort_order) AS max_order FROM dashboard_widgets'
+      );
+      order = (maxRow?.max_order ?? -1) + 1;
+    }
     this.driver.runSync(
       `INSERT OR REPLACE INTO dashboard_widgets
-       (id, library_slug, title, subtitle, chart_type, readonly_sql, x_key, y_key, unit_prefix, unit_suffix, accent_tone, sort_order, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       (id, library_slug, title, subtitle, chart_type, readonly_sql, x_key, y_key, unit_prefix, unit_suffix, accent_tone, pinned_overview, sort_order, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         id,
         librarySlug,
@@ -766,7 +822,8 @@ export class OmniRepository {
         w.unitPrefix ?? null,
         w.unitSuffix ?? null,
         w.accentTone ?? 'teal',
-        sortOrder,
+        pinnedOverview ? 1 : 0,
+        order,
         Date.now(),
       ]
     );
@@ -776,6 +833,44 @@ export class OmniRepository {
     // 落盘前先在只读沙盒预执行校验一次 SQL 合法性
     this.driver.queryReadOnlySync(w.readonlySql);
     this.saveDashboardWidgetInternal(w, librarySlug);
+    this.notify();
+  }
+
+  setWidgetPinnedOverview(widgetId: string, pinned: boolean): void {
+    this.driver.runSync('UPDATE dashboard_widgets SET pinned_overview = ? WHERE id = ?', [
+      pinned ? 1 : 0,
+      widgetId,
+    ]);
+    this.notify();
+  }
+
+  moveDashboardWidget(
+    widgetId: string,
+    direction: 'up' | 'down',
+    scopeIds: string[]
+  ): void {
+    const scopeIdx = scopeIds.indexOf(widgetId);
+    if (scopeIdx < 0) return;
+    const neighborIdx = direction === 'up' ? scopeIdx - 1 : scopeIdx + 1;
+    if (neighborIdx < 0 || neighborIdx >= scopeIds.length) return;
+
+    const neighborId = scopeIds[neighborIdx];
+    const allIds = this.listAllDashboardWidgets().map((w) => w.id);
+    const fromGlobal = allIds.indexOf(widgetId);
+    const toGlobal = allIds.indexOf(neighborId);
+    if (fromGlobal < 0 || toGlobal < 0) return;
+
+    const nextIds = [...allIds];
+    nextIds.splice(fromGlobal, 1);
+    const insertAt = nextIds.indexOf(neighborId);
+    if (insertAt < 0) return;
+    nextIds.splice(direction === 'up' ? insertAt : insertAt + 1, 0, widgetId);
+
+    this.driver.withTransactionSync(() => {
+      nextIds.forEach((id, idx) => {
+        this.driver.runSync('UPDATE dashboard_widgets SET sort_order = ? WHERE id = ?', [idx, id]);
+      });
+    });
     this.notify();
   }
 
@@ -940,8 +1035,8 @@ export class OmniRepository {
 
       for (const w of bundle.widgets) {
         this.driver.runSync(
-          `INSERT INTO dashboard_widgets (id, library_slug, title, subtitle, chart_type, readonly_sql, x_key, y_key, unit_prefix, unit_suffix, accent_tone, sort_order, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO dashboard_widgets (id, library_slug, title, subtitle, chart_type, readonly_sql, x_key, y_key, unit_prefix, unit_suffix, accent_tone, pinned_overview, sort_order, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           [
             String(w.id),
             w.library_slug ? String(w.library_slug) : null,
@@ -954,6 +1049,7 @@ export class OmniRepository {
             w.unit_prefix ? String(w.unit_prefix) : null,
             w.unit_suffix ? String(w.unit_suffix) : null,
             String(w.accent_tone ?? 'teal'),
+            w.pinned_overview === undefined ? 1 : Number(w.pinned_overview),
             Number(w.sort_order ?? 0),
             Number(w.created_at ?? Date.now()),
           ]

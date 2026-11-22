@@ -38,11 +38,11 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="ai-studio"
+        name="stats"
         options={{
-          title: '助手',
+          title: '统计',
           tabBarIcon: ({ color, size }) => (
-            <Feather name="message-circle" size={size - 2} color={String(color)} />
+            <Feather name="bar-chart-2" size={size - 2} color={String(color)} />
           ),
         }}
       />
