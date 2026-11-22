@@ -129,7 +129,7 @@ export default function SettingsScreen() {
     try {
       const bundle = repo.exportBackupBundle();
       const jsonStr = JSON.stringify(bundle, null, 2);
-      const filename = `wanxiangji_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      const filename = `folio_backup_${new Date().toISOString().slice(0, 10)}.json`;
 
       if (Platform.OS === 'web') {
         const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -479,7 +479,7 @@ export default function SettingsScreen() {
           </Pressable>
         </View>
 
-        <Text style={styles.versionFoot}>万象记 v1.0 · 纯本地离线记录本</Text>
+        <Text style={styles.versionFoot}>拾录 Folio v1.0 · 纯本地离线记录本</Text>
       </ScrollView>
     </SafeAreaView>
   );

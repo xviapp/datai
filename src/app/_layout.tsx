@@ -33,7 +33,7 @@ function AppShell() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color={Palette.brand} />
-        <Text style={styles.loadingText}>正在打开万象记...</Text>
+        <Text style={styles.loadingText}>正在打开拾录...</Text>
       </View>
     );
   }
@@ -59,7 +59,7 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <Head>
-        <title>万象记 · 你的个人全能记录本</title>
+        <title>拾录 · Folio</title>
         <meta
           name="description"
           content="离线可用的个人自定义记录本，支持自由定制字段、多视图浏览、自动统计与随手语音拍照记录"

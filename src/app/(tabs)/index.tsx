@@ -58,7 +58,7 @@ export default function HomeVaultScreen() {
           <View style={styles.topHeader}>
             <View style={styles.brandBlock}>
               <Text style={styles.brandTitle} numberOfLines={1}>
-                万象记
+                拾录
               </Text>
               <Text style={styles.brandSubtitle}>
                 {libraries.length} 个记录本 · 共 {totalEntryCount} 条记录
