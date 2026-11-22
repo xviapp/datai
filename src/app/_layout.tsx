@@ -23,7 +23,7 @@ function AppShell() {
   if (error) {
     return (
       <View style={styles.center}>
-        <Text style={styles.errTitle}>本地数据库初始化失败</Text>
+        <Text style={styles.errTitle}>数据加载失败</Text>
         <Text style={styles.errDesc}>{error}</Text>
       </View>
     );
@@ -33,7 +33,7 @@ function AppShell() {
     return (
       <View style={styles.center}>
         <ActivityIndicator size="large" color={Palette.brand} />
-        <Text style={styles.loadingText}>正在加载本地 SQLite 引擎...</Text>
+        <Text style={styles.loadingText}>正在打开万象记...</Text>
       </View>
     );
   }
@@ -59,10 +59,10 @@ export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <Head>
-        <title>万象记 OmniVault · AI 原生个人全能记录库</title>
+        <title>万象记 · 你的个人全能记录本</title>
         <meta
           name="description"
-          content="纯单机离线优先、自定义数据模型与显示样式、跨表双向引用统计、搭载 DeepSeek V4.1 Flash 的个人全能数据库应用"
+          content="离线可用的个人自定义记录本，支持自由定制字段、多视图浏览、自动统计与随手语音拍照记录"
         />
       </Head>
       <StatusBar style="dark" />

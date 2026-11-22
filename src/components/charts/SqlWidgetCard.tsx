@@ -1,5 +1,5 @@
 import { Feather } from '@expo/vector-icons';
-import React, { useMemo } from 'react';
+import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle, G, Line, Path, Rect } from 'react-native-svg';
 import { ChartSeriesColors, Palette, ToneMap } from '@/constants/design-tokens';
@@ -35,16 +35,17 @@ export function SqlWidgetCard({ widget, onDelete, onPin, compact }: SqlWidgetCar
   const { repo, revision } = useOmni();
   const tone = ToneMap[widget.accentTone ?? 'teal'] ?? ToneMap.teal;
 
-  const queryOutcome = useMemo(() => {
-    void revision;
-    if (!repo) return { rows: [] as Array<Record<string, unknown>>, error: null as string | null };
+  const queryOutcome = (() => {
+    if (!repo || revision < 0) {
+      return { rows: [] as Array<Record<string, unknown>>, error: null as string | null };
+    }
     try {
       const rows = repo.executeReadOnlyQuery(widget.readonlySql);
       return { rows, error: null };
     } catch (err) {
       return { rows: [], error: err instanceof Error ? err.message : String(err) };
     }
-  }, [repo, revision, widget.readonlySql]);
+  })();
 
   const { rows, error } = queryOutcome;
 
@@ -73,7 +74,7 @@ export function SqlWidgetCard({ widget, onDelete, onPin, compact }: SqlWidgetCar
           {onPin ? (
             <Pressable onPress={() => onPin(widget)} style={[styles.pinBtn, { backgroundColor: tone.soft }]}>
               <Feather name="bookmark" size={13} color={tone.ink} />
-              <Text style={[styles.pinText, { color: tone.ink }]}>钉到看板</Text>
+              <Text style={[styles.pinText, { color: tone.ink }]}>固定到首页</Text>
             </Pressable>
           ) : null}
         </View>
@@ -116,15 +117,15 @@ export function SqlWidgetCard({ widget, onDelete, onPin, compact }: SqlWidgetCar
         {onPin ? (
           <Pressable onPress={() => onPin(widget)} style={[styles.pinBtn, { backgroundColor: tone.soft }]}>
             <Feather name="bookmark" size={13} color={tone.ink} />
-            <Text style={[styles.pinText, { color: tone.ink }]}>钉到首页看板</Text>
+            <Text style={[styles.pinText, { color: tone.ink }]}>固定到首页</Text>
           </Pressable>
         ) : null}
       </View>
 
       {error ? (
-        <Text style={styles.errorText}>SQL 执行异常: {error}</Text>
+        <Text style={styles.errorText}>统计暂时不可用</Text>
       ) : points.length === 0 ? (
-        <Text style={styles.emptyText}>暂无匹配的统计数据</Text>
+        <Text style={styles.emptyText}>暂无统计数据</Text>
       ) : widget.chartType === 'pie' ? (
         <View style={styles.pieRow}>
           <Svg width={120} height={120} viewBox="0 0 120 120">

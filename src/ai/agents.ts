@@ -29,7 +29,7 @@ export async function runArchitectAgent(
   onProgress?: (msg: string) => void
 ): Promise<ArchitectPlan> {
   const prefs = await getAiPreferences();
-  onProgress?.('正在启用 deepseek-flash 思考模式推演表结构与关联关系...');
+  onProgress?.('正在构思记录本结构与样式...');
 
   const existingLibs = repo.listLibraries().map((l) => ({
     slug: l.slug,
@@ -92,14 +92,14 @@ export async function runOmniCaptureAgent(
     Boolean(params.useWebSearch && prefs.enableWebEnrich) || /https?:\/\/[^\s]+/i.test(params.text);
 
   if (shouldEnrich && params.text.trim()) {
-    onProgress?.('正在通过 DeepSeek 联网/链接工具补全背景信息...');
+    onProgress?.('正在联网补充相关信息...');
     const enriched = await enrichTextWithDeepSeekWeb(params.text, Boolean(params.useWebSearch));
     if (enriched) {
       webContext = `\n\n[联网/网页链接补充事实]：\n${enriched}`;
     }
   }
 
-  onProgress?.('正在使用 deepseek-flash 解析结构化字段与跨库关联...');
+  onProgress?.('正在整理内容并归类...');
 
   const catalog = repo.getAiCatalogPrompt(true);
   const schemaSpec = JSON.stringify(getOmniCaptureJsonSchema());
@@ -156,7 +156,7 @@ export async function runAnalystAgent(
   const catalog = repo.getAiCatalogPrompt(false);
   const answerSchemaSpec = JSON.stringify(getAnalystJsonSchema());
 
-  onProgress?.('正在思考查询路径并生成只读验证 SQL...');
+  onProgress?.('正在核对你的本地记录...');
 
   const systemPrompt = `你是「个人全能记录 App」的首席数据分析师。今天日期是 ${todayStr}。
 你拥有工具 \`execute_readonly_sql\`，可在手机本地 SQLite 只读沙盒上运行 SELECT 查询。

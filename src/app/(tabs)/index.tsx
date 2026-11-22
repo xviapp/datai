@@ -1,6 +1,6 @@
 import { Feather } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import {
   Pressable,
   ScrollView,
@@ -14,25 +14,23 @@ import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
 import { SchemaEditorModal } from '@/components/dynamic-renderer/SchemaEditorModal';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
+import type { LibraryRecord } from '@/db/repository';
 
 export default function HomeVaultScreen() {
   const router = useRouter();
   const { repo, libraries, revision, hasApiKey, openOmniCapture } = useOmni();
   const [globalSearch, setGlobalSearch] = useState('');
   const [createModalOpen, setCreateModalOpen] = useState(false);
+  const [managingLibrary, setManagingLibrary] = useState<LibraryRecord | null>(null);
 
-  const widgets = useMemo(() => {
-    void revision;
-    if (!repo) return [];
-    return repo.listDashboardWidgets(null);
-  }, [repo, revision]);
+  const widgets = !repo || revision < 0 ? [] : repo.listDashboardWidgets(null);
 
   const kpiWidgets = widgets.filter((w) => w.chartType === 'kpi_number');
   const chartWidgets = widgets.filter((w) => w.chartType !== 'kpi_number');
+  const totalEntryCount = libraries.reduce((sum, l) => sum + l.entryCount, 0);
 
-  const searchHits = useMemo(() => {
-    void revision;
-    if (!repo || !globalSearch.trim()) return [];
+  const searchHits = (() => {
+    if (!repo || revision < 0 || !globalSearch.trim()) return [];
     const results: Array<{
       id: string;
       title: string;
@@ -51,7 +49,7 @@ export default function HomeVaultScreen() {
       }
     }
     return results;
-  }, [repo, libraries, globalSearch, revision]);
+  })();
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -61,60 +59,51 @@ export default function HomeVaultScreen() {
         keyboardShouldPersistTaps="handled"
       >
         {/* 顶部标题栏 */}
-        <View style={styles.topHeader}>
-          <View>
-            <Text style={styles.brandTitle}>万象记 OmniVault</Text>
-            <Text style={styles.brandSubtitle}>
-              本地离线 SQLite · 双向引用 · DeepSeek V4.1 驱动
-            </Text>
-          </View>
-          <View style={styles.headerActions}>
-            <Pressable
-              onPress={() => router.push('/(tabs)/settings')}
-              style={[
-                styles.keyStatusPill,
-                { backgroundColor: hasApiKey ? Palette.brandSoft : Palette.warningSoft },
-              ]}
-            >
-              <View
-                style={[
-                  styles.statusDot,
-                  { backgroundColor: hasApiKey ? Palette.brand : Palette.warning },
-                ]}
-              />
-              <Text
-                style={[
-                  styles.keyStatusText,
-                  { color: hasApiKey ? Palette.brand : Palette.warning },
-                ]}
-              >
-                {hasApiKey ? 'AI 已就绪' : '未配 Key'}
+        <View style={styles.topHeaderBlock}>
+          <View style={styles.topHeader}>
+            <View style={styles.brandBlock}>
+              <Text style={styles.brandTitle} numberOfLines={1}>
+                万象记
               </Text>
-            </Pressable>
-            <Pressable
-              id="btn-new-library"
-              onPress={() => setCreateModalOpen(true)}
-              style={styles.newLibBtn}
-            >
-              <Feather name="plus" size={16} color={Palette.inkInverse} />
-              <Text style={styles.newLibBtnText}>新建库</Text>
-            </Pressable>
+              <Text style={styles.brandSubtitle}>
+                {libraries.length} 个记录本 · 共 {totalEntryCount} 条记录
+              </Text>
+            </View>
+            <View style={styles.headerActions}>
+              {!hasApiKey ? (
+                <Pressable
+                  onPress={() => router.push('/(tabs)/settings')}
+                  style={({ pressed }) => [styles.keyStatusPill, pressed && { opacity: 0.75 }]}
+                >
+                  <View style={styles.statusDot} />
+                  <Text style={styles.keyStatusText}>连接助手</Text>
+                </Pressable>
+              ) : null}
+              <Pressable
+                id="btn-new-library"
+                onPress={() => setCreateModalOpen(true)}
+                style={({ pressed }) => [styles.newLibBtn, pressed && { opacity: 0.85 }]}
+              >
+                <Feather name="plus" size={16} color={Palette.inkInverse} />
+                <Text style={styles.newLibBtnText}>新建</Text>
+              </Pressable>
+            </View>
           </View>
         </View>
 
-        {/* 全局跨库秒搜 */}
+        {/* 全局搜索 */}
         <View style={styles.searchBar}>
           <Feather name="search" size={16} color={Palette.inkMuted} />
           <TextInput
             id="input-global-search"
             value={globalSearch}
             onChangeText={setGlobalSearch}
-            placeholder="跨所有记录库检索标题、标签、备注..."
+            placeholder="搜索全部记录..."
             placeholderTextColor={Palette.inkMuted}
             style={styles.searchInput}
           />
           {globalSearch ? (
-            <Pressable onPress={() => setGlobalSearch('')}>
+            <Pressable hitSlop={8} onPress={() => setGlobalSearch('')}>
               <Feather name="x-circle" size={16} color={Palette.inkMuted} />
             </Pressable>
           ) : null}
@@ -122,15 +111,18 @@ export default function HomeVaultScreen() {
 
         {globalSearch.trim() ? (
           <View style={styles.searchResultSection}>
-            <Text style={styles.sectionHeading}>跨库搜索结果 ({searchHits.length})</Text>
+            <Text style={styles.sectionHeading}>搜索结果 ({searchHits.length})</Text>
             {searchHits.length === 0 ? (
-              <Text style={styles.mutedTip}>未找到包含 “{globalSearch}” 的记录</Text>
+              <Text style={styles.mutedTip}>没有找到包含 “{globalSearch}” 的记录</Text>
             ) : (
-              searchHits.map((hit) => (
+              searchHits.map((hit, idx) => (
                 <Pressable
                   key={hit.id}
                   onPress={() => router.push(`/entry/${hit.id}`)}
-                  style={styles.searchHitRow}
+                  style={[
+                    styles.searchHitRow,
+                    idx === searchHits.length - 1 && { borderBottomWidth: 0 },
+                  ]}
                 >
                   <Text style={styles.searchHitTitle} numberOfLines={1}>
                     {hit.title}
@@ -144,33 +136,30 @@ export default function HomeVaultScreen() {
           </View>
         ) : null}
 
-        {/* 自定义记录库矩阵 */}
+        {/* 我的记录本 */}
         <View style={styles.sectionRow}>
-          <Text style={styles.sectionHeading}>我的数据模型库 ({libraries.length})</Text>
-          <Pressable onPress={() => router.push('/(tabs)/ai-studio')}>
-            <Text style={styles.linkAction}>AI 一句话建多表 →</Text>
+          <Text style={styles.sectionHeading}>记录本</Text>
+          <Pressable hitSlop={8} onPress={() => router.push('/(tabs)/ai-studio')}>
+            <Text style={styles.linkAction}>让助手定制 →</Text>
           </Pressable>
         </View>
 
         <View style={styles.libGrid}>
           {libraries.map((lib) => {
             const tone = ToneMap[lib.color] ?? ToneMap.teal;
-            const relCount = lib.fields.filter((f) => f.type === 'relation').length;
-            const calcCount = lib.fields.filter(
-              (f) => f.type === 'rollup' || f.type === 'formula'
-            ).length;
 
             return (
               <Pressable
                 key={lib.id}
                 onPress={() => router.push(`/library/${lib.slug}`)}
-                style={({ pressed }) => [styles.libCard, pressed && { opacity: 0.85 }]}
+                onLongPress={() => setManagingLibrary(lib)}
+                style={({ pressed }) => [styles.libCard, pressed && styles.libCardPressed]}
               >
                 <View style={styles.libCardTop}>
                   <View style={[styles.libIconWrap, { backgroundColor: tone.soft }]}>
                     <Text style={styles.libEmoji}>{lib.icon}</Text>
                   </View>
-                  <View style={[styles.countPill, { backgroundColor: Palette.bgSubtle }]}>
+                  <View style={styles.countPill}>
                     <Text style={styles.countText}>{lib.entryCount} 条</Text>
                   </View>
                 </View>
@@ -179,32 +168,31 @@ export default function HomeVaultScreen() {
                   {lib.name}
                 </Text>
                 <Text style={styles.libDesc} numberOfLines={2}>
-                  {lib.description || `${lib.fields.length} 个自定义字段`}
+                  {lib.description || '点击查看全部记录'}
                 </Text>
-
-                <View style={styles.libMetaTags}>
-                  <Text style={styles.libMetaChip}>{lib.fields.length} 字段</Text>
-                  {relCount > 0 ? (
-                    <Text style={[styles.libMetaChip, { color: tone.ink }]}>
-                      {relCount} 关联
-                    </Text>
-                  ) : null}
-                  {calcCount > 0 ? (
-                    <Text style={[styles.libMetaChip, { color: tone.ink }]}>
-                      {calcCount} 计算列
-                    </Text>
-                  ) : null}
-                </View>
               </Pressable>
             );
           })}
+
+          {libraries.length === 0 || libraries.length % 2 === 1 ? (
+            <Pressable
+              onPress={() => setCreateModalOpen(true)}
+              style={({ pressed }) => [styles.addLibCard, pressed && styles.libCardPressed]}
+            >
+              <View style={styles.addLibIconCircle}>
+                <Feather name="plus" size={20} color={Palette.brand} />
+              </View>
+              <Text style={styles.addLibTitle}>新建记录本</Text>
+              <Text style={styles.addLibHint}>自定义字段与样式</Text>
+            </Pressable>
+          ) : null}
         </View>
 
-        {/* 离线跨库统计看板 */}
+        {/* 统计一览 */}
         <View style={styles.sectionRow}>
-          <Text style={styles.sectionHeading}>跨库实时统计看板（纯本地 SQL）</Text>
-          <Pressable onPress={() => router.push('/(tabs)/ai-studio')}>
-            <Text style={styles.linkAction}>AI 新增图表 →</Text>
+          <Text style={styles.sectionHeading}>统计一览</Text>
+          <Pressable hitSlop={8} onPress={() => router.push('/(tabs)/ai-studio')}>
+            <Text style={styles.linkAction}>提问生成 →</Text>
           </Pressable>
         </View>
 
@@ -232,28 +220,38 @@ export default function HomeVaultScreen() {
         </View>
       </ScrollView>
 
-      {/* 底部常驻全局 AI 万能快记唤醒条 */}
+      {/* 底部随手记唤醒条 */}
       <View style={styles.omniDockWrap}>
         <Pressable
           id="btn-open-omni-bar"
           onPress={() => openOmniCapture(undefined)}
-          style={({ pressed }) => [styles.omniDockBtn, pressed && { opacity: 0.92 }]}
+          style={({ pressed }) => [styles.omniDockBtn, pressed && { opacity: 0.92, transform: [{ scale: 0.99 }] }]}
         >
           <View style={styles.omniSparkIcon}>
-            <Feather name="zap" size={16} color={Palette.inkInverse} />
+            <Feather name="edit-3" size={15} color={Palette.inkInverse} />
           </View>
           <Text style={styles.omniDockPlaceholder} numberOfLines={1}>
-            AI 万能快记：说一句话 / 拍小票 / 贴链接自动跨表入库...
+            记一笔... 说句话、拍小票或贴链接
           </Text>
-          <Feather name="camera" size={17} color={Palette.brand} />
+          <View style={styles.omniRightIcons}>
+            <Feather name="mic" size={16} color={Palette.inkMuted} />
+            <Feather name="camera" size={16} color={Palette.brand} />
+          </View>
         </Pressable>
       </View>
 
       <SchemaEditorModal
-        visible={createModalOpen}
-        existingLibrary={null}
-        onClose={() => setCreateModalOpen(false)}
-        onSaved={(newSlug) => router.push(`/library/${newSlug}`)}
+        visible={createModalOpen || Boolean(managingLibrary)}
+        existingLibrary={managingLibrary}
+        onClose={() => {
+          setCreateModalOpen(false);
+          setManagingLibrary(null);
+        }}
+        onSaved={(newSlug) => {
+          if (!managingLibrary) {
+            router.push(`/library/${newSlug}`);
+          }
+        }}
       />
     </SafeAreaView>
   );
@@ -276,53 +274,66 @@ const styles = StyleSheet.create({
     paddingBottom: 96,
     gap: 16,
   },
+  topHeaderBlock: {
+    paddingTop: 4,
+  },
   topHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    gap: 12,
+    gap: 10,
+  },
+  brandBlock: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
   },
   brandTitle: {
-    fontSize: 23,
+    fontSize: 25,
     fontWeight: '800',
     color: Palette.inkPrimary,
-    letterSpacing: -0.4,
+    letterSpacing: -0.5,
   },
   brandSubtitle: {
-    fontSize: 12,
+    fontSize: 13,
     color: Palette.inkMuted,
-    marginTop: 2,
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
+    flexShrink: 0,
     gap: 8,
   },
   keyStatusPill: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    paddingHorizontal: 10,
-    paddingVertical: 7,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
     borderRadius: 999,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
   },
   statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 3.5,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: Palette.warning,
   },
   keyStatusText: {
     fontSize: 12,
-    fontWeight: '700',
+    fontWeight: '600',
+    color: Palette.inkSecondary,
   },
   newLibBtn: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
     backgroundColor: Palette.brand,
-    paddingHorizontal: 12,
+    paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 12,
+    borderRadius: 999,
   },
   newLibBtnText: {
     fontSize: 13,
@@ -396,18 +407,26 @@ const styles = StyleSheet.create({
   libGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
+    justifyContent: 'space-between',
+    rowGap: 12,
   },
   libCard: {
-    width: '48%',
-    minWidth: 156,
-    flexGrow: 1,
+    width: '48.3%',
     backgroundColor: Palette.bgSurface,
-    borderRadius: 18,
+    borderRadius: 20,
     padding: 15,
     borderWidth: 1,
     borderColor: Palette.borderHairline,
-    gap: 8,
+    gap: 9,
+    shadowColor: '#181A19',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.03,
+    shadowRadius: 8,
+    elevation: 1,
+  },
+  libCardPressed: {
+    opacity: 0.85,
+    transform: [{ scale: 0.985 }],
   },
   libCardTop: {
     flexDirection: 'row',
@@ -415,19 +434,20 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   libIconWrap: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
+    width: 42,
+    height: 42,
+    borderRadius: 13,
     alignItems: 'center',
     justifyContent: 'center',
   },
   libEmoji: {
-    fontSize: 20,
+    fontSize: 21,
   },
   countPill: {
-    paddingHorizontal: 8,
-    paddingVertical: 3,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
     borderRadius: 999,
+    backgroundColor: Palette.bgSubtle,
   },
   countText: {
     fontSize: 11,
@@ -438,24 +458,43 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     color: Palette.inkPrimary,
+    marginTop: 2,
   },
   libDesc: {
     fontSize: 12,
     color: Palette.inkMuted,
-    lineHeight: 17,
-    minHeight: 34,
+    lineHeight: 18,
+    minHeight: 36,
   },
-  libMetaTags: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-    paddingTop: 4,
-    borderTopWidth: 1,
-    borderTopColor: Palette.borderHairline,
+  addLibCard: {
+    width: '48.3%',
+    backgroundColor: Palette.bgCanvas,
+    borderRadius: 20,
+    padding: 15,
+    borderWidth: 1.5,
+    borderStyle: 'dashed',
+    borderColor: Palette.borderStrong,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    minHeight: 142,
   },
-  libMetaChip: {
+  addLibIconCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: Palette.brandSoft,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  addLibTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Palette.inkPrimary,
+  },
+  addLibHint: {
     fontSize: 11,
-    fontWeight: '600',
     color: Palette.inkMuted,
   },
   kpiRow: {
@@ -470,7 +509,7 @@ const styles = StyleSheet.create({
     position: 'absolute',
     left: 16,
     right: 16,
-    bottom: 12,
+    bottom: 14,
     alignItems: 'center',
   },
   omniDockBtn: {
@@ -478,31 +517,37 @@ const styles = StyleSheet.create({
     maxWidth: 680,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 11,
     backgroundColor: Palette.bgSurface,
-    paddingHorizontal: 14,
-    paddingVertical: 11,
+    paddingLeft: 10,
+    paddingRight: 16,
+    paddingVertical: 10,
     borderRadius: 999,
     borderWidth: 1,
-    borderColor: Palette.borderStrong,
+    borderColor: Palette.borderHairline,
     shadowColor: '#000',
-    shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.08,
-    shadowRadius: 14,
-    elevation: 5,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.1,
+    shadowRadius: 18,
+    elevation: 6,
   },
   omniSparkIcon: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     backgroundColor: Palette.brand,
     alignItems: 'center',
     justifyContent: 'center',
   },
   omniDockPlaceholder: {
     flex: 1,
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: 14,
+    fontWeight: '500',
     color: Palette.inkSecondary,
+  },
+  omniRightIcons: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
   },
 });

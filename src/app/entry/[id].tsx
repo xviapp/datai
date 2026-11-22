@@ -1,9 +1,9 @@
 import { Feather } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useMemo, useState } from 'react';
+import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { DynamicEntryFormModal } from '@/components/dynamic-renderer/DynamicEntryFormModal';
 import { formatFieldDisplay } from '@/components/dynamic-renderer/DynamicViews';
 import { HighlightTonePalette, Palette, ToneMap } from '@/constants/design-tokens';
@@ -12,15 +12,13 @@ import { useOmni } from '@/context/omni-context';
 export default function EntryDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { repo, revision } = useOmni();
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  const hydratedBundle = useMemo(() => {
-    void revision;
-    if (!repo || !id) return null;
-    return repo.getHydratedEntryById(String(id));
-  }, [repo, id, revision]);
+  const hydratedBundle =
+    !repo || revision < 0 || !id ? null : repo.getHydratedEntryById(String(id));
 
   if (!hydratedBundle) {
     return (
@@ -88,7 +86,10 @@ export default function EntryDetailScreen() {
         )}
       </View>
 
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={[styles.container, { paddingBottom: 32 + insets.bottom }]}
+      >
         {/* 主标题卡 */}
         <View style={[styles.heroCard, hl && { backgroundColor: hl.bg }]}>
           <View style={styles.heroTopRow}>
@@ -106,12 +107,12 @@ export default function EntryDetailScreen() {
           </Text>
         </View>
 
-        {/* 实时计算指标（Rollup 跨表汇总 & Formula 公式） */}
+        {/* 自动统计指标 */}
         {computedFields.length > 0 ? (
           <View style={styles.sectionCard}>
             <View style={styles.sectionHeader}>
-              <Feather name="cpu" size={15} color={tone.solid} />
-              <Text style={styles.sectionTitle}>跨表汇总与实时公式指标</Text>
+              <Feather name="activity" size={15} color={tone.solid} />
+              <Text style={styles.sectionTitle}>自动统计</Text>
             </View>
             <View style={styles.computedGrid}>
               {computedFields.map((cf) => (
@@ -120,21 +121,16 @@ export default function EntryDetailScreen() {
                   <Text style={[styles.computedVal, { color: tone.ink }]}>
                     {formatFieldDisplay(cf, entry.computedData[cf.key])}
                   </Text>
-                  <Text style={styles.computedRule} numberOfLines={1}>
-                    {cf.type === 'rollup'
-                      ? `Rollup: ${cf.rollupConfig?.fn}(${cf.rollupConfig?.targetFieldKey})`
-                      : `公式: ${cf.formulaExpr}`}
-                  </Text>
                 </View>
               ))}
             </View>
           </View>
         ) : null}
 
-        {/* 基础字段明细 */}
+        {/* 详细信息 */}
         <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>记录字段详情</Text>
-          {baseFields.map((f) => {
+          <Text style={styles.sectionTitle}>详细信息</Text>
+          {baseFields.map((f, idx) => {
             const val = entry.computedData[f.key];
             if (f.type === 'image' && val) {
               return (
@@ -145,7 +141,10 @@ export default function EntryDetailScreen() {
               );
             }
             return (
-              <View key={f.key} style={styles.kvRow}>
+              <View
+                key={f.key}
+                style={[styles.kvRow, idx === baseFields.length - 1 && { borderBottomWidth: 0 }]}
+              >
                 <Text style={styles.fieldKeyLabel}>{f.label}</Text>
                 <Text style={styles.fieldValText}>{formatFieldDisplay(f, val)}</Text>
               </View>
@@ -153,12 +152,12 @@ export default function EntryDetailScreen() {
           })}
         </View>
 
-        {/* 正向关联引用 */}
+        {/* 关联内容 */}
         {relationFields.length > 0 ? (
           <View style={styles.sectionCard}>
             <View style={styles.sectionHeader}>
               <Feather name="link-2" size={15} color={Palette.brand} />
-              <Text style={styles.sectionTitle}>正向引用记录（点击直达）</Text>
+              <Text style={styles.sectionTitle}>关联内容</Text>
             </View>
             {relationFields.map((rf) => {
               const refs = entry.forwardLinks[rf.key] ?? [];
@@ -166,13 +165,13 @@ export default function EntryDetailScreen() {
                 <View key={rf.key} style={styles.relGroup}>
                   <Text style={styles.fieldKeyLabel}>{rf.label}</Text>
                   {refs.length === 0 ? (
-                    <Text style={styles.mutedText}>未关联记录</Text>
+                    <Text style={styles.mutedText}>暂未关联</Text>
                   ) : (
                     refs.map((ref) => (
                       <Pressable
                         key={ref.id}
                         onPress={() => router.push(`/entry/${ref.id}`)}
-                        style={styles.linkCard}
+                        style={({ pressed }) => [styles.linkCard, pressed && { opacity: 0.78 }]}
                       >
                         <Text style={styles.linkTitle}>
                           {ref.libraryIcon} {ref.title}
@@ -190,24 +189,22 @@ export default function EntryDetailScreen() {
           </View>
         ) : null}
 
-        {/* 双向反链 Backlinks */}
+        {/* 相关引用 */}
         <View style={styles.sectionCard}>
           <View style={styles.sectionHeader}>
             <Feather name="corner-down-right" size={15} color={Palette.inkSecondary} />
-            <Text style={styles.sectionTitle}>
-              反向引用此记录的条目（Backlinks · {entry.backlinks.length}）
-            </Text>
+            <Text style={styles.sectionTitle}>相关引用 ({entry.backlinks.length})</Text>
           </View>
           {entry.backlinks.length === 0 ? (
             <Text style={styles.mutedText}>
-              目前没有其它库引用这条记录。当你在别的库（如日常账单、健康打卡）关联它时，会自动汇总在此处。
+              还没有其他记录关联到这里。在账单、打卡等记录中选中它后，会自动出现在这里。
             </Text>
           ) : (
             entry.backlinks.map((bl) => (
               <Pressable
                 key={`${bl.fieldKey}-${bl.id}`}
                 onPress={() => router.push(`/entry/${bl.id}`)}
-                style={styles.linkCard}
+                style={({ pressed }) => [styles.linkCard, pressed && { opacity: 0.78 }]}
               >
                 <Text style={styles.linkTitle}>
                   {bl.libraryIcon} {bl.title}

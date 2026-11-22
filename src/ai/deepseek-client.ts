@@ -182,7 +182,7 @@ export async function runDeepSeekToolLoop(params: {
     }
 
     for (const tc of message.tool_calls) {
-      params.onProgress?.(`正在执行本地校验工具: ${tc.function.name}...`);
+      params.onProgress?.('正在统计本地数据...');
       let parsedArgs: Record<string, unknown> = {};
       try {
         parsedArgs = JSON.parse(tc.function.arguments || '{}');

@@ -1,22 +1,22 @@
 import type { AccentTone, HighlightTone } from '@/schema/view-dsl';
 
 export const Palette = {
-  bgCanvas: '#F6F7F5',
+  bgCanvas: '#F7F7F4',
   bgSurface: '#FFFFFF',
-  bgSubtle: '#EEF1EF',
-  bgMuted: '#E5EAE7',
+  bgSubtle: '#F0F0EC',
+  bgMuted: '#E6E7E2',
 
-  inkPrimary: '#141A19',
-  inkSecondary: '#4F5D5B',
-  inkMuted: '#82918E',
+  inkPrimary: '#181A19',
+  inkSecondary: '#575E5B',
+  inkMuted: '#8B918E',
   inkInverse: '#FFFFFF',
 
-  borderHairline: '#E1E6E3',
-  borderStrong: '#CBD4D0',
+  borderHairline: '#E8E9E4',
+  borderStrong: '#D2D6D1',
 
   brand: '#0F766E',
   brandHover: '#115E59',
-  brandSoft: '#E6F4F1',
+  brandSoft: '#E8F4F1',
 
   danger: '#BE123C',
   dangerSoft: '#FFE4E6',

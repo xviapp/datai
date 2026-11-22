@@ -577,8 +577,8 @@ export function buildDefaultSeedBundle(): SeedBundle {
   const widgets: DashboardWidget[] = [
     {
       id: 'w_total_bills',
-      title: '账单累计总支出',
-      subtitle: '实时聚合 v_daily_bills',
+      title: '账单累计支出',
+      subtitle: '全部账单合计',
       chartType: 'kpi_number',
       readonlySql: 'SELECT ROUND(COALESCE(SUM(amount), 0), 2) AS total_spent FROM v_daily_bills',
       yKey: 'total_spent',
@@ -587,8 +587,8 @@ export function buildDefaultSeedBundle(): SeedBundle {
     },
     {
       id: 'w_asset_net',
-      title: '持有装备净折旧投入',
-      subtitle: '购入总价减去预估二手残值',
+      title: '装备净投入',
+      subtitle: '购入价减去预估残值',
       chartType: 'kpi_number',
       readonlySql: 'SELECT ROUND(COALESCE(SUM(buy_price - resale_value), 0), 0) AS net_cost FROM v_my_assets',
       yKey: 'net_cost',
@@ -598,7 +598,7 @@ export function buildDefaultSeedBundle(): SeedBundle {
     {
       id: 'w_bills_by_cat',
       title: '消费分类构成',
-      subtitle: '按分类统计累计开销占比',
+      subtitle: '按分类查看支出占比',
       chartType: 'pie',
       readonlySql:
         'SELECT category AS label, ROUND(SUM(amount), 2) AS total FROM v_daily_bills GROUP BY category ORDER BY total DESC',
@@ -609,8 +609,8 @@ export function buildDefaultSeedBundle(): SeedBundle {
     },
     {
       id: 'w_asset_compare',
-      title: '装备与关联配件总成本排行',
-      subtitle: '跨表 JOIN 统计本体购入价 + 关联配件账单',
+      title: '装备总投入排行',
+      subtitle: '含本体购入价与相关配件账单',
       chartType: 'bar',
       readonlySql: `SELECT
           a.item_name AS asset,

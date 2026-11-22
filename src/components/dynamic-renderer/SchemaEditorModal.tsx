@@ -2,7 +2,9 @@ import { Feather } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -10,6 +12,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { runArchitectAgent } from '@/ai/agents';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
@@ -22,6 +25,7 @@ interface SchemaEditorModalProps {
   existingLibrary?: LibraryRecord | null;
   onClose: () => void;
   onSaved?: (slug: string) => void;
+  onDeleted?: (slug: string) => void;
 }
 
 const FIELD_TYPE_LABELS: Record<FieldType, string> = {
@@ -46,8 +50,11 @@ export function SchemaEditorModal({
   existingLibrary,
   onClose,
   onSaved,
+  onDeleted,
 }: SchemaEditorModalProps) {
   const { repo, libraries } = useOmni();
+  const insets = useSafeAreaInsets();
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
@@ -71,6 +78,7 @@ export function SchemaEditorModal({
     if (!visible) return;
     setErrorMsg(null);
     setAiPrompt('');
+    setConfirmDelete(false);
     if (existingLibrary) {
       setSlug(existingLibrary.slug);
       setName(existingLibrary.name);
@@ -111,11 +119,12 @@ export function SchemaEditorModal({
 
   const addNewField = () => {
     const idx = fields.length + 1;
+    const suffix = Math.random().toString(36).slice(2, 6);
     setFields((prev) => [
       ...prev,
       {
-        key: `field_${idx}`,
-        label: `自定义字段${idx}`,
+        key: `field_${idx}_${suffix}`,
+        label: `记录项 ${idx}`,
         type: 'text',
         required: false,
       },
@@ -225,31 +234,50 @@ export function SchemaEditorModal({
     }
   };
 
+  const handleDeleteLibrary = () => {
+    if (!repo || !existingLibrary) return;
+    try {
+      const targetSlug = existingLibrary.slug;
+      repo.deleteLibrary(targetSlug);
+      onClose();
+      onDeleted?.(targetSlug);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.backdrop}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.backdrop}
+      >
         <View style={styles.sheet}>
           <View style={styles.header}>
             <Text style={styles.headerTitle}>
-              {existingLibrary ? `模型与显示样式 · ${existingLibrary.name}` : '新建自定义数据模型'}
+              {existingLibrary ? `管理记录本 · ${existingLibrary.name}` : '新建记录本'}
             </Text>
             <Pressable onPress={onClose} style={styles.closeBtn}>
               <Feather name="x" size={20} color={Palette.inkSecondary} />
             </Pressable>
           </View>
 
-          <ScrollView style={styles.scrollArea} contentContainerStyle={styles.scrollContent}>
+          <ScrollView
+            style={styles.scrollArea}
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+          >
             {errorMsg ? (
               <View style={styles.errorBanner}>
                 <Text style={styles.errorText}>{errorMsg}</Text>
               </View>
             ) : null}
 
-            {/* AI 一句话建模/改样式入口 */}
+            {/* 一句话智能调整 */}
             <View style={styles.aiBox}>
               <View style={styles.aiTitleRow}>
-                <Feather name="zap" size={14} color={Palette.brand} />
-                <Text style={styles.aiBoxTitle}>DeepSeek V4.1 一句话生成/改样式</Text>
+                <Feather name="message-circle" size={14} color={Palette.brand} />
+                <Text style={styles.aiBoxTitle}>一句话帮你调整</Text>
               </View>
               <View style={styles.aiInputRow}>
                 <TextInput
@@ -257,8 +285,8 @@ export function SchemaEditorModal({
                   onChangeText={setAiPrompt}
                   placeholder={
                     existingLibrary
-                      ? '如：增加一个报销状态单选字段，未报销标黄提醒'
-                      : '如：做一个咖啡豆品鉴库，带烘焙度、评分与日均克价公式'
+                      ? '如：加一个报销状态选项，未报销时标黄提醒'
+                      : '如：做一个咖啡豆记录本，记下产地、克重、价格和打分'
                   }
                   placeholderTextColor={Palette.inkMuted}
                   style={styles.aiInput}
@@ -274,14 +302,14 @@ export function SchemaEditorModal({
                   {aiLoading ? (
                     <ActivityIndicator size="small" color={Palette.inkInverse} />
                   ) : (
-                    <Text style={styles.aiGoText}>AI 执行</Text>
+                    <Text style={styles.aiGoText}>生成</Text>
                   )}
                 </Pressable>
               </View>
             </View>
 
             {/* 基础信息 */}
-            <Text style={styles.sectionTitle}>1. 库标识与主题色</Text>
+            <Text style={styles.sectionTitle}>1. 名称与配色</Text>
             <View style={styles.rowGap}>
               <TextInput
                 value={icon}
@@ -292,21 +320,11 @@ export function SchemaEditorModal({
               <TextInput
                 value={name}
                 onChangeText={setName}
-                placeholder="数据库名称（如 宠物档案）"
+                placeholder="记录本名称（如 宠物档案）"
                 placeholderTextColor={Palette.inkMuted}
                 style={[styles.input, { flex: 1 }]}
               />
             </View>
-            {!existingLibrary ? (
-              <TextInput
-                value={slug}
-                onChangeText={setSlug}
-                placeholder="英文表标识 slug（如 pet_logs）"
-                placeholderTextColor={Palette.inkMuted}
-                autoCapitalize="none"
-                style={styles.input}
-              />
-            ) : null}
 
             <View style={styles.tonesRow}>
               {TONES.map((t) => {
@@ -325,34 +343,24 @@ export function SchemaEditorModal({
               })}
             </View>
 
-            {/* 字段模型列表 */}
+            {/* 记录项列表 */}
             <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionTitle}>2. 自定义字段结构 ({fields.length})</Text>
+              <Text style={styles.sectionTitle}>2. 记录项 ({fields.length})</Text>
               <Pressable onPress={addNewField} style={styles.addFieldBtn}>
                 <Feather name="plus" size={14} color={Palette.brand} />
-                <Text style={styles.addFieldText}>添加字段</Text>
+                <Text style={styles.addFieldText}>添加一项</Text>
               </Pressable>
             </View>
 
             {fields.map((field, index) => (
-              <View key={index} style={styles.fieldCard}>
+              <View key={field.key || index} style={styles.fieldCard}>
                 <View style={styles.rowGap}>
                   <TextInput
                     value={field.label}
                     onChangeText={(v) => updateFieldAt(index, { label: v })}
-                    placeholder="字段中文名"
+                    placeholder="填写名称，如：金额、备注"
+                    placeholderTextColor={Palette.inkMuted}
                     style={[styles.smallInput, { flex: 1 }]}
-                  />
-                  <TextInput
-                    value={field.key}
-                    onChangeText={(v) =>
-                      updateFieldAt(index, {
-                        key: v.toLowerCase().replace(/[^a-z0-9_]/g, '_'),
-                      })
-                    }
-                    placeholder="key"
-                    autoCapitalize="none"
-                    style={[styles.smallInput, { width: 112 }]}
                   />
                   {fields.length > 1 ? (
                     <Pressable onPress={() => removeFieldAt(index)} style={styles.delIconBtn}>
@@ -473,23 +481,23 @@ export function SchemaEditorModal({
               </View>
             ))}
 
-            {/* 3. 显示样式卡片槽位映射 */}
-            <Text style={styles.sectionTitle}>3. 卡片显示样式映射（View DSL）</Text>
+            {/* 3. 列表卡片显示 */}
+            <Text style={styles.sectionTitle}>3. 列表卡片显示</Text>
             <SlotPickerRow
-              label="主标题字段"
+              label="主标题"
               fields={fields}
               selectedKey={titleFieldKey}
               onSelect={setTitleFieldKey}
             />
             <SlotPickerRow
-              label="副标题字段"
+              label="副标题"
               fields={fields}
               selectedKey={subtitleFieldKey}
               allowEmpty
               onSelect={setSubtitleFieldKey}
             />
             <SlotPickerRow
-              label="右上角胶囊"
+              label="右上角标签"
               fields={fields}
               selectedKey={rightBadgeFieldKey}
               allowEmpty
@@ -497,7 +505,7 @@ export function SchemaEditorModal({
             />
 
             <View style={styles.slotBlock}>
-              <Text style={styles.subFieldHint}>卡片底部指标栏（最多选 4 项）：</Text>
+              <Text style={styles.subFieldHint}>底部重点数值（最多选 4 项）：</Text>
               <View style={styles.typeChipsRow}>
                 {fields.map((f) => {
                   const active = footerMetricKeys.includes(f.key);
@@ -515,18 +523,50 @@ export function SchemaEditorModal({
                 })}
               </View>
             </View>
+
+            {/* 4. 删除整个记录本 */}
+            {existingLibrary ? (
+              <View style={styles.dangerBox}>
+                <Text style={styles.dangerTitle}>删除记录本</Text>
+                <Text style={styles.dangerHint}>
+                  将删除「{existingLibrary.name}」及里面的全部 {existingLibrary.entryCount} 条记录。删除前会自动留存一份备份，可在「设置 → 最近操作记录」里随时撤销。
+                </Text>
+                {confirmDelete ? (
+                  <View style={styles.dangerActionsRow}>
+                    <Pressable
+                      onPress={() => setConfirmDelete(false)}
+                      style={styles.dangerCancelBtn}
+                    >
+                      <Text style={styles.dangerCancelText}>先不删</Text>
+                    </Pressable>
+                    <Pressable onPress={handleDeleteLibrary} style={styles.dangerConfirmBtn}>
+                      <Feather name="trash-2" size={14} color={Palette.inkInverse} />
+                      <Text style={styles.dangerConfirmText}>确认删除</Text>
+                    </Pressable>
+                  </View>
+                ) : (
+                  <Pressable
+                    onPress={() => setConfirmDelete(true)}
+                    style={styles.dangerTriggerBtn}
+                  >
+                    <Feather name="trash-2" size={14} color={Palette.danger} />
+                    <Text style={styles.dangerTriggerText}>删除整个记录本</Text>
+                  </Pressable>
+                )}
+              </View>
+            ) : null}
           </ScrollView>
 
-          <View style={styles.footer}>
+          <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
             <Pressable onPress={onClose} style={styles.cancelBtn}>
               <Text style={styles.cancelText}>取消</Text>
             </Pressable>
             <Pressable onPress={handleManualSave} style={styles.saveBtn}>
-              <Text style={styles.saveText}>保存模型与样式</Text>
+              <Text style={styles.saveText}>保存</Text>
             </Pressable>
           </View>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -781,6 +821,73 @@ const styles = StyleSheet.create({
   },
   slotBlock: {
     gap: 6,
+  },
+  dangerBox: {
+    marginTop: 8,
+    backgroundColor: Palette.dangerSoft,
+    borderRadius: 14,
+    padding: 14,
+    gap: 8,
+  },
+  dangerTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Palette.danger,
+  },
+  dangerHint: {
+    fontSize: 12,
+    color: Palette.inkSecondary,
+    lineHeight: 18,
+  },
+  dangerTriggerBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.danger,
+    paddingVertical: 10,
+    borderRadius: 10,
+    marginTop: 2,
+  },
+  dangerTriggerText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: Palette.danger,
+  },
+  dangerActionsRow: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 2,
+  },
+  dangerCancelBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: Palette.bgSurface,
+  },
+  dangerCancelText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  dangerConfirmBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: Palette.danger,
+  },
+  dangerConfirmText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: Palette.inkInverse,
   },
   footer: {
     flexDirection: 'row',

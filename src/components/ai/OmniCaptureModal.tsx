@@ -6,6 +6,7 @@ import { useRouter } from 'expo-router';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  KeyboardAvoidingView,
   Modal,
   Platform,
   Pressable,
@@ -16,6 +17,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { runOmniCaptureAgent } from '@/ai/agents';
 import { transcribeAudioWithDeepSeek } from '@/ai/deepseek-client';
 import { Palette } from '@/constants/design-tokens';
@@ -30,6 +32,7 @@ const QUICK_EXAMPLES = [
 
 export function OmniCaptureModal() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const {
     repo,
     libraries,
@@ -76,30 +79,41 @@ export function OmniCaptureModal() {
   }, [omniModalVisible]);
 
   const handlePickPhoto = async (fromCamera: boolean) => {
-    const fn = fromCamera
-      ? ImagePicker.launchCameraAsync
-      : ImagePicker.launchImageLibraryAsync;
-    const res = await fn({
-      mediaTypes: ['images'],
-      quality: 0.75,
-      base64: true,
-    });
-    if (!res.canceled && res.assets[0]?.base64) {
-      const mime = res.assets[0].mimeType || 'image/jpeg';
-      setImageDataUrl(`data:${mime};base64,${res.assets[0].base64}`);
+    try {
+      if (fromCamera) {
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (!perm.granted) {
+          setErrorMsg('需要相机权限才能拍照识别小票或实物');
+          return;
+        }
+      }
+      const fn = fromCamera
+        ? ImagePicker.launchCameraAsync
+        : ImagePicker.launchImageLibraryAsync;
+      const res = await fn({
+        mediaTypes: ['images'],
+        quality: 0.75,
+        base64: true,
+      });
+      if (!res.canceled && res.assets[0]?.base64) {
+        const mime = res.assets[0].mimeType || 'image/jpeg';
+        setImageDataUrl(`data:${mime};base64,${res.assets[0].base64}`);
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   };
 
   const handleToggleVoice = async () => {
     if (Platform.OS === 'web') {
-      setErrorMsg('Web 预览下请直接输入文字或上传小票/图片（真机端支持 16kHz WAV 录音直传 /v1/tools/asr）');
+      setErrorMsg('网页预览暂不支持录音，请直接打字或选择图片（手机端支持语音输入）');
       return;
     }
     try {
       if (!isRecording) {
         const perm = await AudioModule.requestRecordingPermissionsAsync();
         if (!perm.granted) {
-          setErrorMsg('需要麦克风权限才能使用 DeepSeek ASR 语音录入');
+          setErrorMsg('需要麦克风权限才能使用语音记录');
           return;
         }
         await recorder.prepareToRecordAsync();
@@ -109,7 +123,7 @@ export function OmniCaptureModal() {
         await recorder.stop();
         setIsRecording(false);
         if (recorder.uri) {
-          setLoadingStep('正在调用 DeepSeek /v1/tools/asr 语音转文字...');
+          setLoadingStep('正在听写语音...');
           const text = await transcribeAudioWithDeepSeek(recorder.uri);
           setInputText((prev) => (prev ? `${prev} ${text}` : text));
           setLoadingStep(null);
@@ -176,13 +190,16 @@ export function OmniCaptureModal() {
       transparent
       onRequestClose={closeOmniCapture}
     >
-      <View style={styles.backdrop}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.backdrop}
+      >
         <View style={styles.sheet}>
           <View style={styles.header}>
             <View style={styles.headerTitleRow}>
-              <Feather name="zap" size={18} color={Palette.brand} />
+              <Feather name="edit-3" size={18} color={Palette.brand} />
               <Text style={styles.headerTitle}>
-                AI 全局万能快记{omniTargetSlug ? ` · ${libMap.get(omniTargetSlug)?.name ?? ''}` : ''}
+                随手记{omniTargetSlug ? ` · ${libMap.get(omniTargetSlug)?.name ?? ''}` : ''}
               </Text>
             </View>
             <Pressable onPress={closeOmniCapture} style={styles.closeBtn}>
@@ -190,7 +207,11 @@ export function OmniCaptureModal() {
             </Pressable>
           </View>
 
-          <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
+          <ScrollView
+            style={styles.body}
+            contentContainerStyle={styles.bodyContent}
+            keyboardShouldPersistTaps="handled"
+          >
             {!hasApiKey ? (
               <Pressable
                 onPress={() => {
@@ -199,9 +220,9 @@ export function OmniCaptureModal() {
                 }}
                 style={styles.keyNotice}
               >
-                <Feather name="key" size={16} color={Palette.warning} />
+                <Feather name="key" size={15} color={Palette.warning} />
                 <Text style={styles.keyNoticeText}>
-                  尚未填写 DeepSeek API Key，点此前往「设置」填入后即可解锁多模态智能快记 →
+                  还未填写 API Key，点这里去「设置」连接后就能自动整理记录 →
                 </Text>
               </Pressable>
             ) : null}
@@ -210,21 +231,21 @@ export function OmniCaptureModal() {
               value={inputText}
               onChangeText={setInputText}
               multiline
-              placeholder="说一句话、粘贴京东/豆瓣链接，或拍张小票... 自动识别归属库与跨表关联"
+              placeholder="随口记一句、粘贴链接，或拍张小票，会自动帮你归类整理..."
               placeholderTextColor={Palette.inkMuted}
               style={styles.omniInput}
             />
 
-            {/* 多模态工具条 */}
+            {/* 工具条 */}
             <View style={styles.toolsRow}>
               <Pressable onPress={() => handlePickPhoto(false)} style={styles.toolChip}>
                 <Feather name="image" size={15} color={Palette.brand} />
-                <Text style={styles.toolChipText}>相册识图</Text>
+                <Text style={styles.toolChipText}>选照片</Text>
               </Pressable>
               {Platform.OS !== 'web' ? (
                 <Pressable onPress={() => handlePickPhoto(true)} style={styles.toolChip}>
                   <Feather name="camera" size={15} color={Palette.brand} />
-                  <Text style={styles.toolChipText}>拍小票/实物</Text>
+                  <Text style={styles.toolChipText}>拍照</Text>
                 </Pressable>
               ) : null}
               <Pressable
@@ -237,12 +258,12 @@ export function OmniCaptureModal() {
                   color={isRecording ? Palette.inkInverse : Palette.brand}
                 />
                 <Text style={[styles.toolChipText, isRecording && { color: Palette.inkInverse }]}>
-                  {isRecording ? '点击结束录音' : 'ASR 语音'}
+                  {isRecording ? '停止录音' : '语音'}
                 </Text>
               </Pressable>
 
               <View style={styles.webSwitchWrap}>
-                <Text style={styles.webSwitchLabel}>联网补全</Text>
+                <Text style={styles.webSwitchLabel}>联网补充</Text>
                 <Switch
                   value={useWebSearch}
                   onValueChange={setUseWebSearch}
@@ -254,17 +275,17 @@ export function OmniCaptureModal() {
             {imageDataUrl ? (
               <View style={styles.attachedImgRow}>
                 <Image source={{ uri: imageDataUrl }} style={styles.attachedThumb} contentFit="cover" />
-                <Text style={styles.attachedHint}>已附带图片（将由 deepseek-flash 原生视觉解析）</Text>
+                <Text style={styles.attachedHint}>已选好图片，提交后会自动识别内容</Text>
                 <Pressable onPress={() => setImageDataUrl(undefined)}>
                   <Feather name="trash-2" size={16} color={Palette.danger} />
                 </Pressable>
               </View>
             ) : null}
 
-            {/* 快捷示例提示词 */}
+            {/* 快捷示例 */}
             {drafts.length === 0 ? (
               <View style={styles.examplesBox}>
-                <Text style={styles.examplesLabel}>试试一句话跨库联动示例：</Text>
+                <Text style={styles.examplesLabel}>试着记一句：</Text>
                 {QUICK_EXAMPLES.map((ex, i) => (
                   <Pressable key={i} onPress={() => setInputText(ex)} style={styles.examplePill}>
                     <Text style={styles.exampleText} numberOfLines={1}>
@@ -325,15 +346,15 @@ export function OmniCaptureModal() {
             ) : null}
           </ScrollView>
 
-          <View style={styles.footer}>
+          <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
             {drafts.length > 0 ? (
               <>
                 <Pressable onPress={() => setDrafts([])} style={styles.secondaryBtn}>
-                  <Text style={styles.secondaryBtnText}>重新解析</Text>
+                  <Text style={styles.secondaryBtnText}>重新整理</Text>
                 </Pressable>
                 <Pressable onPress={handleCommitDrafts} style={styles.primaryBtn}>
-                  <Feather name="check-circle" size={16} color={Palette.inkInverse} />
-                  <Text style={styles.primaryBtnText}>一键确认入库 ({drafts.length})</Text>
+                  <Feather name="check" size={16} color={Palette.inkInverse} />
+                  <Text style={styles.primaryBtnText}>保存记录 ({drafts.length})</Text>
                 </Pressable>
               </>
             ) : (
@@ -342,13 +363,13 @@ export function OmniCaptureModal() {
                 onPress={handleParseWithAi}
                 style={[styles.primaryBtn, { flex: 1 }, Boolean(loadingStep) && { opacity: 0.5 }]}
               >
-                <Feather name="cpu" size={16} color={Palette.inkInverse} />
-                <Text style={styles.primaryBtnText}>使用 deepseek-flash 解析为入库草稿</Text>
+                <Feather name="arrow-up-circle" size={16} color={Palette.inkInverse} />
+                <Text style={styles.primaryBtnText}>帮我整理归类</Text>
               </Pressable>
             )}
           </View>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }

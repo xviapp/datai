@@ -118,7 +118,22 @@ export class OmniRepository {
 
   seedIfEmpty(): void {
     const existing = this.driver.getFirstSync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM libraries');
-    if (existing && existing.cnt > 0) return;
+    if (existing && existing.cnt > 0) {
+      // 平滑更新旧版预置看板的技术型副标题，不影响用户自定义图表
+      this.driver.runSync(
+        "UPDATE dashboard_widgets SET title = '账单累计支出', subtitle = '全部账单合计' WHERE id = 'w_total_bills' AND subtitle = '实时聚合 v_daily_bills'"
+      );
+      this.driver.runSync(
+        "UPDATE dashboard_widgets SET title = '装备净投入', subtitle = '购入价减去预估残值' WHERE id = 'w_asset_net' AND subtitle = '购入总价减去预估二手残值'"
+      );
+      this.driver.runSync(
+        "UPDATE dashboard_widgets SET subtitle = '按分类查看支出占比' WHERE id = 'w_bills_by_cat' AND subtitle = '按分类统计累计开销占比'"
+      );
+      this.driver.runSync(
+        "UPDATE dashboard_widgets SET title = '装备总投入排行', subtitle = '含本体购入价与相关配件账单' WHERE id = 'w_asset_compare' AND subtitle LIKE '%JOIN%'"
+      );
+      return;
+    }
 
     const seed = buildDefaultSeedBundle();
     this.driver.withTransactionSync(() => {
@@ -210,7 +225,13 @@ export class OmniRepository {
     );
 
     const id = existing ? existing.id : createId('lib');
-    const order = sortOrder ?? existing?.sort_order ?? 99;
+    let order = sortOrder ?? existing?.sort_order;
+    if (order === undefined) {
+      const maxRow = this.driver.getFirstSync<{ max_order: number | null }>(
+        'SELECT MAX(sort_order) AS max_order FROM libraries'
+      );
+      order = (maxRow?.max_order ?? -1) + 1;
+    }
 
     if (existing) {
       this.driver.runSync(
@@ -259,9 +280,18 @@ export class OmniRepository {
   }
 
   deleteLibrary(slug: string): void {
+    const target = this.getLibraryBySlug(slug);
+    const backupBefore = this.exportBackupBundle();
+
     this.driver.withTransactionSync(() => {
+      if (target) {
+        this.saveSnapshotInternal(`删除记录本「${target.name}」`, backupBefore);
+      }
       dropLibrarySqlView(this.driver, slug);
-      this.driver.runSync('DELETE FROM dashboard_widgets WHERE library_slug = ?', [slug]);
+      this.driver.runSync(
+        'DELETE FROM dashboard_widgets WHERE library_slug = ? OR readonly_sql LIKE ?',
+        [slug, `%v_${slug}%`]
+      );
       this.driver.runSync('DELETE FROM libraries WHERE slug = ?', [slug]);
     });
     this.notify();
@@ -765,13 +795,16 @@ export class OmniRepository {
     const backupBefore = this.exportBackupBundle();
     let snapshotId = '';
 
+    // 先提交表结构与视图变更，再使用独立只读连接校验并保存看板图表
     this.driver.withTransactionSync(() => {
-      snapshotId = this.saveSnapshotInternal(plan.summary || 'AI 更新数据模型与样式', backupBefore);
+      snapshotId = this.saveSnapshotInternal(plan.summary || '更新记录本与样式', backupBefore);
 
-      plan.libraries.forEach((bp, idx) => {
-        this.upsertLibraryInternal(bp, idx);
+      plan.libraries.forEach((bp) => {
+        this.upsertLibraryInternal(bp);
       });
+    });
 
+    if (plan.dashboardWidgets.length > 0) {
       plan.dashboardWidgets.forEach((w, idx) => {
         try {
           this.driver.queryReadOnlySync(w.readonlySql);
@@ -780,7 +813,7 @@ export class OmniRepository {
           // 跳过语法有误的可选图表，不阻塞主模型创建
         }
       });
-    });
+    }
 
     this.notify();
     return snapshotId;

@@ -33,6 +33,7 @@ const OmniContext = createContext<OmniContextValue>({
 
 export function OmniProvider({ children }: { children: React.ReactNode }) {
   const [repo, setRepo] = useState<OmniRepository | null>(null);
+  const [libraries, setLibraries] = useState<LibraryRecord[]>([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
@@ -52,7 +53,9 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
         const driver = await getPlatformSqlDriver();
         const instance = new OmniRepository(driver);
         instance.seedIfEmpty();
+        setLibraries(instance.listLibraries());
         unsub = instance.subscribe(() => {
+          setLibraries(instance.listLibraries());
           setRevision((r) => r + 1);
         });
         setRepo(instance);
@@ -67,13 +70,6 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
       unsub?.();
     };
   }, [refreshApiKeyState]);
-
-  const libraries = useMemo(() => {
-    if (!repo) return [];
-    // revision triggers recomputation whenever SQLite state changes
-    void revision;
-    return repo.listLibraries();
-  }, [repo, revision]);
 
   const openOmniCapture = useCallback((targetSlug?: string) => {
     setOmniTargetSlug(targetSlug);

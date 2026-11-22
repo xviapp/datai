@@ -3,7 +3,9 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -12,6 +14,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord } from '@/db/repository';
@@ -42,6 +45,7 @@ export function DynamicEntryFormModal({
   onSaved,
 }: DynamicEntryFormModalProps) {
   const { repo } = useOmni();
+  const insets = useSafeAreaInsets();
   const [formValues, setFormValues] = useState<Record<string, unknown>>({});
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -105,18 +109,25 @@ export function DynamicEntryFormModal({
 
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <View style={styles.backdrop}>
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.backdrop}
+      >
         <View style={styles.sheet}>
           <View style={styles.header}>
             <Text style={styles.headerTitle}>
-              {editingEntryId ? `编辑 · ${library.name}` : `新增 · ${library.icon} ${library.name}`}
+              {editingEntryId ? `编辑 · ${library.name}` : `记一条 · ${library.icon} ${library.name}`}
             </Text>
             <Pressable onPress={onClose} style={styles.closeBtn}>
               <Feather name="x" size={20} color={Palette.inkSecondary} />
             </Pressable>
           </View>
 
-          <ScrollView style={styles.scrollArea} contentContainerStyle={styles.scrollContent}>
+          <ScrollView
+            style={styles.scrollArea}
+            contentContainerStyle={styles.scrollContent}
+            keyboardShouldPersistTaps="handled"
+          >
             {errorMsg ? (
               <View style={styles.errorBanner}>
                 <Text style={styles.errorText}>{errorMsg}</Text>
@@ -135,17 +146,17 @@ export function DynamicEntryFormModal({
             ))}
           </ScrollView>
 
-          <View style={styles.footer}>
+          <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
             <Pressable onPress={onClose} style={styles.cancelBtn}>
               <Text style={styles.cancelText}>取消</Text>
             </Pressable>
             <Pressable onPress={handleSave} style={styles.saveBtn}>
               <Feather name="check" size={16} color={Palette.inkInverse} />
-              <Text style={styles.saveText}>{editingEntryId ? '保存修改' : '确认入库'}</Text>
+              <Text style={styles.saveText}>{editingEntryId ? '保存修改' : '保存'}</Text>
             </Pressable>
           </View>
         </View>
-      </View>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -173,10 +184,8 @@ function FieldInputBlock({
   if (field.type === 'rollup') {
     return (
       <View style={styles.readonlyBox}>
-        <Text style={styles.fieldLabel}>{field.label}（跨表自动汇总）</Text>
-        <Text style={styles.readonlyHint}>
-          保存后将自动聚合关联记录的 {field.rollupConfig?.fn}({field.rollupConfig?.targetFieldKey})
-        </Text>
+        <Text style={styles.fieldLabel}>{field.label}（自动统计）</Text>
+        <Text style={styles.readonlyHint}>保存后会自动根据相关记录汇总</Text>
       </View>
     );
   }
@@ -185,7 +194,7 @@ function FieldInputBlock({
     const previewVal = field.formulaExpr ? evaluateFormula(field.formulaExpr, allValues) : '';
     return (
       <View style={styles.readonlyBox}>
-        <Text style={styles.fieldLabel}>{field.label}（公式实时预估）</Text>
+        <Text style={styles.fieldLabel}>{field.label}（自动计算）</Text>
         <Text style={styles.formulaPreviewVal}>
           {String(previewVal)} {field.unit ?? ''}
         </Text>

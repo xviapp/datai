@@ -2,7 +2,7 @@ import { Feather } from '@expo/vector-icons';
 import * as DocumentPicker from 'expo-document-picker';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
   Platform,
@@ -50,11 +50,7 @@ export default function SettingsScreen() {
     })();
   }, []);
 
-  const snapshots = useMemo(() => {
-    void revision;
-    if (!repo) return [];
-    return repo.listSnapshots();
-  }, [repo, revision]);
+  const snapshots = !repo || revision < 0 ? [] : repo.listSnapshots();
 
   const handleSaveConfig = async () => {
     await saveDeepSeekApiKey(apiKey);
@@ -65,7 +61,7 @@ export default function SettingsScreen() {
       enableWebEnrich,
     });
     await refreshApiKeyState();
-    setFeedback({ type: 'ok', text: 'DeepSeek 配置已加密保存至本机安全存储' });
+    setFeedback({ type: 'ok', text: '设置已保存在本机' });
   };
 
   const handleTestApi = async () => {
@@ -80,7 +76,7 @@ export default function SettingsScreen() {
       });
       setFeedback({
         type: 'ok',
-        text: `deepseek-flash (V4.1) 响应正常：${message.content?.trim() || 'OK'}`,
+        text: `连接正常：${message.content?.trim() || 'OK'}`,
       });
     } catch (err) {
       setFeedback({
@@ -96,7 +92,7 @@ export default function SettingsScreen() {
     if (!repo) return;
     try {
       repo.undoSnapshot(snapshotId);
-      setFeedback({ type: 'ok', text: '已无损回滚该次 AI 修改！' });
+      setFeedback({ type: 'ok', text: '已恢复到变更前的状态' });
     } catch (err) {
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : String(err) });
     }
@@ -145,8 +141,7 @@ export default function SettingsScreen() {
       if (Platform.OS === 'web' && asset.file) {
         content = await asset.file.text();
       } else {
-        const resp = await fetch(asset.uri);
-        content = await resp.text();
+        content = await new File(asset.uri).text();
       }
       const parsed = JSON.parse(content) as FullBackupBundle;
       if (!Array.isArray(parsed.libraries) || !Array.isArray(parsed.entries)) {
@@ -164,8 +159,12 @@ export default function SettingsScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <ScrollView style={styles.scroll} contentContainerStyle={styles.container}>
-        <Text style={styles.pageTitle}>设置与时光机</Text>
+      <ScrollView
+        style={styles.scroll}
+        contentContainerStyle={styles.container}
+        keyboardShouldPersistTaps="handled"
+      >
+        <Text style={styles.pageTitle}>设置</Text>
 
         {feedback ? (
           <View
@@ -189,14 +188,14 @@ export default function SettingsScreen() {
           </View>
         ) : null}
 
-        {/* 1. DeepSeek BYOK 配置 */}
+        {/* 1. 智能助手连接 */}
         <View style={styles.card}>
           <View style={styles.cardTitleRow}>
             <Feather name="key" size={16} color={Palette.brand} />
-            <Text style={styles.cardTitle}>自填 DeepSeek API Key（纯单机直连）</Text>
+            <Text style={styles.cardTitle}>智能助手连接</Text>
           </View>
           <Text style={styles.cardHint}>
-            使用最新统一模型 `deepseek-flash`（DeepSeek-V4.1-Flash-1017），原生涵盖多模态视觉、思考推理、ASR 语音与联网阅读。密钥仅加密存于本机，不经任何第三方服务器。
+            填入 DeepSeek API Key 即可开启语音记账、拍照识别、定制记录本与数据问答。密钥仅保存在你的手机本地，不经过任何第三方服务器。
           </Text>
 
           <View style={styles.keyInputRow}>
@@ -205,7 +204,7 @@ export default function SettingsScreen() {
               onChangeText={setApiKey}
               secureTextEntry={!showKey}
               autoCapitalize="none"
-              placeholder="sk-..."
+              placeholder="输入 sk-... 密钥"
               placeholderTextColor={Palette.inkMuted}
               style={[styles.input, { flex: 1 }]}
             />
@@ -214,7 +213,7 @@ export default function SettingsScreen() {
             </Pressable>
           </View>
 
-          <Text style={styles.label}>API Base URL</Text>
+          <Text style={styles.label}>接口地址</Text>
           <TextInput
             value={baseUrl}
             onChangeText={setBaseUrl}
@@ -222,7 +221,7 @@ export default function SettingsScreen() {
             style={styles.input}
           />
 
-          <Text style={styles.label}>建表与统计思考强度（reasoning_effort）</Text>
+          <Text style={styles.label}>回答模式</Text>
           <View style={styles.effortRow}>
             {(['low', 'high', 'max'] as ReasoningEffort[]).map((lv) => {
               const active = effort === lv;
@@ -233,7 +232,7 @@ export default function SettingsScreen() {
                   style={[styles.effortChip, active && styles.effortChipActive]}
                 >
                   <Text style={[styles.effortText, active && styles.effortTextActive]}>
-                    {lv === 'low' ? 'Low (极速)' : lv === 'high' ? 'High (推荐)' : 'Max (深度)'}
+                    {lv === 'low' ? '快速' : lv === 'high' ? '均衡（推荐）' : '深度'}
                   </Text>
                 </Pressable>
               );
@@ -242,9 +241,9 @@ export default function SettingsScreen() {
 
           <View style={styles.switchRow}>
             <View style={{ flex: 1 }}>
-              <Text style={styles.switchTitle}>启用全家桶联网与读链接补全</Text>
+              <Text style={styles.switchTitle}>自动读取链接与联网补充</Text>
               <Text style={styles.cardHint}>
-                快记粘贴 URL 或开启联网时自动调用 deepseek_read_url / deepseek_web_search
+                随手记里粘贴网址或开启联网时，自动帮你补充书影音、商品简介等信息
               </Text>
             </View>
             <Switch
@@ -256,7 +255,7 @@ export default function SettingsScreen() {
 
           <View style={styles.btnRow}>
             <Pressable onPress={handleSaveConfig} style={styles.saveBtn}>
-              <Text style={styles.saveBtnText}>保存配置</Text>
+              <Text style={styles.saveBtnText}>保存</Text>
             </Pressable>
             <Pressable
               disabled={testing}
@@ -266,22 +265,22 @@ export default function SettingsScreen() {
               {testing ? (
                 <ActivityIndicator size="small" color={Palette.brand} />
               ) : (
-                <Feather name="zap" size={14} color={Palette.brand} />
+                <Feather name="check-circle" size={14} color={Palette.brand} />
               )}
-              <Text style={styles.testBtnText}>实测连通性</Text>
+              <Text style={styles.testBtnText}>测试连接</Text>
             </Pressable>
           </View>
         </View>
 
-        {/* 2. AI 操作时光机（Undo） */}
+        {/* 2. 最近操作记录 */}
         <View style={styles.card}>
           <View style={styles.cardTitleRow}>
             <Feather name="rotate-ccw" size={16} color={Palette.brand} />
-            <Text style={styles.cardTitle}>AI 操作时光机（一键回滚护栏）</Text>
+            <Text style={styles.cardTitle}>最近操作记录</Text>
           </View>
           {snapshots.length === 0 ? (
             <Text style={styles.cardHint}>
-              暂无 AI 变更记录。每次通过 AI 建表、改样式或批量入库前都会自动生成无损快照。
+              暂无变更记录。每次通过助手新建、修改记录本或批量记录前都会自动留存一份备份，不满意随时点撤销恢复。
             </Text>
           ) : (
             snapshots.map((snap) => (
@@ -295,10 +294,10 @@ export default function SettingsScreen() {
                   </Text>
                 </View>
                 {snap.undone ? (
-                  <Text style={styles.undoneTag}>已回滚</Text>
+                  <Text style={styles.undoneTag}>已撤销</Text>
                 ) : (
                   <Pressable onPress={() => handleUndo(snap.id)} style={styles.undoBtn}>
-                    <Text style={styles.undoBtnText}>一键撤销</Text>
+                    <Text style={styles.undoBtnText}>撤销</Text>
                   </Pressable>
                 )}
               </View>
@@ -306,23 +305,23 @@ export default function SettingsScreen() {
           )}
         </View>
 
-        {/* 3. 纯单机本地导入导出逃生舱 */}
+        {/* 3. 数据备份与恢复 */}
         <View style={styles.card}>
           <View style={styles.cardTitleRow}>
             <Feather name="hard-drive" size={16} color={Palette.brand} />
-            <Text style={styles.cardTitle}>本地离线数据包导出 / 导入</Text>
+            <Text style={styles.cardTitle}>备份与恢复</Text>
           </View>
           <Text style={styles.cardHint}>
-            虽为纯单机运行，你仍可随时将全库结构、记录、关联边与统计看板打包为单文件 JSON 留存到手机文件管理。
+            所有记录都存在你的手机本地。你可以随时导出完整备份文件妥善保管，换机时直接导入恢复。
           </Text>
           <View style={styles.btnRow}>
             <Pressable onPress={handleExportJson} style={styles.outlineBtn}>
               <Feather name="download" size={15} color={Palette.inkPrimary} />
-              <Text style={styles.outlineBtnText}>导出全库 JSON</Text>
+              <Text style={styles.outlineBtnText}>导出备份</Text>
             </Pressable>
             <Pressable onPress={handleImportJson} style={styles.outlineBtn}>
               <Feather name="upload" size={15} color={Palette.inkPrimary} />
-              <Text style={styles.outlineBtnText}>导入恢复 JSON</Text>
+              <Text style={styles.outlineBtnText}>从备份恢复</Text>
             </Pressable>
           </View>
         </View>

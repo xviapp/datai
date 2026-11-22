@@ -53,8 +53,8 @@ export function DynamicCardListView({
   if (entries.length === 0) {
     return (
       <View style={styles.emptyBox}>
-        <Text style={styles.emptyTitle}>暂无记录</Text>
-        <Text style={styles.emptyDesc}>点击右上角「新增」或底部「AI 万能快记」添加第一条记录</Text>
+        <Text style={styles.emptyTitle}>还没有记录</Text>
+        <Text style={styles.emptyDesc}>点右上角「记一条」，或用右下角「随手记」添加第一条</Text>
       </View>
     );
   }
@@ -146,7 +146,7 @@ export function DynamicCardListView({
                     {entry.backlinks.length > 0 ? (
                       <View style={styles.backlinkChip}>
                         <Feather name="corner-down-right" size={11} color={Palette.inkSecondary} />
-                        <Text style={styles.backlinkChipText}>被引用 {entry.backlinks.length}</Text>
+                        <Text style={styles.backlinkChipText}>关联 {entry.backlinks.length} 条</Text>
                       </View>
                     ) : null}
                   </View>
