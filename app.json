@@ -43,7 +43,8 @@
       "expo-sqlite",
       "expo-secure-store",
       "expo-audio",
-      "expo-sharing"
+      "expo-sharing",
+      "./plugins/with-slim-android"
     ],
     "experiments": {
       "typedRoutes": true,
