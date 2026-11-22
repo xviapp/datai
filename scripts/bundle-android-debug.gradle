@@ -1,0 +1,8 @@
+// Package JS for standalone debug APKs built through build:android:debug.
+gradle.beforeProject { project ->
+    if (project.path == ':app') {
+        project.plugins.withId('com.facebook.react') {
+            project.extensions.getByName('react').debuggableVariants.set([])
+        }
+    }
+}

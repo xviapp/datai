@@ -2,6 +2,20 @@
 
 纯单机离线优先（Local-First）的个人全能记录应用，采用 **Expo SDK 58 + TypeScript + `expo-sqlite` + `Zod v4` + `deepseek-flash`** 构建。
 
+## 最新更新
+
+### 2026-11-22
+
+#### 新增
+
+- 可用 `pnpm build:android:release` 和 `pnpm build:android:debug` 分别生成 Release 和 Debug APK。
+
+#### 修复
+
+- Debug APK 可在未连接 Metro 时直接进入首页，解决了停在启动页的问题。
+
+[完整更新记录](docs/releases/release-notes.md)
+
 ## 核心特性
 
 1. **自定义数据模型与声明式显示样式（Schema & View DSL）**
@@ -28,7 +42,11 @@ npm run test:engine
 # 2. 启动 Web 实时预览（自动使用 WASM SQLite + IndexedDB 持久化驱动）
 npm run web
 
-# 3. 编译 Android / iOS 纯离线原生安装包（使用 expo-sqlite JSI 双连接引擎）
+# 3. 生成 Android APK，产物位于 android/app/build/outputs/apk/{release,debug}/
+pnpm build:android:release
+pnpm build:android:debug
+
+# 4. 在设备或模拟器上运行
 npx expo run:android
 npx expo run:ios
 ```
