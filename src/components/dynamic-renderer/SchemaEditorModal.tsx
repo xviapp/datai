@@ -8,6 +8,7 @@ import {
   Pressable,
   ScrollView,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -23,6 +24,8 @@ import type { AccentTone, LibraryBlueprint } from '@/schema/view-dsl';
 interface SchemaEditorModalProps {
   visible: boolean;
   existingLibrary?: LibraryRecord | null;
+  defaultParentSlug?: string | null;
+  onCreateSubLibrary?: (parentSlug: string) => void;
   onClose: () => void;
   onSaved?: (slug: string) => void;
   onDeleted?: (slug: string) => void;
@@ -48,6 +51,8 @@ const TONES: AccentTone[] = ['teal', 'amber', 'rose', 'blue', 'emerald', 'slate'
 export function SchemaEditorModal({
   visible,
   existingLibrary,
+  defaultParentSlug,
+  onCreateSubLibrary,
   onClose,
   onSaved,
   onDeleted,
@@ -61,6 +66,8 @@ export function SchemaEditorModal({
   const [icon, setIcon] = useState('🗂️');
   const [color, setColor] = useState<AccentTone>('teal');
   const [description, setDescription] = useState('');
+  const [parentLibrarySlug, setParentLibrarySlug] = useState('');
+  const [showOnHome, setShowOnHome] = useState(true);
   const [fields, setFields] = useState<FieldDef[]>([]);
 
   // Card View Slots
@@ -76,13 +83,16 @@ export function SchemaEditorModal({
   const [prevSession, setPrevSession] = useState<{
     visible: boolean;
     existingLibrary: LibraryRecord | null | undefined;
-  }>({ visible: false, existingLibrary: undefined });
+    defaultParentSlug: string | null | undefined;
+  }>({ visible: false, existingLibrary: undefined, defaultParentSlug: undefined });
 
   if (
     visible &&
-    (!prevSession.visible || prevSession.existingLibrary !== existingLibrary)
+    (!prevSession.visible ||
+      prevSession.existingLibrary !== existingLibrary ||
+      prevSession.defaultParentSlug !== defaultParentSlug)
   ) {
-    setPrevSession({ visible: true, existingLibrary });
+    setPrevSession({ visible: true, existingLibrary, defaultParentSlug });
     setErrorMsg(null);
     setAiPrompt('');
     setConfirmDelete(false);
@@ -92,6 +102,8 @@ export function SchemaEditorModal({
       setIcon(existingLibrary.icon);
       setColor(existingLibrary.color);
       setDescription(existingLibrary.description);
+      setParentLibrarySlug(existingLibrary.parentLibrarySlug ?? '');
+      setShowOnHome(existingLibrary.showOnHome);
       setFields(existingLibrary.fields);
       setTitleFieldKey(existingLibrary.views.card.titleFieldKey);
       setSubtitleFieldKey(existingLibrary.views.card.subtitleFieldKey ?? '');
@@ -105,27 +117,65 @@ export function SchemaEditorModal({
       }
       setSlug(`custom_${nextIdx}`);
       setName('');
-      setIcon('📒');
-      setColor('teal');
       setDescription('');
-      setFields([
-        { key: 'title', label: '名称标题', type: 'text', required: true },
-        {
-          key: 'tag',
-          label: '分类标签',
-          type: 'select',
-          required: false,
-          options: [
-            { value: '默认', color: '#0F766E' },
-            { value: '重点', color: '#C26A1B' },
-          ],
-        },
-        { key: 'record_date', label: '记录日期', type: 'date', required: true },
-      ]);
-      setTitleFieldKey('title');
-      setSubtitleFieldKey('record_date');
-      setRightBadgeFieldKey('tag');
-      setFooterMetricKeys(['record_date']);
+
+      const presetParent = defaultParentSlug
+        ? libraries.find((l) => l.slug === defaultParentSlug)
+        : undefined;
+
+      if (presetParent) {
+        setIcon('📝');
+        setColor(presetParent.color);
+        setParentLibrarySlug(presetParent.slug);
+        setShowOnHome(false);
+        setFields([
+          {
+            key: `parent_${presetParent.slug}`.slice(0, 28),
+            label: `所属${presetParent.name}`,
+            type: 'relation',
+            required: false,
+            relationConfig: {
+              targetLibrarySlug: presetParent.slug,
+              allowMultiple: false,
+            },
+          },
+          {
+            key: 'note',
+            label: '内容与随感',
+            type: 'text',
+            required: false,
+            multiline: true,
+          },
+          { key: 'record_date', label: '记录日期', type: 'date', required: true },
+        ]);
+        setTitleFieldKey('note');
+        setSubtitleFieldKey('record_date');
+        setRightBadgeFieldKey('');
+        setFooterMetricKeys(['record_date']);
+      } else {
+        setIcon('📒');
+        setColor('teal');
+        setParentLibrarySlug('');
+        setShowOnHome(true);
+        setFields([
+          { key: 'title', label: '名称标题', type: 'text', required: true },
+          {
+            key: 'tag',
+            label: '分类标签',
+            type: 'select',
+            required: false,
+            options: [
+              { value: '默认', color: '#0F766E' },
+              { value: '重点', color: '#C26A1B' },
+            ],
+          },
+          { key: 'record_date', label: '记录日期', type: 'date', required: true },
+        ]);
+        setTitleFieldKey('title');
+        setSubtitleFieldKey('record_date');
+        setRightBadgeFieldKey('tag');
+        setFooterMetricKeys(['record_date']);
+      }
     }
   } else if (!visible && prevSession.visible) {
     setPrevSession((s) => ({ ...s, visible: false }));
@@ -166,6 +216,41 @@ export function SchemaEditorModal({
     );
   };
 
+  const handleSelectParent = (nextParentSlug: string) => {
+    setParentLibrarySlug(nextParentSlug);
+    if (!nextParentSlug) {
+      setShowOnHome(true);
+      return;
+    }
+    if (!parentLibrarySlug) {
+      setShowOnHome(false);
+    }
+    const targetLib = libraries.find((l) => l.slug === nextParentSlug);
+    if (
+      targetLib &&
+      !fields.some(
+        (f) => f.type === 'relation' && f.relationConfig?.targetLibrarySlug === nextParentSlug
+      )
+    ) {
+      const baseKey = `parent_${nextParentSlug}`.slice(0, 28);
+      const usedKeys = new Set(fields.map((f) => f.key));
+      const relKey = usedKeys.has(baseKey) ? `${baseKey}_ref` : baseKey;
+      setFields((prev) => [
+        {
+          key: relKey,
+          label: `所属${targetLib.name}`,
+          type: 'relation',
+          required: false,
+          relationConfig: {
+            targetLibrarySlug: nextParentSlug,
+            allowMultiple: false,
+          },
+        },
+        ...prev,
+      ]);
+    }
+  };
+
   const handleAiAssist = async () => {
     if (!repo || !aiPrompt.trim()) return;
     try {
@@ -173,7 +258,9 @@ export function SchemaEditorModal({
       setErrorMsg(null);
       const scopedPrompt = existingLibrary
         ? `针对已有库 slug="${existingLibrary.slug}" (${existingLibrary.name}) 进行模型/样式调整：${aiPrompt}`
-        : aiPrompt;
+        : defaultParentSlug
+          ? `围绕已有主库 slug="${defaultParentSlug}" 新建或调整附属子记录本：${aiPrompt}`
+          : aiPrompt;
       const plan = await runArchitectAgent(repo, scopedPrompt);
       repo.applyArchitectPlan(plan);
       const targetSlug = plan.libraries[0]?.slug || slug;
@@ -211,6 +298,9 @@ export function SchemaEditorModal({
         description: description.trim(),
         icon: icon.trim() || '📦',
         color,
+        parentLibrarySlug:
+          parentLibrarySlug && parentLibrarySlug !== cleanSlug ? parentLibrarySlug : undefined,
+        showOnHome,
         fields,
         views: {
           card: {
@@ -260,6 +350,10 @@ export function SchemaEditorModal({
     }
   };
 
+  const parentCandidates = libraries.filter(
+    (l) => !l.parentLibrarySlug && l.slug !== slug
+  );
+
   return (
     <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
       <KeyboardAvoidingView
@@ -300,7 +394,7 @@ export function SchemaEditorModal({
                   placeholder={
                     existingLibrary
                       ? '如：加一个报销状态选项，未报销时标黄提醒'
-                      : '如：做一个咖啡豆记录本，记下产地、克重、价格和打分'
+                      : '如：做一个咖啡豆记录本，并配一个冲煮记录附属表'
                   }
                   placeholderTextColor={Palette.inkMuted}
                   style={styles.aiInput}
@@ -323,7 +417,7 @@ export function SchemaEditorModal({
             </View>
 
             {/* 基础信息 */}
-            <Text style={styles.sectionTitle}>1. 名称与配色</Text>
+            <Text style={styles.sectionTitle}>1. 名称与归属方式</Text>
             <View style={styles.rowGap}>
               <TextInput
                 value={icon}
@@ -334,7 +428,7 @@ export function SchemaEditorModal({
               <TextInput
                 value={name}
                 onChangeText={setName}
-                placeholder="记录本名称（如 宠物档案）"
+                placeholder="记录本名称（如 阅读记录）"
                 placeholderTextColor={Palette.inkMuted}
                 style={[styles.input, { flex: 1 }]}
               />
@@ -357,6 +451,71 @@ export function SchemaEditorModal({
               })}
             </View>
 
+            {parentCandidates.length > 0 ? (
+              <View style={styles.hierarchyBox}>
+                <Text style={styles.subFieldHint}>层级归属（可选）：</Text>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                  <View style={styles.typeChipsRow}>
+                    <Pressable
+                      onPress={() => handleSelectParent('')}
+                      style={[styles.typeChip, !parentLibrarySlug && styles.typeChipActive]}
+                    >
+                      <Text
+                        style={[
+                          styles.typeChipText,
+                          !parentLibrarySlug && styles.typeChipTextActive,
+                        ]}
+                      >
+                        独立主记录本
+                      </Text>
+                    </Pressable>
+                    {parentCandidates.map((cand) => {
+                      const active = parentLibrarySlug === cand.slug;
+                      return (
+                        <Pressable
+                          key={cand.slug}
+                          onPress={() => handleSelectParent(cand.slug)}
+                          style={[styles.typeChip, active && styles.typeChipActive]}
+                        >
+                          <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
+                            附属：{cand.icon} {cand.name}
+                          </Text>
+                        </Pressable>
+                      );
+                    })}
+                  </View>
+                </ScrollView>
+
+                <View style={styles.homeSwitchRow}>
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={styles.homeSwitchTitle}>在首页独立显示卡片</Text>
+                    <Text style={styles.homeSwitchDesc}>
+                      {parentLibrarySlug
+                        ? '关闭后将收纳进主记录本内部切换栏与记录详情时间轴中'
+                        : '关闭后可从全局搜索查看，不在首页网格展示'}
+                    </Text>
+                  </View>
+                  <Switch
+                    value={showOnHome}
+                    onValueChange={setShowOnHome}
+                    trackColor={{ false: Palette.borderStrong, true: Palette.brand }}
+                  />
+                </View>
+
+                {existingLibrary && !parentLibrarySlug && onCreateSubLibrary ? (
+                  <Pressable
+                    onPress={() => onCreateSubLibrary(existingLibrary.slug)}
+                    style={styles.spawnSubBtn}
+                  >
+                    <Feather name="corner-down-right" size={14} color={Palette.brand} />
+                    <Text style={styles.spawnSubText}>
+                      为「{existingLibrary.name}」新建附属子记录本（如阅读记录 / 跟进流水）
+                    </Text>
+                  </Pressable>
+                ) : null}
+              </View>
+            ) : null}
+
             {/* 记录项列表 */}
             <View style={styles.sectionHeaderRow}>
               <Text style={styles.sectionTitle}>2. 记录项 ({fields.length})</Text>
@@ -372,7 +531,7 @@ export function SchemaEditorModal({
                   <TextInput
                     value={field.label}
                     onChangeText={(v) => updateFieldAt(index, { label: v })}
-                    placeholder="填写名称，如：金额、备注"
+                    placeholder="填写名称，如：书摘随感、页码"
                     placeholderTextColor={Palette.inkMuted}
                     style={[styles.smallInput, { flex: 1 }]}
                   />
@@ -401,6 +560,24 @@ export function SchemaEditorModal({
                     })}
                   </View>
                 </ScrollView>
+
+                {field.type === 'text' ? (
+                  <View style={styles.typeChipsRow}>
+                    <Pressable
+                      onPress={() => updateFieldAt(index, { multiline: !field.multiline })}
+                      style={[styles.typeChip, field.multiline && styles.typeChipActive]}
+                    >
+                      <Text
+                        style={[
+                          styles.typeChipText,
+                          field.multiline && styles.typeChipTextActive,
+                        ]}
+                      >
+                        {field.multiline ? '✓ 多行长文本（书摘/随感）' : '设为多行长文本'}
+                      </Text>
+                    </Pressable>
+                  </View>
+                ) : null}
 
                 {(field.type === 'select' || field.type === 'multi_select') && (
                   <TextInput
@@ -776,6 +953,48 @@ const styles = StyleSheet.create({
   toneCircleActive: {
     borderWidth: 3,
     borderColor: Palette.inkPrimary,
+  },
+  hierarchyBox: {
+    backgroundColor: Palette.bgCanvas,
+    borderRadius: 14,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    gap: 10,
+  },
+  homeSwitchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 12,
+    paddingTop: 8,
+    borderTopWidth: 1,
+    borderTopColor: Palette.borderHairline,
+  },
+  homeSwitchTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: Palette.inkPrimary,
+  },
+  homeSwitchDesc: {
+    fontSize: 11,
+    color: Palette.inkMuted,
+    lineHeight: 16,
+  },
+  spawnSubBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 11,
+    paddingVertical: 9,
+    borderRadius: 10,
+  },
+  spawnSubText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.brand,
   },
   addFieldBtn: {
     flexDirection: 'row',

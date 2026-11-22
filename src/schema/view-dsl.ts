@@ -98,6 +98,15 @@ export const LibraryBlueprintSchema = z.object({
   description: z.string().default(''),
   icon: z.string().default('📦').describe('单个代表性 Emoji 图标'),
   color: AccentToneEnum.default('teal'),
+  parentLibrarySlug: z
+    .string()
+    .regex(/^[a-z][a-z0-9_]*$/)
+    .optional()
+    .describe('可选：若为附属子记录本（如阅读记录归属书籍），填主记录本的英文 slug；独立主记录本省略此字段'),
+  showOnHome: z
+    .boolean()
+    .optional()
+    .describe('是否在首页网格独立展示卡片；独立主表默认 true，附属子表建议填 false 收纳进主表内部'),
   fields: z.array(FieldDefSchema).min(1),
   views: LibraryLayoutBundleSchema,
 });

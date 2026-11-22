@@ -1,4 +1,5 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
+import type { CaptureEntryContext } from '@/ai/agents';
 import { getDeepSeekApiKey } from '@/ai/settings-store';
 import { getPlatformSqlDriver } from '@/db/driver';
 import { OmniRepository, type LibraryRecord } from '@/db/repository';
@@ -17,8 +18,14 @@ interface OmniContextValue {
   refreshApiKeyState: () => Promise<void>;
   omniModalVisible: boolean;
   omniTargetSlug?: string;
+  omniEntryContext?: CaptureEntryContext;
+  clearOmniEntryContext: () => void;
   omniInitialAction: OmniLaunchAction;
-  openOmniCapture: (targetSlug?: string, initialAction?: OmniLaunchAction) => void;
+  openOmniCapture: (
+    targetSlug?: string,
+    initialAction?: OmniLaunchAction,
+    entryContext?: CaptureEntryContext
+  ) => void;
   closeOmniCapture: () => void;
 }
 
@@ -34,6 +41,8 @@ const OmniContext = createContext<OmniContextValue>({
   refreshApiKeyState: async () => {},
   omniModalVisible: false,
   omniTargetSlug: undefined,
+  omniEntryContext: undefined,
+  clearOmniEntryContext: () => {},
   omniInitialAction: 'text',
   openOmniCapture: () => {},
   closeOmniCapture: () => {},
@@ -49,6 +58,9 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
   const [hasApiKey, setHasApiKey] = useState(false);
   const [omniModalVisible, setOmniModalVisible] = useState(false);
   const [omniTargetSlug, setOmniTargetSlug] = useState<string | undefined>(undefined);
+  const [omniEntryContext, setOmniEntryContext] = useState<CaptureEntryContext | undefined>(
+    undefined
+  );
   const [omniInitialAction, setOmniInitialAction] = useState<OmniLaunchAction>('text');
 
   const refreshApiKeyState = useCallback(async () => {
@@ -93,16 +105,26 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
   }, [refreshApiKeyState]);
 
   const openOmniCapture = useCallback(
-    (targetSlug?: string, initialAction: OmniLaunchAction = 'text') => {
+    (
+      targetSlug?: string,
+      initialAction: OmniLaunchAction = 'text',
+      entryContext?: CaptureEntryContext
+    ) => {
       setOmniTargetSlug(targetSlug);
+      setOmniEntryContext(entryContext);
       setOmniInitialAction(initialAction);
       setOmniModalVisible(true);
     },
     []
   );
 
+  const clearOmniEntryContext = useCallback(() => {
+    setOmniEntryContext(undefined);
+  }, []);
+
   const closeOmniCapture = useCallback(() => {
     setOmniModalVisible(false);
+    setOmniEntryContext(undefined);
     setOmniInitialAction('text');
   }, []);
 
@@ -119,6 +141,8 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
       refreshApiKeyState,
       omniModalVisible,
       omniTargetSlug,
+      omniEntryContext,
+      clearOmniEntryContext,
       omniInitialAction,
       openOmniCapture,
       closeOmniCapture,
@@ -135,6 +159,8 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
       refreshApiKeyState,
       omniModalVisible,
       omniTargetSlug,
+      omniEntryContext,
+      clearOmniEntryContext,
       omniInitialAction,
       openOmniCapture,
       closeOmniCapture,

@@ -1,6 +1,6 @@
 import type { SyncSqlDriver } from './types';
 
-export const LATEST_SCHEMA_VERSION = 2;
+export const LATEST_SCHEMA_VERSION = 3;
 export const MAX_AI_SNAPSHOTS = 20;
 
 export const CORE_MIGRATION_SQL = `
@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS libraries (
   description TEXT NOT NULL DEFAULT '',
   icon TEXT NOT NULL DEFAULT '📦',
   color TEXT NOT NULL DEFAULT 'teal',
+  parent_slug TEXT DEFAULT NULL,
+  show_on_home INTEGER NOT NULL DEFAULT 1,
   fields_json TEXT NOT NULL,
   views_json TEXT NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
@@ -136,6 +138,22 @@ export function runCoreMigrations(driver: SyncSqlDriver): void {
          )`,
         [MAX_AI_SNAPSHOTS]
       );
+
+      driver.execSync('PRAGMA user_version = 2;');
+      version = 2;
+    }
+
+    if (version < 3) {
+      // v3: 为 libraries 增加主从附属标识 parent_slug 与首页显隐控制 show_on_home
+      const libCols = driver.getAllSync<{ name: string }>('PRAGMA table_info(libraries)');
+      if (!libCols.some((c) => c.name === 'parent_slug')) {
+        driver.execSync('ALTER TABLE libraries ADD COLUMN parent_slug TEXT DEFAULT NULL;');
+      }
+      if (!libCols.some((c) => c.name === 'show_on_home')) {
+        driver.execSync(
+          'ALTER TABLE libraries ADD COLUMN show_on_home INTEGER NOT NULL DEFAULT 1;'
+        );
+      }
 
       driver.execSync(`PRAGMA user_version = ${LATEST_SCHEMA_VERSION};`);
     }

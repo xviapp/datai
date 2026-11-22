@@ -23,6 +23,14 @@ import { getAiPreferences } from './settings-store';
 
 export type AssistantIntent = 'architect' | 'analyst' | 'capture';
 
+export interface CaptureEntryContext {
+  entryId: string;
+  title: string;
+  librarySlug: string;
+  libraryName: string;
+  libraryIcon: string;
+}
+
 export type UnifiedAssistantResult =
   | { intent: 'architect'; plan: ArchitectPlan }
   | { intent: 'analyst'; answer: AnalystAnswer }
@@ -37,12 +45,17 @@ const IntentRouterSchema = z.object({
  */
 export async function detectAssistantIntent(
   repo: OmniRepository,
-  userPrompt: string
+  userPrompt: string,
+  entryContext?: CaptureEntryContext
 ): Promise<AssistantIntent> {
   const libNames = repo
     .listLibraries()
     .map((l) => `${l.name}(${l.slug})`)
     .join('、');
+
+  const ctxLine = entryContext
+    ? `\n当前所在详情页：${entryContext.libraryName}「${entryContext.title}」`
+    : '';
 
   const { message } = await callDeepSeekChat({
     thinking: false,
@@ -55,11 +68,11 @@ export async function detectAssistantIntent(
 判定规则：
 - "architect"：用户想新建记录本/数据表，或给现有记录本新增/修改字段、公式、提醒高亮规则、卡片样式（哪怕同时顺带要一张图表）。
 - "analyst"：用户想查询、统计、汇总、排名、对比、排查已有记录的数据，或基于已有记录画统计图表。
-- "capture"：用户想录入一条具体的日常记录（例如刚买了某物花了多少钱、刚看完某部电影、刚吃了某种药）。`,
+- "capture"：用户想录入一条具体的日常记录、进度打卡、书摘随感或跨表新建条目（例如刚买了某物花了多少钱、某本书读到多少页、刚吃了某种药）。`,
       },
       {
         role: 'user',
-        content: `当前已有记录本：${libNames || '无'}\n用户输入：${userPrompt}`,
+        content: `当前已有记录本：${libNames || '无'}${ctxLine}\n用户输入：${userPrompt}`,
       },
     ],
   });
@@ -78,6 +91,7 @@ export async function runUnifiedAssistant(
     imageBase64DataUrl?: string;
     useWebSearch?: boolean;
     targetLibrarySlug?: string;
+    entryContext?: CaptureEntryContext;
   },
   onProgress?: (msg: string) => void,
   forceIntent?: AssistantIntent
@@ -90,7 +104,7 @@ export async function runUnifiedAssistant(
       intent = 'capture';
     } else {
       onProgress?.('正在理解你的想法...');
-      intent = await detectAssistantIntent(repo, cleanText);
+      intent = await detectAssistantIntent(repo, cleanText, params.entryContext);
     }
   }
 
@@ -129,6 +143,8 @@ export async function runArchitectAgent(
     description: l.description,
     icon: l.icon,
     color: l.color,
+    parentLibrarySlug: l.parentLibrarySlug ?? undefined,
+    showOnHome: l.showOnHome,
     fields: l.fields,
     views: l.views,
   }));
@@ -145,7 +161,10 @@ ${schemaSpec}
 2. 若跨表存在关联，使用 type="relation" 并设置 relationConfig.targetLibrarySlug；在被关联表上可善用 type="rollup"（聚合正向字段或 "reverse:<源库slug>.<关联字段key>"）以及 type="formula"（支持 + - * /、DAYS_SINCE(date)、DAYS_UNTIL(date)、MAX、MIN、ROUND、IF）。
 3. 为每个库配置美观实用的 views.card（指定 titleFieldKey、subtitleFieldKey、rightBadgeFieldKey、最多3~4个 footerMetricKeys，以及合理的 highlightRules 预警规则；若有日期字段顺手配置 views.calendar；若有图片/评分顺手配置 views.gallery）。
 4. 若修改已有库（slug 相同），必须完整保留该库原有的存量字段 key，在此基础上追加或调整样式，严禁随意改名已有字段导致用户历史数据丢失。
-5. dashboardWidgets 的 readonlySql 只能查询逻辑视图 v_<slug>（注意 rollup 和 formula 字段不在物理 SQL 视图列中，请在 SQL 内直接用基础列与 entry_relations 做聚合计算）。`;
+5. dashboardWidgets 的 readonlySql 只能查询逻辑视图 v_<slug>（注意 rollup 和 formula 字段不在物理 SQL 视图列中，请在 SQL 内直接用基础列与 entry_relations 做聚合计算）。
+6. 当需求包含「主体 + 附属流水/打卡/阅读记录/跟进日志」的 1:N 主从关系（如 书籍+阅读记录、项目+跟进记录、宠物+医疗记录）时：
+   - 将附属子表设置 parentLibrarySlug 指向主表 slug，并默认设 showOnHome: false（收纳进主表内部，保持首页清爽），同时在附属子表中定义指向主表的 type="relation" 字段（allowMultiple: false）。
+   - 对于书摘、随感、复盘、长备注等段落文本字段，设置 type="text" 且 multiline: true。`;
 
   const userMessage = `当前已有库结构 JSON：\n${JSON.stringify(existingLibs)}\n\n用户的建模/修改需求：\n${userPrompt}`;
 
@@ -173,6 +192,7 @@ export async function runOmniCaptureAgent(
     imageBase64DataUrl?: string;
     useWebSearch?: boolean;
     targetLibrarySlug?: string;
+    entryContext?: CaptureEntryContext;
   },
   onProgress?: (msg: string) => void
 ): Promise<OmniCaptureResult> {
@@ -198,20 +218,32 @@ export async function runOmniCaptureAgent(
 
   // 固定前缀置顶（不放动态日期），最大化命中 DeepSeek 硬盘前缀缓存
   const systemPrompt = `你是「个人全能记录 App」的极速智能录入引擎。
-请将用户的输入（文字、小票/物品照片或网页补充信息）精准拆解为一条或多条待入库草稿，严格输出符合以下 JSON Schema 的 JSON 对象：
+请将用户的输入（文字、小票/书页照片或网页补充信息）精准拆解为一条或多条待入库草稿，严格输出符合以下 JSON Schema 的 JSON 对象：
 ${schemaSpec}
 
 录入规则：
 1. 只能写入用户消息所给目录中存在的 librarySlug，且 data 的键必须严格对应各库的物理字段 key（不要填写 rollup 或 formula 字段）。
 2. 日期字段统一输出 "YYYY-MM-DD" 格式（以用户消息提供的「今天日期」为准；说“今天/刚才”填今天日期，“昨天”自动减 1 天）。
-3. 对于 relation 关联字段：
+3. 对于 relation 关联字段与附属子库：
    - 若匹配到目录「已有记录候选」中的某条记录，请直接填入该记录的真实 ID 数组（如 ["ent_xxx"]）；
-   - 若一句话同时触发新建两条有关联的记录（例如“花1899买了台Switch” -> 先在 my_assets 新建草稿0，再在 daily_bills 新建草稿1关联它），可在草稿1的关联字段填入 ["@prev:0"] 引用同批次下标为 0 的草稿！
+   - 若一句话同时触发新建两条有关联的记录，或记录某附属子库流水但主库尚无该主体（例如“开始读《长安的荔枝》，今天读了30分钟到第50页”且书架尚无此书），请先生成草稿0在主库新建该主体，再生成草稿1在附属子库记录本次流水并在关联字段填入 ["@prev:0"] 引用草稿0！
 4. select / multi_select 字段优先匹配该字段已定义的 options 可选值。`;
 
-  const promptBody = `今天日期（本地时区）: ${todayStr}\n\n${catalog}\n\n${
-    params.targetLibrarySlug ? `用户指定优先归入库: ${params.targetLibrarySlug}\n` : ''
-  }用户输入: ${params.text || '（请识别图片内容并提取入库记录）'}${webContext}`;
+  let contextBlock = '';
+  if (params.entryContext) {
+    const childLibs = repo.listChildLibraries(params.entryContext.librarySlug);
+    const childHint =
+      childLibs.length > 0
+        ? `该记录所属主库关联的附属子库有：${childLibs
+            .map((c) => `${c.icon} ${c.name}(slug: "${c.slug}")`)
+            .join('、')}。若用户输入是在记录该主体的进度打卡、书摘笔记或附属流水，请优先归入对应附属子库，并在关联字段自动填入 ["${params.entryContext.entryId}"]！\n`
+        : '';
+    contextBlock = `[当前详情页绑定记录]：用户正停留在「${params.entryContext.libraryIcon} ${params.entryContext.libraryName}」(slug: ${params.entryContext.librarySlug}) 的记录「${params.entryContext.title}」(ID: "${params.entryContext.entryId}")。\n${childHint}`;
+  } else if (params.targetLibrarySlug) {
+    contextBlock = `用户指定优先归入库: ${params.targetLibrarySlug}\n`;
+  }
+
+  const promptBody = `今天日期（本地时区）: ${todayStr}\n\n${catalog}\n\n${contextBlock}用户输入: ${params.text || '（请识别图片内容并提取入库记录）'}${webContext}`;
 
   const userContent: string | ChatContentBlock[] = params.imageBase64DataUrl
     ? [

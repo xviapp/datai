@@ -30,6 +30,23 @@ export default function HomeVaultScreen() {
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [managingLibrary, setManagingLibrary] = useState<LibraryRecord | null>(null);
 
+  const visibleLibraries = useMemo(
+    () => libraries.filter((l) => l.showOnHome),
+    [libraries]
+  );
+
+  const childLibsByParent = useMemo(() => {
+    const map = new Map<string, LibraryRecord[]>();
+    for (const l of libraries) {
+      if (l.parentLibrarySlug) {
+        const list = map.get(l.parentLibrarySlug) ?? [];
+        list.push(l);
+        map.set(l.parentLibrarySlug, list);
+      }
+    }
+    return map;
+  }, [libraries]);
+
   const totalEntryCount = libraries.reduce((sum, l) => sum + l.entryCount, 0);
 
   const searchHits = useMemo(() => {
@@ -41,7 +58,7 @@ export default function HomeVaultScreen() {
     <View style={styles.safeArea}>
       <TabPageHeader
         title="拾录"
-        subtitle={`${libraries.length} 个记录本 · 共 ${totalEntryCount} 条记录`}
+        subtitle={`${visibleLibraries.length} 个主记录本 · 共 ${totalEntryCount} 条记录`}
         right={
           <>
             {!hasApiKey ? (
@@ -87,7 +104,7 @@ export default function HomeVaultScreen() {
             id="input-global-search"
             value={globalSearch}
             onChangeText={setGlobalSearch}
-            placeholder="搜索全部记录..."
+            placeholder="搜索全部记录与附属笔记..."
             placeholderTextColor={Palette.inkMuted}
             style={styles.searchInput}
           />
@@ -131,8 +148,9 @@ export default function HomeVaultScreen() {
         </View>
 
         <View style={styles.libGrid}>
-          {libraries.map((lib) => {
+          {visibleLibraries.map((lib) => {
             const tone = ToneMap[lib.color] ?? ToneMap.teal;
+            const childLibs = childLibsByParent.get(lib.slug) ?? [];
 
             return (
               <Pressable
@@ -156,11 +174,30 @@ export default function HomeVaultScreen() {
                 <Text style={styles.libDesc} numberOfLines={2}>
                   {lib.description || '点击查看全部记录'}
                 </Text>
+
+                {childLibs.length > 0 ? (
+                  <View style={styles.subLibsRow}>
+                    {childLibs.map((child) => (
+                      <Pressable
+                        key={child.id}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          router.push(`/library/${child.slug}`);
+                        }}
+                        style={[styles.subLibChip, { backgroundColor: tone.soft }]}
+                      >
+                        <Text style={[styles.subLibChipText, { color: tone.ink }]} numberOfLines={1}>
+                          ↳ {child.icon} {child.name} · {child.entryCount}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </View>
+                ) : null}
               </Pressable>
             );
           })}
 
-          {libraries.length === 0 || libraries.length % 2 === 1 ? (
+          {visibleLibraries.length === 0 || visibleLibraries.length % 2 === 1 ? (
             <Pressable
               onPress={() => setCreateModalOpen(true)}
               style={({ pressed }) => [styles.addLibCard, pressed && styles.libCardPressed]}
@@ -402,6 +439,22 @@ const styles = StyleSheet.create({
     color: Palette.inkMuted,
     lineHeight: 18,
     minHeight: 36,
+  },
+  subLibsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 2,
+  },
+  subLibChip: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 8,
+    maxWidth: '100%',
+  },
+  subLibChipText: {
+    fontSize: 11,
+    fontWeight: '700',
   },
   addLibCard: {
     width: '48.3%',

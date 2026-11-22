@@ -33,9 +33,21 @@ export default function LibraryWorkspaceScreen() {
   const [searchText, setSearchText] = useState('');
   const [entryModalOpen, setEntryModalOpen] = useState(false);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
+  const [createSubForParent, setCreateSubForParent] = useState<string | null>(null);
 
   const library = !repo || revision < 0 || !slug ? null : repo.getLibraryBySlug(String(slug));
   const entries = !repo || revision < 0 || !library ? [] : repo.listHydratedEntries(library.slug, searchText);
+
+  const rootParent =
+    !repo || revision < 0 || !library
+      ? null
+      : library.parentLibrarySlug
+        ? repo.getLibraryBySlug(library.parentLibrarySlug)
+        : library;
+  const childLibraries =
+    !repo || revision < 0 || !rootParent ? [] : repo.listChildLibraries(rootParent.slug);
+  const familyLibraries =
+    rootParent && childLibraries.length > 0 ? [rootParent, ...childLibraries] : [];
 
   // 仅展示该记录本已设计过的统计图表
   const designedStatsWidgets =
@@ -68,7 +80,11 @@ export default function LibraryWorkspaceScreen() {
           <Text style={styles.navTitle} numberOfLines={1}>
             {library.icon} {library.name}
           </Text>
-          <Text style={styles.navMeta}>{entries.length} 条记录</Text>
+          <Text style={styles.navMeta}>
+            {library.parentLibrarySlug && rootParent
+              ? `${rootParent.name} · 附属记录 (${entries.length} 条)`
+              : `${entries.length} 条记录`}
+          </Text>
         </View>
 
         <Pressable
@@ -93,6 +109,58 @@ export default function LibraryWorkspaceScreen() {
         contentContainerStyle={[styles.container, { paddingBottom: 88 + insets.bottom }]}
         keyboardShouldPersistTaps="handled"
       >
+        {/* 主从关联库快速切换条 */}
+        {familyLibraries.length > 1 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.familyBar}
+          >
+            {familyLibraries.map((item, idx) => {
+              const active = item.slug === library.slug;
+              const itemTone = ToneMap[item.color] ?? ToneMap.teal;
+              return (
+                <Pressable
+                  key={item.id}
+                  onPress={() => {
+                    if (!active) {
+                      setSearchText('');
+                      setActiveTab('card');
+                      router.replace(`/library/${item.slug}`);
+                    }
+                  }}
+                  style={[
+                    styles.familyChip,
+                    active && {
+                      backgroundColor: itemTone.soft,
+                      borderColor: itemTone.solid,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.familyChipText,
+                      active && { color: itemTone.ink, fontWeight: '800' },
+                    ]}
+                  >
+                    {idx > 0 ? '↳ ' : ''}
+                    {item.icon} {item.name} · {item.entryCount}
+                  </Text>
+                </Pressable>
+              );
+            })}
+            {rootParent ? (
+              <Pressable
+                onPress={() => setCreateSubForParent(rootParent.slug)}
+                style={styles.familyAddChip}
+              >
+                <Feather name="plus" size={13} color={Palette.inkSecondary} />
+                <Text style={styles.familyAddText}>附属表</Text>
+              </Pressable>
+            ) : null}
+          </ScrollView>
+        ) : null}
+
         {/* 视图切换器 */}
         <View style={styles.viewTabsBar}>
           {(
@@ -239,10 +307,30 @@ export default function LibraryWorkspaceScreen() {
       />
 
       <SchemaEditorModal
-        visible={schemaModalOpen}
-        existingLibrary={library}
-        onClose={() => setSchemaModalOpen(false)}
-        onDeleted={() => router.replace('/(tabs)')}
+        visible={schemaModalOpen || Boolean(createSubForParent)}
+        existingLibrary={createSubForParent ? null : library}
+        defaultParentSlug={createSubForParent}
+        onCreateSubLibrary={(parentSlug) => {
+          setSchemaModalOpen(false);
+          setTimeout(() => setCreateSubForParent(parentSlug), 120);
+        }}
+        onClose={() => {
+          setSchemaModalOpen(false);
+          setCreateSubForParent(null);
+        }}
+        onSaved={(savedSlug) => {
+          if (createSubForParent) {
+            setCreateSubForParent(null);
+            router.replace(`/library/${savedSlug}`);
+          }
+        }}
+        onDeleted={() => {
+          if (library.parentLibrarySlug) {
+            router.replace(`/library/${library.parentLibrarySlug}`);
+          } else {
+            router.replace('/(tabs)');
+          }
+        }}
       />
     </SafeAreaView>
   );
@@ -322,6 +410,41 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     padding: 16,
     gap: 14,
+  },
+  familyBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingVertical: 2,
+  },
+  familyChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 999,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+  },
+  familyChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  familyAddChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 11,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderStyle: 'dashed',
+    borderColor: Palette.borderStrong,
+  },
+  familyAddText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
   },
   viewTabsBar: {
     flexDirection: 'row',

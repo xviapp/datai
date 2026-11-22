@@ -55,9 +55,9 @@ const INTENT_LABELS: Record<AssistantIntent, string> = {
 };
 
 const QUICK_EXAMPLES = [
-  { tag: '记一笔', text: '刚用招商信用卡给 Sony 微单买了一块滤镜花了 328 元' },
+  { tag: '记一笔', text: '《长安的荔枝》今晚读了 40 分钟到第 185 页，节奏太紧凑了' },
   { tag: '问数据', text: '算一下每件数码装备加上后续配件账单，总共花了多少钱？' },
-  { tag: '建记录本', text: '帮我建一套「宠物档案」和「疫苗记录」，自动统计总医疗花费' },
+  { tag: '建记录本', text: '帮我建一套「宠物档案」和附属「疫苗医疗记录」，自动统计总花费' },
 ];
 
 export function OmniCaptureModal() {
@@ -69,6 +69,8 @@ export function OmniCaptureModal() {
     hasApiKey,
     omniModalVisible,
     omniTargetSlug,
+    omniEntryContext,
+    clearOmniEntryContext,
     omniInitialAction,
     closeOmniCapture,
   } = useOmni();
@@ -222,6 +224,7 @@ export function OmniCaptureModal() {
           imageBase64DataUrl: imageDataUrl,
           useWebSearch,
           targetLibrarySlug: omniTargetSlug,
+          entryContext: omniEntryContext,
         },
         (msg) => setLoadingStep(msg),
         forceIntent
@@ -331,8 +334,13 @@ export function OmniCaptureModal() {
           <View style={styles.header}>
             <View style={styles.headerTitleRow}>
               <Feather name="message-circle" size={18} color={Palette.brand} />
-              <Text style={styles.headerTitle}>
-                随手说{omniTargetSlug ? ` · ${libMap.get(omniTargetSlug)?.name ?? ''}` : ''}
+              <Text style={styles.headerTitle} numberOfLines={1}>
+                随手说
+                {omniEntryContext
+                  ? ` · ${omniEntryContext.title}`
+                  : omniTargetSlug
+                    ? ` · ${libMap.get(omniTargetSlug)?.name ?? ''}`
+                    : ''}
               </Text>
             </View>
             <Pressable onPress={closeOmniCapture} style={styles.closeBtn}>
@@ -360,11 +368,27 @@ export function OmniCaptureModal() {
               </Pressable>
             ) : null}
 
+            {omniEntryContext ? (
+              <View style={styles.contextBanner}>
+                <Feather name="link-2" size={14} color={Palette.brand} />
+                <Text style={styles.contextBannerText} numberOfLines={1}>
+                  当前关联：{omniEntryContext.libraryIcon} {omniEntryContext.title}
+                </Text>
+                <Pressable hitSlop={8} onPress={clearOmniEntryContext}>
+                  <Feather name="x" size={15} color={Palette.inkMuted} />
+                </Pressable>
+              </View>
+            ) : null}
+
             <TextInput
               value={inputText}
               onChangeText={setInputText}
               multiline
-              placeholder="记一笔、建记录本、查开销、画图表或拍张小票，直接说就行..."
+              placeholder={
+                omniEntryContext
+                  ? `针对「${omniEntryContext.title}」记一笔进度、书摘随感或拍张书页照...`
+                  : '记一笔、建记录本、查开销、画图表或拍张小票，直接说就行...'
+              }
               placeholderTextColor={Palette.inkMuted}
               style={styles.omniInput}
             />
@@ -416,7 +440,7 @@ export function OmniCaptureModal() {
             ) : null}
 
             {/* 快捷示例（无结果时展示） */}
-            {!result && !loadingStep ? (
+            {!result && !loadingStep && !omniEntryContext ? (
               <View style={styles.examplesBox}>
                 {QUICK_EXAMPLES.map((ex, i) => (
                   <Pressable key={i} onPress={() => setInputText(ex.text)} style={styles.examplePill}>
@@ -471,11 +495,30 @@ export function OmniCaptureModal() {
                       <View style={styles.draftFieldsGrid}>
                         {Object.entries(d.data).map(([k, v]) => {
                           const fDef = targetLib?.fields.find((f) => f.key === k);
+                          const formatDraftVal = (rawVal: unknown): string => {
+                            if (Array.isArray(rawVal)) {
+                              return rawVal
+                                .map((item) => {
+                                  const token = String(item);
+                                  if (token.startsWith('@prev:')) {
+                                    const pIdx = Number(token.slice(6));
+                                    return `同批新建记录 #${pIdx + 1}`;
+                                  }
+                                  if (fDef?.type === 'relation' && repo) {
+                                    const hydrated = repo.getHydratedEntryById(token);
+                                    if (hydrated) return hydrated.entry.titleSummary;
+                                  }
+                                  return token;
+                                })
+                                .join('、');
+                            }
+                            return String(rawVal ?? '');
+                          };
                           return (
                             <View key={k} style={styles.draftKvRow}>
                               <Text style={styles.draftKey}>{fDef?.label ?? k}:</Text>
-                              <Text style={styles.draftVal} numberOfLines={2}>
-                                {Array.isArray(v) ? v.join(', ') : String(v ?? '')}
+                              <Text style={styles.draftVal} numberOfLines={3}>
+                                {formatDraftVal(v)}
                               </Text>
                             </View>
                           );
@@ -544,12 +587,27 @@ export function OmniCaptureModal() {
                 ) : null}
                 {result.plan.libraries.map((bp) => {
                   const isUpdate = existingSlugs.has(bp.slug);
+                  const parentLibName = bp.parentLibrarySlug
+                    ? result.plan.libraries.find((x) => x.slug === bp.parentLibrarySlug)?.name ??
+                      libMap.get(bp.parentLibrarySlug)?.name ??
+                      bp.parentLibrarySlug
+                    : null;
                   return (
                     <View key={bp.slug} style={styles.resultCard}>
                       <View style={styles.draftHeader}>
-                        <Text style={styles.draftLibBadge}>
-                          {bp.icon} {bp.name}
-                        </Text>
+                        <View style={styles.planLibTitleRow}>
+                          <Text style={styles.draftLibBadge}>
+                            {bp.icon} {bp.name}
+                          </Text>
+                          {parentLibName ? (
+                            <View style={styles.subLibBadge}>
+                              <Text style={styles.subLibBadgeText}>
+                                附属 · {parentLibName}
+                                {bp.showOnHome === false ? '（收纳）' : ''}
+                              </Text>
+                            </View>
+                          ) : null}
+                        </View>
                         <View
                           style={[
                             styles.opBadge,
@@ -571,7 +629,7 @@ export function OmniCaptureModal() {
                         {bp.fields.map((f) => (
                           <View key={f.key} style={styles.fieldChip}>
                             <Text style={styles.fieldChipText}>
-                              {f.label} · {FIELD_TYPE_NAMES[f.type] ?? f.type}
+                              {f.label} · {f.multiline ? '多行文本' : FIELD_TYPE_NAMES[f.type] ?? f.type}
                             </Text>
                           </View>
                         ))}
@@ -700,11 +758,13 @@ const styles = StyleSheet.create({
     borderBottomColor: Palette.borderHairline,
   },
   headerTitleRow: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },
   headerTitle: {
+    flex: 1,
     fontSize: 17,
     fontWeight: '700',
     color: Palette.inkPrimary,
@@ -718,6 +778,21 @@ const styles = StyleSheet.create({
   bodyContent: {
     paddingVertical: 16,
     gap: 13,
+  },
+  contextBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+    borderRadius: 11,
+  },
+  contextBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.brand,
   },
   keyNotice: {
     flexDirection: 'row',
@@ -921,6 +996,24 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: 8,
+  },
+  planLibTitleRow: {
+    flex: 1,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6,
+  },
+  subLibBadge: {
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 999,
+  },
+  subLibBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.brand,
   },
   draftLibBadge: {
     fontSize: 14,

@@ -30,10 +30,18 @@ export interface LibraryRecord {
   description: string;
   icon: string;
   color: AccentTone;
+  parentLibrarySlug: string | null;
+  showOnHome: boolean;
   fields: FieldDef[];
   views: LibraryLayoutBundle;
   entryCount: number;
   updatedAt: number;
+}
+
+export interface ChildLibrarySection {
+  childLibrary: LibraryRecord;
+  relationFieldKey: string;
+  entries: HydratedEntry[];
 }
 
 export interface LinkedEntryRef {
@@ -127,6 +135,7 @@ type SnapshotPayload =
       kind: 'entry_deleted';
       entry: Record<string, unknown>;
       relations: Array<Record<string, unknown>>;
+      detachedSources?: Array<{ id: string; prevDataJson: string }>;
     }
   | {
       kind: 'library_deleted';
@@ -134,6 +143,11 @@ type SnapshotPayload =
       entries: Array<Record<string, unknown>>;
       relations: Array<Record<string, unknown>>;
       widgets: Array<Record<string, unknown>>;
+      detachedChildLibraries?: Array<{
+        id: string;
+        parent_slug: string | null;
+        show_on_home: number;
+      }>;
     }
   | {
       kind: 'architect_plan';
@@ -247,6 +261,8 @@ export class OmniRepository {
       description: string;
       icon: string;
       color: AccentTone;
+      parent_slug: string | null;
+      show_on_home: number;
       fields_json: string;
       views_json: string;
       updated_at: number;
@@ -266,6 +282,8 @@ export class OmniRepository {
       description: r.description,
       icon: r.icon,
       color: r.color,
+      parentLibrarySlug: r.parent_slug || null,
+      showOnHome: r.show_on_home !== 0,
       fields: JSON.parse(r.fields_json) as FieldDef[],
       views: JSON.parse(r.views_json) as LibraryLayoutBundle,
       entryCount: Number(r.entry_count ?? 0),
@@ -355,6 +373,10 @@ export class OmniRepository {
     return this.ensureLibrariesCache().list;
   }
 
+  listChildLibraries(parentSlug: string): LibraryRecord[] {
+    return this.ensureLibrariesCache().list.filter((l) => l.parentLibrarySlug === parentSlug);
+  }
+
   getLibraryBySlug(slug: string): LibraryRecord | null {
     return this.ensureLibrariesCache().bySlug.get(slug) ?? null;
   }
@@ -365,10 +387,12 @@ export class OmniRepository {
 
   private upsertLibraryInternal(bp: LibraryBlueprint, sortOrder?: number): string {
     const now = Date.now();
-    const existing = this.driver.getFirstSync<{ id: string; sort_order: number }>(
-      'SELECT id, sort_order FROM libraries WHERE slug = ?',
-      [bp.slug]
-    );
+    const existing = this.driver.getFirstSync<{
+      id: string;
+      sort_order: number;
+      parent_slug: string | null;
+      show_on_home: number;
+    }>('SELECT id, sort_order, parent_slug, show_on_home FROM libraries WHERE slug = ?', [bp.slug]);
 
     const id = existing ? existing.id : createId('lib');
     let order = sortOrder ?? existing?.sort_order;
@@ -379,17 +403,60 @@ export class OmniRepository {
       order = (maxRow?.max_order ?? -1) + 1;
     }
 
+    const parentSlug =
+      bp.parentLibrarySlug && bp.parentLibrarySlug !== bp.slug ? bp.parentLibrarySlug : null;
+
+    let normalizedFields = bp.fields;
+    if (
+      parentSlug &&
+      !bp.fields.some(
+        (f) => f.type === 'relation' && f.relationConfig?.targetLibrarySlug === parentSlug
+      )
+    ) {
+      const baseKey = `parent_${parentSlug}`.replace(/[^a-z0-9_]/g, '_');
+      const usedKeys = new Set(bp.fields.map((f) => f.key));
+      const relKey = usedKeys.has(baseKey) ? `${baseKey}_ref` : baseKey;
+      normalizedFields = [
+        {
+          key: relKey,
+          label: '关联主记录',
+          type: 'relation',
+          required: false,
+          relationConfig: {
+            targetLibrarySlug: parentSlug,
+            allowMultiple: false,
+          },
+        },
+        ...bp.fields,
+      ];
+    }
+
+    const showOnHome =
+      bp.showOnHome !== undefined
+        ? bp.showOnHome
+          ? 1
+          : 0
+        : existing
+          ? parentSlug && !existing.parent_slug
+            ? 0
+            : Number(existing.show_on_home ?? 1)
+          : parentSlug
+            ? 0
+            : 1;
+
     if (existing) {
       this.driver.runSync(
         `UPDATE libraries
-         SET name = ?, description = ?, icon = ?, color = ?, fields_json = ?, views_json = ?, updated_at = ?
+         SET name = ?, description = ?, icon = ?, color = ?, parent_slug = ?, show_on_home = ?, fields_json = ?, views_json = ?, updated_at = ?
          WHERE id = ?`,
         [
           bp.name,
           bp.description ?? '',
           bp.icon || '📦',
           bp.color || 'teal',
-          JSON.stringify(bp.fields),
+          parentSlug,
+          showOnHome,
+          JSON.stringify(normalizedFields),
           JSON.stringify(bp.views),
           now,
           id,
@@ -397,8 +464,8 @@ export class OmniRepository {
       );
     } else {
       this.driver.runSync(
-        `INSERT INTO libraries (id, slug, name, description, icon, color, fields_json, views_json, sort_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO libraries (id, slug, name, description, icon, color, parent_slug, show_on_home, fields_json, views_json, sort_order, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           id,
           bp.slug,
@@ -406,7 +473,9 @@ export class OmniRepository {
           bp.description ?? '',
           bp.icon || '📦',
           bp.color || 'teal',
-          JSON.stringify(bp.fields),
+          parentSlug,
+          showOnHome,
+          JSON.stringify(normalizedFields),
           JSON.stringify(bp.views),
           order,
           now,
@@ -415,7 +484,7 @@ export class OmniRepository {
       );
     }
 
-    compileLibrarySqlView(this.driver, id, bp.slug, bp.fields);
+    compileLibrarySqlView(this.driver, id, bp.slug, normalizedFields);
     this.invalidateLibrariesCache();
     return id;
   }
@@ -446,6 +515,11 @@ export class OmniRepository {
               OR target_entry_id IN (SELECT id FROM entries WHERE library_id = ?)`,
           [libId, libId]
         );
+        const detachedChildLibraries = this.driver.getAllSync<{
+          id: string;
+          parent_slug: string | null;
+          show_on_home: number;
+        }>('SELECT id, parent_slug, show_on_home FROM libraries WHERE parent_slug = ?', [slug]);
 
         const allRawWidgets = this.driver.getAllSync<Record<string, unknown>>(
           'SELECT * FROM dashboard_widgets'
@@ -462,10 +536,19 @@ export class OmniRepository {
           entries: libEntries,
           relations: libRelations,
           widgets: matchedWidgets,
+          detachedChildLibraries,
         });
 
         for (const w of matchedWidgets) {
           this.driver.runSync('DELETE FROM dashboard_widgets WHERE id = ?', [String(w.id)]);
+        }
+
+        // 若该库下挂有附属子库，解绑为独立可见记录本，防止子库因隐藏而无法访问
+        if (detachedChildLibraries.length > 0) {
+          this.driver.runSync(
+            'UPDATE libraries SET parent_slug = NULL, show_on_home = 1 WHERE parent_slug = ?',
+            [slug]
+          );
         }
       }
 
@@ -480,11 +563,31 @@ export class OmniRepository {
     searchText: string;
   } {
     const titleKey = lib.views.card.titleFieldKey || lib.fields[0]?.key || '';
-    const rawTitle = data[titleKey];
-    const titleSummary =
-      rawTitle !== undefined && rawTitle !== null && String(rawTitle).trim() !== ''
+    let rawTitle = data[titleKey];
+    if (rawTitle === undefined || rawTitle === null || String(rawTitle).trim() === '') {
+      const fallbackField = lib.fields.find(
+        (f) =>
+          (f.type === 'text' || f.type === 'select' || f.type === 'date') &&
+          data[f.key] !== undefined &&
+          data[f.key] !== null &&
+          String(data[f.key]).trim() !== ''
+      );
+      if (fallbackField) {
+        rawTitle = data[fallbackField.key];
+      }
+    }
+    const firstLine =
+      rawTitle !== undefined && rawTitle !== null
         ? String(rawTitle)
-        : `${lib.name}记录`;
+            .split(/\r?\n/)
+            .map((s) => s.trim())
+            .find(Boolean) ?? ''
+        : '';
+    const titleSummary = firstLine
+      ? firstLine.length > 72
+        ? `${firstLine.slice(0, 72)}…`
+        : firstLine
+      : `${lib.name}记录`;
 
     const fieldByKey = new Map(lib.fields.map((f) => [f.key, f]));
     const parts: string[] = [titleSummary];
@@ -621,11 +724,53 @@ export class OmniRepository {
         [entryId, entryId]
       );
 
+      // 对所有反向关联到该记录的子记录/引用记录：保留记录本身，仅干净断开关联（同步清理 data_json 中的悬空 ID）
+      const fieldsBySourceId = new Map<string, Set<string>>();
+      for (const r of relRows) {
+        if (String(r.target_entry_id) === entryId) {
+          const srcId = String(r.source_entry_id);
+          let keys = fieldsBySourceId.get(srcId);
+          if (!keys) {
+            keys = new Set<string>();
+            fieldsBySourceId.set(srcId, keys);
+          }
+          keys.add(String(r.field_key));
+        }
+      }
+
+      const detachedSources: Array<{ id: string; prevDataJson: string }> = [];
+      for (const [srcId, fieldKeys] of fieldsBySourceId.entries()) {
+        const srcRow = this.driver.getFirstSync<{ id: string; data_json: string }>(
+          'SELECT id, data_json FROM entries WHERE id = ?',
+          [srcId]
+        );
+        if (!srcRow) continue;
+        detachedSources.push({ id: srcRow.id, prevDataJson: srcRow.data_json });
+        try {
+          const parsedData = JSON.parse(srcRow.data_json) as Record<string, unknown>;
+          for (const fk of fieldKeys) {
+            const cur = parsedData[fk];
+            if (Array.isArray(cur)) {
+              parsedData[fk] = cur.map(String).filter((id) => id !== entryId);
+            } else if (cur === entryId) {
+              parsedData[fk] = [];
+            }
+          }
+          this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+            JSON.stringify(parsedData),
+            srcRow.id,
+          ]);
+        } catch {
+          // ignore malformed payload
+        }
+      }
+
       const title = String(entryRow.title_summary ?? '记录');
       snapshotId = this.saveSnapshotInternal(`删除记录「${title}」`, {
         kind: 'entry_deleted',
         entry: entryRow,
         relations: relRows,
+        detachedSources,
       });
 
       this.driver.runSync('DELETE FROM entries WHERE id = ?', [entryId]);
@@ -868,6 +1013,78 @@ export class OmniRepository {
         parsedJsonCache
       ),
     };
+  }
+
+  /**
+   * 查询某条主记录下挂载的全部附属子表区块及其已水合的明细条目（按子表视图规则或时间倒序排列）
+   */
+  listChildSectionsForEntry(entryId: string, parentLibrarySlug: string): ChildLibrarySection[] {
+    const { byId: allLibsById, bySlug: allLibsBySlug } = this.ensureLibrariesCache();
+    const childLibs = this.listChildLibraries(parentLibrarySlug);
+    if (childLibs.length === 0) return [];
+
+    const sections: ChildLibrarySection[] = [];
+    for (const childLib of childLibs) {
+      const relField = childLib.fields.find(
+        (f) => f.type === 'relation' && f.relationConfig?.targetLibrarySlug === parentLibrarySlug
+      );
+      if (!relField) continue;
+
+      const rows = this.driver.getAllSync<RawEntryRow>(
+        `SELECT s.id, s.library_id, s.title_summary, s.data_json, s.created_at, s.updated_at
+         FROM entry_relations r
+         JOIN entries s ON s.id = r.source_entry_id
+         WHERE r.target_entry_id = ? AND s.library_id = ? AND r.field_key = ?
+         ORDER BY s.created_at DESC`,
+        [entryId, childLib.id, relField.key]
+      );
+
+      if (rows.length === 0) {
+        sections.push({
+          childLibrary: childLib,
+          relationFieldKey: relField.key,
+          entries: [],
+        });
+        continue;
+      }
+
+      const { forwardBySourceId, backByTargetId } = this.loadRelationsBatch(rows.map((r) => r.id));
+      const parsedJsonCache = new Map<string, Record<string, unknown>>();
+      const hydrated = rows.map((row) =>
+        this.hydrateRowWithRelations(
+          row,
+          childLib,
+          allLibsById,
+          allLibsBySlug,
+          forwardBySourceId.get(row.id) ?? [],
+          backByTargetId.get(row.id) ?? [],
+          parsedJsonCache
+        )
+      );
+
+      const sortKey = childLib.views.card.sortFieldKey;
+      const sortDir = childLib.views.card.sortDir ?? 'desc';
+      if (sortKey) {
+        hydrated.sort((a, b) => {
+          const va = a.computedData[sortKey];
+          const vb = b.computedData[sortKey];
+          if (va === vb) return b.createdAt - a.createdAt;
+          if (typeof va === 'number' && typeof vb === 'number') {
+            return sortDir === 'asc' ? va - vb : vb - va;
+          }
+          const cmp = String(va ?? '').localeCompare(String(vb ?? ''));
+          return sortDir === 'asc' ? cmp : -cmp;
+        });
+      }
+
+      sections.push({
+        childLibrary: childLib,
+        relationFieldKey: relField.key,
+        entries: hydrated,
+      });
+    }
+
+    return sections;
   }
 
   private hydrateRowWithRelations(
@@ -1487,6 +1704,20 @@ export class OmniRepository {
             throw new Error('所属记录本已被删除，请先撤销删除记录本的操作');
           }
           this.insertRawEntry(e);
+          if (payload.detachedSources) {
+            for (const src of payload.detachedSources) {
+              const srcExists = this.driver.getFirstSync<{ id: string }>(
+                'SELECT id FROM entries WHERE id = ?',
+                [src.id]
+              );
+              if (srcExists) {
+                this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+                  src.prevDataJson,
+                  src.id,
+                ]);
+              }
+            }
+          }
           this.insertRawRelationsSafe(payload.relations);
         } else if (payload.kind === 'library_deleted') {
           const l = payload.library;
@@ -1507,6 +1738,14 @@ export class OmniRepository {
           for (const w of payload.widgets) {
             this.insertRawWidget(w);
           }
+          if (payload.detachedChildLibraries) {
+            for (const child of payload.detachedChildLibraries) {
+              this.driver.runSync(
+                'UPDATE libraries SET parent_slug = ?, show_on_home = ? WHERE id = ?',
+                [child.parent_slug ?? null, Number(child.show_on_home ?? 0), child.id]
+              );
+            }
+          }
         } else if (payload.kind === 'architect_plan') {
           for (const slug of payload.createdLibrarySlugs) {
             dropLibrarySqlView(this.driver, slug);
@@ -1526,16 +1765,21 @@ export class OmniRepository {
               'SELECT id FROM libraries WHERE id = ?',
               [String(prev.id)]
             );
+            const prevParentSlug = prev.parent_slug ? String(prev.parent_slug) : null;
+            const prevShowOnHome =
+              prev.show_on_home === undefined ? (prevParentSlug ? 0 : 1) : Number(prev.show_on_home);
             if (exists) {
               this.driver.runSync(
                 `UPDATE libraries
-                 SET name = ?, description = ?, icon = ?, color = ?, fields_json = ?, views_json = ?, updated_at = ?
+                 SET name = ?, description = ?, icon = ?, color = ?, parent_slug = ?, show_on_home = ?, fields_json = ?, views_json = ?, updated_at = ?
                  WHERE id = ?`,
                 [
                   String(prev.name),
                   String(prev.description ?? ''),
                   String(prev.icon ?? '📦'),
                   String(prev.color ?? 'teal'),
+                  prevParentSlug,
+                  prevShowOnHome,
                   String(prev.fields_json),
                   String(prev.views_json),
                   Number(prev.updated_at ?? Date.now()),
@@ -1565,9 +1809,12 @@ export class OmniRepository {
   }
 
   private insertRawLibrary(l: Record<string, unknown>): void {
+    const parentSlug = l.parent_slug ? String(l.parent_slug) : null;
+    const showOnHome =
+      l.show_on_home === undefined ? (parentSlug ? 0 : 1) : Number(l.show_on_home);
     this.driver.runSync(
-      `INSERT INTO libraries (id, slug, name, description, icon, color, fields_json, views_json, sort_order, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO libraries (id, slug, name, description, icon, color, parent_slug, show_on_home, fields_json, views_json, sort_order, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         String(l.id),
         String(l.slug),
@@ -1575,6 +1822,8 @@ export class OmniRepository {
         String(l.description ?? ''),
         String(l.icon ?? '📦'),
         String(l.color ?? 'teal'),
+        parentSlug,
+        showOnHome,
         String(l.fields_json),
         String(l.views_json),
         Number(l.sort_order ?? 0),
@@ -1613,7 +1862,7 @@ export class OmniRepository {
       if (!srcExists || !tgtExists) continue;
       this.driver.runSync(
         `INSERT OR IGNORE INTO entry_relations (id, source_entry_id, target_entry_id, source_library_id, field_key, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+          VALUES (?, ?, ?, ?, ?, ?)`,
         [
           String(r.id),
           String(r.source_entry_id),
@@ -1737,6 +1986,7 @@ export class OmniRepository {
         name: l.name,
         description: l.description,
         icon: l.icon,
+        parentLibrarySlug: l.parentLibrarySlug,
         fields: l.fields,
         recentEntries,
       };

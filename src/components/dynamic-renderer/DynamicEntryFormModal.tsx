@@ -23,11 +23,19 @@ import { evaluateFormula } from '@/engine/formula';
 import { resolveImageUri, savePickedImageToStorage } from '@/engine/image-storage';
 import type { FieldDef } from '@/schema/field-defs';
 
+export interface LockedRelationContext {
+  fieldKey: string;
+  targetEntryId: string;
+  targetTitle: string;
+  targetLibraryIcon?: string;
+}
+
 interface DynamicEntryFormModalProps {
   visible: boolean;
   library: LibraryRecord;
   initialData?: Record<string, unknown>;
   editingEntryId?: string;
+  lockedRelation?: LockedRelationContext;
   onClose: () => void;
   onSaved?: (entryId: string) => void;
 }
@@ -38,11 +46,14 @@ function quickDateStr(offsetDays: number): string {
 
 function buildInitialFormValues(
   library: LibraryRecord,
-  initialData?: Record<string, unknown>
+  initialData?: Record<string, unknown>,
+  lockedRelation?: LockedRelationContext
 ): Record<string, unknown> {
   const defaults: Record<string, unknown> = {};
   for (const f of library.fields) {
-    if (initialData && initialData[f.key] !== undefined) {
+    if (lockedRelation && f.key === lockedRelation.fieldKey && !initialData?.[f.key]) {
+      defaults[f.key] = [lockedRelation.targetEntryId];
+    } else if (initialData && initialData[f.key] !== undefined) {
       defaults[f.key] = initialData[f.key];
     } else if (f.type === 'date') {
       defaults[f.key] = quickDateStr(0);
@@ -64,13 +75,14 @@ export function DynamicEntryFormModal({
   library,
   initialData,
   editingEntryId,
+  lockedRelation,
   onClose,
   onSaved,
 }: DynamicEntryFormModalProps) {
   const { repo } = useOmni();
   const insets = useSafeAreaInsets();
   const [formValues, setFormValues] = useState<Record<string, unknown>>(() =>
-    buildInitialFormValues(library, initialData)
+    buildInitialFormValues(library, initialData, lockedRelation)
   );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [prevSession, setPrevSession] = useState({
@@ -78,6 +90,7 @@ export function DynamicEntryFormModal({
     librarySlug: library.slug,
     editingEntryId,
     initialData,
+    lockedTargetId: lockedRelation?.targetEntryId,
   });
 
   if (
@@ -85,15 +98,17 @@ export function DynamicEntryFormModal({
     (!prevSession.visible ||
       prevSession.librarySlug !== library.slug ||
       prevSession.editingEntryId !== editingEntryId ||
-      prevSession.initialData !== initialData)
+      prevSession.initialData !== initialData ||
+      prevSession.lockedTargetId !== lockedRelation?.targetEntryId)
   ) {
     setPrevSession({
       visible: true,
       librarySlug: library.slug,
       editingEntryId,
       initialData,
+      lockedTargetId: lockedRelation?.targetEntryId,
     });
-    setFormValues(buildInitialFormValues(library, initialData));
+    setFormValues(buildInitialFormValues(library, initialData, lockedRelation));
     setErrorMsg(null);
   } else if (!visible && prevSession.visible) {
     setPrevSession((s) => ({ ...s, visible: false }));
@@ -163,16 +178,28 @@ export function DynamicEntryFormModal({
               </View>
             ) : null}
 
-            {library.fields.map((field) => (
-              <FieldInputBlock
-                key={field.key}
-                field={field}
-                value={formValues[field.key]}
-                allValues={formValues}
-                onChange={(v) => setFieldVal(field.key, v)}
-                onPickImage={() => pickImageForField(field.key)}
-              />
-            ))}
+            {lockedRelation ? (
+              <View style={styles.lockedRelBanner}>
+                <Feather name="link-2" size={14} color={Palette.brand} />
+                <Text style={styles.lockedRelText} numberOfLines={1}>
+                  归属记录：{lockedRelation.targetLibraryIcon ? `${lockedRelation.targetLibraryIcon} ` : ''}
+                  {lockedRelation.targetTitle}
+                </Text>
+              </View>
+            ) : null}
+
+            {library.fields
+              .filter((field) => !lockedRelation || field.key !== lockedRelation.fieldKey)
+              .map((field) => (
+                <FieldInputBlock
+                  key={field.key}
+                  field={field}
+                  value={formValues[field.key]}
+                  allValues={formValues}
+                  onChange={(v) => setFieldVal(field.key, v)}
+                  onPickImage={() => pickImageForField(field.key)}
+                />
+              ))}
           </ScrollView>
 
           <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
@@ -243,9 +270,12 @@ function FieldInputBlock({
         <TextInput
           value={String(value ?? '')}
           onChangeText={onChange}
+          multiline={Boolean(field.multiline)}
+          numberOfLines={field.multiline ? 4 : 1}
+          textAlignVertical={field.multiline ? 'top' : 'center'}
           placeholder={field.placeholder || `请输入${field.label}`}
           placeholderTextColor={Palette.inkMuted}
-          style={styles.textInput}
+          style={[styles.textInput, field.multiline && styles.multilineInput]}
         />
       ) : null}
 
@@ -475,6 +505,21 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
+  lockedRelBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  lockedRelText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '700',
+    color: Palette.brand,
+  },
   fieldGroup: {
     gap: 8,
   },
@@ -495,6 +540,11 @@ const styles = StyleSheet.create({
     paddingVertical: 11,
     fontSize: 15,
     color: Palette.inkPrimary,
+  },
+  multilineInput: {
+    minHeight: 104,
+    lineHeight: 22,
+    paddingTop: 12,
   },
   dateBlock: {
     gap: 8,

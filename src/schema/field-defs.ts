@@ -54,6 +54,10 @@ export const FieldDefSchema = z.object({
   type: FieldTypeEnum,
   required: z.boolean().default(false),
   placeholder: z.string().optional(),
+  multiline: z
+    .boolean()
+    .optional()
+    .describe('是否启用多行长文本输入与段落展示（仅 text 类型有效，适合书摘、随感、复盘笔记）'),
   unit: z.string().optional().describe('展示单位，如 元、天、片、次'),
   options: z.array(FieldOptionSchema).optional(),
   relationConfig: RelationConfigSchema.optional(),

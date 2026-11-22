@@ -86,7 +86,12 @@ function runTests() {
   repo.seedIfEmpty();
 
   const libs = repo.listLibraries();
-  assert.equal(libs.length, 5, 'Should seed 5 default personal libraries');
+  assert.equal(libs.length, 7, 'Should seed 7 default libraries (6 primary + 1 reading_logs sub-library)');
+  assert.equal(
+    libs.filter((l) => l.showOnHome).length,
+    6,
+    '6 primary libraries should be shown on Home by default'
+  );
 
   // Verify reverse rollup + formula on Sony A7C2 asset
   const assets = repo.listHydratedEntries('my_assets');
@@ -343,7 +348,7 @@ function runTests() {
   };
 
   const snapId = repo.applyArchitectPlan(safePlan);
-  assert.equal(repo.listLibraries().length, 6, 'workout_logs should be added');
+  assert.equal(repo.listLibraries().length, 8, 'workout_logs should be added');
   const wEntryId = repo.createEntry('workout_logs', { movement: '深蹲', weight_kg: 100, reps: 8 });
   assert.equal(repo.getHydratedEntryById(wEntryId)?.entry.computedData.volume, 800);
 
@@ -358,7 +363,7 @@ function runTests() {
 
   // Undo architect plan: workout_logs removed, but unrelatedBillId MUST survive!
   repo.undoSnapshot(snapId);
-  assert.equal(repo.listLibraries().length, 5, 'Undo should restore library count back to 5');
+  assert.equal(repo.listLibraries().length, 7, 'Undo should restore library count back to 7');
   assert.equal(repo.getLibraryBySlug('workout_logs'), null, 'workout_logs should be removed after undo');
   assert.ok(
     repo.getHydratedEntryById(unrelatedBillId),
@@ -371,6 +376,123 @@ function runTests() {
   assert.equal(formatLocalDate(localMidnight), '2026-11-22');
   assert.equal(formatLocalDateOffset(-1, localMidnight), '2026-11-21');
   console.log('   ✓ Local date helpers verified');
+
+  console.log('11. Testing Master-Detail Sub-Libraries (books <-> reading_logs), multiline quotes & detach-on-delete...');
+  const readingLogsLib = repo.getLibraryBySlug('reading_logs');
+  assert.ok(readingLogsLib, 'reading_logs sub-library must exist');
+  assert.equal(readingLogsLib!.parentLibrarySlug, 'books');
+  assert.equal(readingLogsLib!.showOnHome, false);
+  assert.equal(repo.listChildLibraries('books').length, 1);
+
+  const catalogPrompt = repo.getAiCatalogPrompt(true);
+  assert.ok(
+    catalogPrompt.includes('附属子库 -> 归属主库 `books`'),
+    'AI catalog must expose parent-child sub-library relationship'
+  );
+  assert.ok(
+    catalogPrompt.includes('[多行长文本/书摘笔记]'),
+    'AI catalog must expose multiline text field hint'
+  );
+
+  const books = repo.listHydratedEntries('books');
+  const lizhi = books.find((b) => b.titleSummary === '长安的荔枝');
+  assert.ok(lizhi, '长安的荔枝 should exist');
+  assert.equal(lizhi!.computedData.current_page, 148, 'MAX(end_page) rollup should be 148');
+  assert.equal(lizhi!.computedData.total_minutes, 80, 'SUM(duration_min) rollup should be 80');
+  assert.equal(lizhi!.computedData.log_count, 2, 'COUNT rollup should be 2');
+  assert.equal(lizhi!.computedData.progress_pct, 68.5, 'Reading progress formula should be 68.5%');
+
+  // Verify pure quote log (no page/duration numbers) coexists cleanly with structured metrics
+  const pureQuoteLogId = repo.createEntry('reading_logs', {
+    book: [lizhi!.id],
+    read_date: '2026-11-22',
+    note: '纯书摘测试第一行\n第二行详细感悟不破坏单行摘要',
+  });
+  const pureQuoteHydrated = repo.getHydratedEntryById(pureQuoteLogId);
+  assert.equal(
+    pureQuoteHydrated?.entry.titleSummary,
+    '纯书摘测试第一行',
+    'Multiline note titleSummary should extract clean first line'
+  );
+
+  const lizhiAfterQuote = repo.getHydratedEntryById(lizhi!.id)!.entry;
+  assert.equal(lizhiAfterQuote.computedData.log_count, 3, 'log_count should increment to 3');
+  assert.equal(lizhiAfterQuote.computedData.current_page, 148, 'current_page should remain 148');
+  assert.equal(lizhiAfterQuote.computedData.total_minutes, 80, 'total_minutes should remain 80');
+
+  const childSections = repo.listChildSectionsForEntry(lizhi!.id, 'books');
+  assert.equal(childSections.length, 1);
+  assert.equal(childSections[0].entries.length, 3);
+
+  // Verify brand-new book with 0 logs still exposes empty child timeline section for immediate inline logging
+  const emptyBookId = repo.createEntry('books', {
+    book_title: '太白金星有点烦',
+    author: '马伯庸',
+    status: '想读',
+    total_pages: 260,
+  });
+  const emptySections = repo.listChildSectionsForEntry(emptyBookId, 'books');
+  assert.equal(emptySections.length, 1);
+  assert.equal(emptySections[0].entries.length, 0);
+
+  // Verify deleting parent book detaches child reading logs WITHOUT deleting them, and undo restores full link!
+  const delBookSnapId = repo.deleteEntry(lizhi!.id);
+  assert.ok(delBookSnapId);
+  assert.equal(repo.getHydratedEntryById(lizhi!.id), null, 'Book should be deleted');
+  const survivingQuote = repo.getHydratedEntryById(pureQuoteLogId);
+  assert.ok(survivingQuote, 'Child reading log MUST survive parent book deletion (detach mode)');
+  assert.deepEqual(
+    survivingQuote!.entry.rawData.book,
+    [],
+    'Detached child reading log data_json must have clean empty relation array'
+  );
+  assert.deepEqual(survivingQuote!.entry.forwardLinks.book ?? [], []);
+
+  repo.undoSnapshot(delBookSnapId!);
+  const restoredLizhi = repo.getHydratedEntryById(lizhi!.id);
+  assert.ok(restoredLizhi, 'Book should be restored after undo');
+  assert.equal(restoredLizhi!.entry.computedData.log_count, 3, 'All 3 child logs must re-attach on undo');
+  assert.deepEqual(repo.getHydratedEntryById(pureQuoteLogId)!.entry.rawData.book, [lizhi!.id]);
+
+  // Verify deleting parent library detaches hidden sub-library to Home so it never becomes unreachable
+  repo.deleteLibrary('books');
+  const detachedLogsLib = repo.getLibraryBySlug('reading_logs');
+  assert.equal(detachedLogsLib?.parentLibrarySlug, null);
+  assert.equal(detachedLogsLib?.showOnHome, true, 'Orphaned sub-library must become visible on Home');
+  const libDelSnap = repo.listSnapshots()[0];
+  repo.undoSnapshot(libDelSnap.id);
+  assert.equal(repo.getLibraryBySlug('reading_logs')?.parentLibrarySlug, 'books');
+  assert.equal(repo.getLibraryBySlug('reading_logs')?.showOnHome, false);
+  // Verify v2 -> v3 incremental SQLite migration on legacy database without parent_slug/show_on_home
+  const legacyDriver = createNodeSqliteDriver();
+  legacyDriver.execSync(`
+    CREATE TABLE libraries (
+      id TEXT PRIMARY KEY NOT NULL,
+      slug TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      icon TEXT NOT NULL DEFAULT '📦',
+      color TEXT NOT NULL DEFAULT 'teal',
+      fields_json TEXT NOT NULL,
+      views_json TEXT NOT NULL,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    INSERT INTO libraries (id, slug, name, description, icon, color, fields_json, views_json, sort_order, created_at, updated_at)
+    VALUES ('lib_old', 'old_notes', '旧版笔记', '', '📒', 'teal', '[{"key":"title","label":"标题","type":"text","required":true}]', '{"card":{"titleFieldKey":"title","footerMetricKeys":[],"sortDir":"desc","highlightRules":[]}}', 0, 1000, 1000);
+    PRAGMA user_version = 2;
+  `);
+  const migratedRepo = new OmniRepository(legacyDriver);
+  const migratedLib = migratedRepo.getLibraryBySlug('old_notes');
+  assert.ok(migratedLib);
+  assert.equal(migratedLib!.parentLibrarySlug, null);
+  assert.equal(migratedLib!.showOnHome, true);
+  assert.equal(
+    legacyDriver.getFirstSync<{ user_version: number }>('PRAGMA user_version')?.user_version,
+    LATEST_SCHEMA_VERSION
+  );
+  console.log('   ✓ Sub-library hierarchy, multiline quotes, detach-on-delete, undo & v2->v3 migration verified');
 
   console.log('\nALL CORE ENGINE TESTS PASSED!');
 }

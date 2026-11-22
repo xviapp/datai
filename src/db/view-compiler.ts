@@ -70,6 +70,7 @@ export interface LibraryCatalogItem {
   name: string;
   description: string;
   icon: string;
+  parentLibrarySlug?: string | null;
   fields: FieldDef[];
   recentEntries?: Array<{ id: string; title: string }>;
 }
@@ -89,13 +90,19 @@ export function buildDatabaseCatalogPrompt(libraries: LibraryCatalogItem[]): str
   ];
 
   for (const lib of libraries) {
-    lines.push(`### 库: ${lib.icon} ${lib.name} (slug: \`${lib.slug}\`, SQL视图: \`v_${lib.slug}\`)`);
+    const parentNote = lib.parentLibrarySlug
+      ? `, 附属子库 -> 归属主库 \`${lib.parentLibrarySlug}\``
+      : '';
+    lines.push(
+      `### 库: ${lib.icon} ${lib.name} (slug: \`${lib.slug}\`, SQL视图: \`v_${lib.slug}\`${parentNote})`
+    );
     if (lib.description) {
       lines.push(`说明: ${lib.description}`);
     }
     lines.push('- 内置列: `_id` (TEXT 主键), `_title` (TEXT 主标题), `_created_at` (DATETIME)');
     for (const f of lib.fields) {
       let extra = '';
+      if (f.multiline) extra += ' [多行长文本/书摘笔记]';
       if (f.unit) extra += ` [单位:${f.unit}]`;
       if (f.options?.length) extra += ` [可选值:${f.options.map((o) => o.value).join('/')}]`;
       if (f.relationConfig) {

@@ -64,6 +64,10 @@ export function DynamicCardListView({
     <View style={styles.listCol}>
       {entries.map((entry) => {
         const hl = entry.highlight ? HighlightTonePalette[entry.highlight.tone] : null;
+        const titleField = fieldMap.get(cardCfg.titleFieldKey);
+        const rawTitleFull = titleField?.multiline
+          ? String(entry.computedData[cardCfg.titleFieldKey] ?? '').trim()
+          : '';
         const subtitleField = cardCfg.subtitleFieldKey ? fieldMap.get(cardCfg.subtitleFieldKey) : undefined;
         const subtitleRaw = cardCfg.subtitleFieldKey ? entry.computedData[cardCfg.subtitleFieldKey] : undefined;
         const badgeField = cardCfg.rightBadgeFieldKey ? fieldMap.get(cardCfg.rightBadgeFieldKey) : undefined;
@@ -93,8 +97,8 @@ export function DynamicCardListView({
 
               <View style={styles.cardBody}>
                 <View style={styles.cardTopRow}>
-                  <Text style={styles.cardTitle} numberOfLines={1}>
-                    {entry.titleSummary}
+                  <Text style={styles.cardTitle} numberOfLines={titleField?.multiline ? 2 : 1}>
+                    {rawTitleFull || entry.titleSummary}
                   </Text>
 
                   <View style={styles.badgesGroup}>
@@ -129,7 +133,10 @@ export function DynamicCardListView({
                 </View>
 
                 {subtitleRaw !== undefined && subtitleRaw !== '' ? (
-                  <Text style={styles.cardSubtitle} numberOfLines={1}>
+                  <Text
+                    style={styles.cardSubtitle}
+                    numberOfLines={subtitleField?.multiline ? 2 : 1}
+                  >
                     {formatFieldDisplay(subtitleField, subtitleRaw)}
                   </Text>
                 ) : null}
