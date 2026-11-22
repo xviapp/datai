@@ -43,10 +43,12 @@ export function DynamicCardListView({
   library,
   entries,
   onSelectEntry,
+  onSelectEntryRelations,
 }: {
   library: LibraryRecord;
   entries: HydratedEntry[];
   onSelectEntry: (entryId: string) => void;
+  onSelectEntryRelations?: (entryId: string) => void;
 }) {
   const cardCfg = library.views.card;
   const fieldMap = useMemo(() => new Map(library.fields.map((f) => [f.key, f])), [library.fields]);
@@ -152,10 +154,25 @@ export function DynamicCardListView({
                       </View>
                     ))}
                     {entry.backlinks.length > 0 ? (
-                      <View style={styles.backlinkChip}>
+                      <Pressable
+                        hitSlop={6}
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          if (onSelectEntryRelations) {
+                            onSelectEntryRelations(entry.id);
+                          } else {
+                            onSelectEntry(entry.id);
+                          }
+                        }}
+                        style={({ pressed }) => [
+                          styles.backlinkChip,
+                          pressed && { opacity: 0.72 },
+                        ]}
+                      >
                         <Feather name="corner-down-right" size={11} color={Palette.inkSecondary} />
                         <Text style={styles.backlinkChipText}>关联 {entry.backlinks.length} 条</Text>
-                      </View>
+                        <Feather name="chevron-right" size={11} color={Palette.inkMuted} />
+                      </Pressable>
                     ) : null}
                   </View>
                 )}

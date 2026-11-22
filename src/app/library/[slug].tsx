@@ -217,6 +217,9 @@ export default function LibraryWorkspaceScreen() {
             library={library}
             entries={entries}
             onSelectEntry={(id) => router.push(`/entry/${id}`)}
+            onSelectEntryRelations={(id) =>
+              router.push({ pathname: '/entry/[id]', params: { id, tab: 'relations' } })
+            }
           />
         ) : null}
 

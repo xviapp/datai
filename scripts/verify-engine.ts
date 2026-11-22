@@ -93,15 +93,23 @@ function runTests() {
     '6 primary libraries should be shown on Home by default'
   );
 
-  // Verify reverse rollup + formula on Sony A7C2 asset
+  // Verify reverse rollup + formula + hydrated backlink groups on Sony A7C2 asset
   const assets = repo.listHydratedEntries('my_assets');
   const sony = assets.find((e) => e.titleSummary.includes('Sony A7C2'));
   if (!sony) throw new Error('Sony A7C2 should exist');
   assert.equal(sony.computedData.extra_spend, 5220, 'Reverse rollup extra_spend should sum linked bills (4580 + 640)');
   assert.equal(sony.backlinks.length, 2, 'Sony A7C2 should have 2 backlinked bill entries');
   assert.ok(Number(sony.computedData.daily_cost) > 0, 'Daily holding cost formula should evaluate > 0');
+  const sonyBacklinkGroups = repo.listBacklinkGroupsForEntry(sony.id);
+  assert.equal(sonyBacklinkGroups.length, 1, 'Sony A7C2 should have 1 backlink group (daily_bills)');
+  assert.equal(sonyBacklinkGroups[0].sourceLibrary.slug, 'daily_bills');
+  assert.equal(sonyBacklinkGroups[0].relationFieldKey, 'related_asset');
+  assert.equal(sonyBacklinkGroups[0].relationFieldLabel, '关联装备资产');
+  assert.equal(sonyBacklinkGroups[0].entries.length, 2, 'Group should contain 2 hydrated bill entries');
+  assert.equal(sonyBacklinkGroups[0].entries[0].computedData.amount, 640, 'Most recent bill (offset -6d) should be sorted first');
+  assert.equal(sonyBacklinkGroups[0].entries[1].computedData.amount, 4580, 'Older lens bill (offset -12d) should be sorted second');
   console.log(
-    `   ✓ Sony A7C2 extra_spend=${sony.computedData.extra_spend}, daily_cost=${sony.computedData.daily_cost}/day, backlinks=${sony.backlinks.length}`
+    `   ✓ Sony A7C2 extra_spend=${sony.computedData.extra_spend}, daily_cost=${sony.computedData.daily_cost}/day, backlinkGroups=${sonyBacklinkGroups.length}`
   );
 
   // Verify 30-day medicine expiry danger highlight
@@ -423,6 +431,15 @@ function runTests() {
   const childSections = repo.listChildSectionsForEntry(lizhi!.id, 'books');
   assert.equal(childSections.length, 1);
   assert.equal(childSections[0].entries.length, 3);
+  const lizhiFilteredBacklinks = repo.listBacklinkGroupsForEntry(
+    lizhi!.id,
+    new Set(['reading_logs'])
+  );
+  assert.equal(
+    lizhiFilteredBacklinks.length,
+    0,
+    'Child sub-library slugs must be excluded from generic backlink groups to avoid duplicate tabs'
+  );
 
   // Verify brand-new book with 0 logs still exposes empty child timeline section for immediate inline logging
   const emptyBookId = repo.createEntry('books', {

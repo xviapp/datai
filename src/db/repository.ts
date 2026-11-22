@@ -44,6 +44,13 @@ export interface ChildLibrarySection {
   entries: HydratedEntry[];
 }
 
+export interface BacklinkGroupSection {
+  sourceLibrary: LibraryRecord;
+  relationFieldKey: string;
+  relationFieldLabel: string;
+  entries: HydratedEntry[];
+}
+
 export interface LinkedEntryRef {
   id: string;
   title: string;
@@ -1081,6 +1088,122 @@ export class OmniRepository {
         childLibrary: childLib,
         relationFieldKey: relField.key,
         entries: hydrated,
+      });
+    }
+
+    return sections;
+  }
+
+  /**
+   * 查询反向引用某条记录的跨表条目，按「来源库 + 关联字段」分组并完整水合（排除已作为附属子表展示的库）
+   */
+  listBacklinkGroupsForEntry(
+    entryId: string,
+    excludeLibrarySlugs?: Set<string>
+  ): BacklinkGroupSection[] {
+    const { byId: allLibsById, bySlug: allLibsBySlug } = this.ensureLibrariesCache();
+
+    const rawRows = this.driver.getAllSync<RawEntryRow & { field_key: string }>(
+      `SELECT
+         r.field_key,
+         s.id,
+         s.library_id,
+         s.title_summary,
+         s.data_json,
+         s.created_at,
+         s.updated_at
+       FROM entry_relations r
+       JOIN entries s ON s.id = r.source_entry_id
+       WHERE r.target_entry_id = ?
+       ORDER BY s.created_at DESC`,
+      [entryId]
+    );
+
+    const filteredRows = rawRows.filter((row) => {
+      const srcLib = allLibsById.get(row.library_id);
+      if (!srcLib) return false;
+      if (excludeLibrarySlugs?.has(srcLib.slug)) return false;
+      return true;
+    });
+
+    if (filteredRows.length === 0) return [];
+
+    const uniqueEntryIds = Array.from(new Set(filteredRows.map((r) => r.id)));
+    const { forwardBySourceId, backByTargetId } = this.loadRelationsBatch(uniqueEntryIds);
+    const parsedJsonCache = new Map<string, Record<string, unknown>>();
+    const hydratedById = new Map<string, HydratedEntry>();
+
+    for (const row of filteredRows) {
+      if (hydratedById.has(row.id)) continue;
+      const srcLib = allLibsById.get(row.library_id)!;
+      hydratedById.set(
+        row.id,
+        this.hydrateRowWithRelations(
+          row,
+          srcLib,
+          allLibsById,
+          allLibsBySlug,
+          forwardBySourceId.get(row.id) ?? [],
+          backByTargetId.get(row.id) ?? [],
+          parsedJsonCache
+        )
+      );
+    }
+
+    const groupMap = new Map<
+      string,
+      {
+        sourceLibrary: LibraryRecord;
+        relationFieldKey: string;
+        relationFieldLabel: string;
+        entries: HydratedEntry[];
+        seenEntryIds: Set<string>;
+      }
+    >();
+
+    for (const row of filteredRows) {
+      const srcLib = allLibsById.get(row.library_id)!;
+      const groupKey = `${srcLib.slug}::${row.field_key}`;
+      let group = groupMap.get(groupKey);
+      if (!group) {
+        const relField = srcLib.fields.find((f) => f.key === row.field_key);
+        group = {
+          sourceLibrary: srcLib,
+          relationFieldKey: row.field_key,
+          relationFieldLabel: relField?.label ?? '关联记录',
+          entries: [],
+          seenEntryIds: new Set<string>(),
+        };
+        groupMap.set(groupKey, group);
+      }
+      if (!group.seenEntryIds.has(row.id)) {
+        group.seenEntryIds.add(row.id);
+        const hydrated = hydratedById.get(row.id);
+        if (hydrated) group.entries.push(hydrated);
+      }
+    }
+
+    const sections: BacklinkGroupSection[] = [];
+    for (const g of groupMap.values()) {
+      const sortKey = g.sourceLibrary.views.card.sortFieldKey;
+      const sortDir = g.sourceLibrary.views.card.sortDir ?? 'desc';
+      if (sortKey) {
+        g.entries.sort((a, b) => {
+          const va = a.computedData[sortKey];
+          const vb = b.computedData[sortKey];
+          if (va === vb) return b.createdAt - a.createdAt;
+          if (typeof va === 'number' && typeof vb === 'number') {
+            return sortDir === 'asc' ? va - vb : vb - va;
+          }
+          const cmp = String(va ?? '').localeCompare(String(vb ?? ''));
+          return sortDir === 'asc' ? cmp : -cmp;
+        });
+      }
+      sections.push({
+        sourceLibrary: g.sourceLibrary,
+        relationFieldKey: g.relationFieldKey,
+        relationFieldLabel: g.relationFieldLabel,
+        entries: g.entries,
       });
     }
 
