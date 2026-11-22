@@ -1,5 +1,8 @@
 import type { SyncSqlDriver } from './types';
 
+export const LATEST_SCHEMA_VERSION = 2;
+export const MAX_AI_SNAPSHOTS = 20;
+
 export const CORE_MIGRATION_SQL = `
 CREATE TABLE IF NOT EXISTS libraries (
   id TEXT PRIMARY KEY NOT NULL,
@@ -73,14 +76,68 @@ CREATE TABLE IF NOT EXISTS ai_snapshots (
 );
 `;
 
-export function runCoreMigrations(driver: SyncSqlDriver): void {
-  driver.execSync(CORE_MIGRATION_SQL);
+function getUserVersion(driver: SyncSqlDriver): number {
+  const row = driver.getFirstSync<{ user_version: number }>('PRAGMA user_version');
+  return Number(row?.user_version ?? 0);
+}
 
-  // 兼容旧版数据库：补齐 dashboard_widgets.pinned_overview 列
-  const cols = driver.getAllSync<{ name: string }>('PRAGMA table_info(dashboard_widgets)');
-  if (!cols.some((c) => c.name === 'pinned_overview')) {
-    driver.execSync(
-      'ALTER TABLE dashboard_widgets ADD COLUMN pinned_overview INTEGER NOT NULL DEFAULT 1;'
-    );
-  }
+/**
+ * 使用 SQLite 原生 PRAGMA user_version 按版本号顺序执行增量迁移
+ */
+export function runCoreMigrations(driver: SyncSqlDriver): void {
+  driver.withTransactionSync(() => {
+    driver.execSync(CORE_MIGRATION_SQL);
+
+    let version = getUserVersion(driver);
+
+    if (version < 1) {
+      // v1: 补齐旧版 dashboard_widgets.pinned_overview 列，并一次性迁移旧版预置看板副标题
+      const cols = driver.getAllSync<{ name: string }>('PRAGMA table_info(dashboard_widgets)');
+      if (!cols.some((c) => c.name === 'pinned_overview')) {
+        driver.execSync(
+          'ALTER TABLE dashboard_widgets ADD COLUMN pinned_overview INTEGER NOT NULL DEFAULT 1;'
+        );
+      }
+
+      driver.runSync(
+        "UPDATE dashboard_widgets SET title = '账单累计支出', subtitle = '全部账单合计' WHERE id = 'w_total_bills' AND subtitle = '实时聚合 v_daily_bills'"
+      );
+      driver.runSync(
+        "UPDATE dashboard_widgets SET title = '装备净投入', subtitle = '购入价减去预估残值' WHERE id = 'w_asset_net' AND subtitle = '购入总价减去预估二手残值'"
+      );
+      driver.runSync(
+        "UPDATE dashboard_widgets SET subtitle = '按分类查看支出占比' WHERE id = 'w_bills_by_cat' AND subtitle = '按分类统计累计开销占比'"
+      );
+      driver.runSync(
+        "UPDATE dashboard_widgets SET title = '装备总投入排行', subtitle = '含本体购入价与相关配件账单' WHERE id = 'w_asset_compare' AND subtitle LIKE '%JOIN%'"
+      );
+
+      driver.execSync('PRAGMA user_version = 1;');
+      version = 1;
+    }
+
+    if (version < 2) {
+      // v2: 清理历史上混入 search_text 的 base64 图片数据，并按上限裁减历史快照
+      const dirtyEntries = driver.getAllSync<{ id: string; search_text: string }>(
+        "SELECT id, search_text FROM entries WHERE search_text LIKE '%data:image/%'"
+      );
+      for (const row of dirtyEntries) {
+        const cleaned = row.search_text
+          .replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        driver.runSync('UPDATE entries SET search_text = ? WHERE id = ?', [cleaned, row.id]);
+      }
+
+      driver.runSync(
+        `DELETE FROM ai_snapshots
+         WHERE id NOT IN (
+           SELECT id FROM ai_snapshots ORDER BY created_at DESC LIMIT ?
+         )`,
+        [MAX_AI_SNAPSHOTS]
+      );
+
+      driver.execSync(`PRAGMA user_version = ${LATEST_SCHEMA_VERSION};`);
+    }
+  });
 }

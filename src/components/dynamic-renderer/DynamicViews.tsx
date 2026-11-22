@@ -4,6 +4,8 @@ import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { HighlightTonePalette, Palette, ToneMap } from '@/constants/design-tokens';
 import type { HydratedEntry, LibraryRecord } from '@/db/repository';
+import { formatLocalDate } from '@/engine/date';
+import { resolveImageUri } from '@/engine/image-storage';
 import type { FieldDef } from '@/schema/field-defs';
 
 export function formatFieldDisplay(field: FieldDef | undefined, val: unknown): string {
@@ -53,8 +55,7 @@ export function DynamicCardListView({
   if (entries.length === 0) {
     return (
       <View style={styles.emptyBox}>
-        <Text style={styles.emptyTitle}>还没有记录</Text>
-        <Text style={styles.emptyDesc}>点右上角「记一条」，或用右下角「随手记」添加第一条</Text>
+        <Text style={styles.emptyDesc}>点右上角「记一条」或右下角「随手说」添加记录</Text>
       </View>
     );
   }
@@ -68,7 +69,7 @@ export function DynamicCardListView({
         const badgeField = cardCfg.rightBadgeFieldKey ? fieldMap.get(cardCfg.rightBadgeFieldKey) : undefined;
         const badgeVal = cardCfg.rightBadgeFieldKey ? entry.computedData[cardCfg.rightBadgeFieldKey] : undefined;
         const coverUri = cardCfg.coverImageFieldKey
-          ? String(entry.computedData[cardCfg.coverImageFieldKey] ?? '')
+          ? resolveImageUri(entry.computedData[cardCfg.coverImageFieldKey])
           : '';
 
         const matchedOptColor = badgeField?.options?.find((o) => o.value === String(badgeVal))?.color;
@@ -200,8 +201,7 @@ export function DynamicGalleryView({
   if (entries.length === 0) {
     return (
       <View style={styles.emptyBox}>
-        <Text style={styles.emptyTitle}>画廊暂无内容</Text>
-        <Text style={styles.emptyDesc}>新增带有封面图或评分的条目后将在此以海报墙展示</Text>
+        <Text style={styles.emptyDesc}>添加带图片或评分的记录后将在此展示</Text>
       </View>
     );
   }
@@ -209,7 +209,7 @@ export function DynamicGalleryView({
   return (
     <View style={styles.galleryGrid}>
       {entries.map((entry) => {
-        const coverUri = coverKey ? String(entry.computedData[coverKey] ?? '') : '';
+        const coverUri = coverKey ? resolveImageUri(entry.computedData[coverKey]) : '';
         const subtitle = subKey ? formatFieldDisplay(fieldMap.get(subKey), entry.computedData[subKey]) : '';
         const rating = ratingKey
           ? formatFieldDisplay(fieldMap.get(ratingKey), entry.computedData[ratingKey])
@@ -287,7 +287,7 @@ export function DynamicCalendarView({
     for (const e of entries) {
       const rawDate = dateKey
         ? String(e.computedData[dateKey] ?? '').slice(0, 10)
-        : new Date(e.createdAt).toISOString().slice(0, 10);
+        : formatLocalDate(e.createdAt);
       if (!rawDate) continue;
       const list = map.get(rawDate) ?? [];
       list.push(e);
@@ -309,7 +309,7 @@ export function DynamicCalendarView({
     return entries.filter((e) => {
       const rawDate = dateKey
         ? String(e.computedData[dateKey] ?? '').slice(0, 10)
-        : new Date(e.createdAt).toISOString().slice(0, 10);
+        : formatLocalDate(e.createdAt);
       return rawDate.startsWith(monthInfo.prefix);
     });
   }, [selectedDayStr, entriesByDate, entries, dateKey, monthInfo.prefix]);

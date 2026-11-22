@@ -8,6 +8,8 @@ export type OmniLaunchAction = 'text' | 'voice' | 'camera';
 interface OmniContextValue {
   ready: boolean;
   error: string | null;
+  persistWarning: string | null;
+  dismissPersistWarning: () => void;
   repo: OmniRepository | null;
   libraries: LibraryRecord[];
   revision: number;
@@ -23,6 +25,8 @@ interface OmniContextValue {
 const OmniContext = createContext<OmniContextValue>({
   ready: false,
   error: null,
+  persistWarning: null,
+  dismissPersistWarning: () => {},
   repo: null,
   libraries: [],
   revision: 0,
@@ -40,6 +44,7 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
   const [libraries, setLibraries] = useState<LibraryRecord[]>([]);
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [persistWarning, setPersistWarning] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [hasApiKey, setHasApiKey] = useState(false);
   const [omniModalVisible, setOmniModalVisible] = useState(false);
@@ -51,11 +56,21 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
     setHasApiKey(Boolean(key));
   }, []);
 
+  const dismissPersistWarning = useCallback(() => {
+    setPersistWarning(null);
+  }, []);
+
   useEffect(() => {
     let unsub: (() => void) | undefined;
+    let unsubPersist: (() => void) | undefined;
     (async () => {
       try {
         const driver = await getPlatformSqlDriver();
+        if (driver.subscribePersistError) {
+          unsubPersist = driver.subscribePersistError((msg) => {
+            setPersistWarning(msg);
+          });
+        }
         const instance = new OmniRepository(driver);
         instance.seedIfEmpty();
         setLibraries(instance.listLibraries());
@@ -73,6 +88,7 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       unsub?.();
+      unsubPersist?.();
     };
   }, [refreshApiKeyState]);
 
@@ -94,6 +110,8 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
     () => ({
       ready,
       error,
+      persistWarning,
+      dismissPersistWarning,
       repo,
       libraries,
       revision,
@@ -108,6 +126,8 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
     [
       ready,
       error,
+      persistWarning,
+      dismissPersistWarning,
       repo,
       libraries,
       revision,

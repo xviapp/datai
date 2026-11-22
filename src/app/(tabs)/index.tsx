@@ -1,6 +1,6 @@
 import Feather from '@expo/vector-icons/Feather';
 import { useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   Pressable,
   ScrollView,
@@ -17,34 +17,25 @@ import type { LibraryRecord } from '@/db/repository';
 
 export default function HomeVaultScreen() {
   const router = useRouter();
-  const { repo, libraries, revision, hasApiKey, openOmniCapture } = useOmni();
+  const {
+    repo,
+    libraries,
+    revision,
+    hasApiKey,
+    persistWarning,
+    dismissPersistWarning,
+    openOmniCapture,
+  } = useOmni();
   const [globalSearch, setGlobalSearch] = useState('');
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [managingLibrary, setManagingLibrary] = useState<LibraryRecord | null>(null);
 
   const totalEntryCount = libraries.reduce((sum, l) => sum + l.entryCount, 0);
 
-  const searchHits = (() => {
+  const searchHits = useMemo(() => {
     if (!repo || revision < 0 || !globalSearch.trim()) return [];
-    const results: Array<{
-      id: string;
-      title: string;
-      libName: string;
-      libIcon: string;
-    }> = [];
-    for (const lib of libraries) {
-      const matched = repo.listHydratedEntries(lib.slug, globalSearch);
-      for (const m of matched.slice(0, 8)) {
-        results.push({
-          id: m.id,
-          title: m.titleSummary,
-          libName: lib.name,
-          libIcon: lib.icon,
-        });
-      }
-    }
-    return results;
-  })();
+    return repo.searchEntrySummaries(globalSearch, 30);
+  }, [repo, revision, globalSearch]);
 
   return (
     <View style={styles.safeArea}>
@@ -79,6 +70,16 @@ export default function HomeVaultScreen() {
         contentContainerStyle={styles.container}
         keyboardShouldPersistTaps="handled"
       >
+        {persistWarning ? (
+          <View style={styles.warnBanner}>
+            <Feather name="alert-triangle" size={15} color={Palette.danger} />
+            <Text style={styles.warnText}>{persistWarning}</Text>
+            <Pressable hitSlop={8} onPress={dismissPersistWarning}>
+              <Feather name="x" size={15} color={Palette.danger} />
+            </Pressable>
+          </View>
+        ) : null}
+
         {/* 全局搜索 */}
         <View style={styles.searchBar}>
           <Feather name="search" size={16} color={Palette.inkMuted} />
@@ -116,7 +117,7 @@ export default function HomeVaultScreen() {
                     {hit.title}
                   </Text>
                   <Text style={styles.searchHitLib}>
-                    {hit.libIcon} {hit.libName}
+                    {hit.libraryIcon} {hit.libraryName}
                   </Text>
                 </Pressable>
               ))
@@ -221,6 +222,22 @@ const styles = StyleSheet.create({
     paddingTop: 4,
     paddingBottom: 96,
     gap: 16,
+  },
+  warnBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: Palette.dangerSoft,
+    paddingHorizontal: 13,
+    paddingVertical: 10,
+    borderRadius: 12,
+  },
+  warnText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.danger,
+    lineHeight: 17,
   },
   keyStatusPill: {
     flexDirection: 'row',

@@ -29,8 +29,13 @@ export function compileLibrarySqlView(
   ];
 
   for (const field of fields) {
-    // 跳过运行时内存聚合/公式字段与多值关系数组，保证物理 SQL 列干净可聚合
-    if (field.type === 'rollup' || field.type === 'formula' || field.type === 'relation') {
+    // 跳过运行时内存聚合/公式字段、多值关系数组以及图片字段，避免大体积路径/base64 暴露给 SQL 与 AI
+    if (
+      field.type === 'rollup' ||
+      field.type === 'formula' ||
+      field.type === 'relation' ||
+      field.type === 'image'
+    ) {
       continue;
     }
     const col = assertSafeIdentifier(field.key);
@@ -101,6 +106,9 @@ export function buildDatabaseCatalogPrompt(libraries: LibraryCatalogItem[]): str
       }
       if (f.formulaExpr) {
         extra += ` [行内公式:${f.formulaExpr}, 不在SQL视图列中]`;
+      }
+      if (f.type === 'image') {
+        extra += ' [图片字段, 不在SQL视图列中]';
       }
       lines.push(`- \`${f.key}\` (${f.type}, "${f.label}")${extra}`);
     }

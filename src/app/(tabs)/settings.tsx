@@ -5,6 +5,7 @@ import * as Sharing from 'expo-sharing';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -25,7 +26,8 @@ import {
 import { TabPageHeader } from '@/components/layout/TabPageHeader';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
-import type { FullBackupBundle } from '@/db/repository';
+import type { FullBackupBundle, SnapshotUndoImpact } from '@/db/repository';
+import { formatLocalDate } from '@/engine/date';
 
 const EFFORT_LABELS: Record<ReasoningEffort, string> = {
   low: '快速',
@@ -48,6 +50,10 @@ export default function SettingsScreen() {
 
   const [testing, setTesting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [pendingUndo, setPendingUndo] = useState<{
+    snapshotId: string;
+    impact: SnapshotUndoImpact;
+  } | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -114,11 +120,23 @@ export default function SettingsScreen() {
     }
   };
 
-  const handleUndo = (snapshotId: string) => {
+  const handleRequestUndo = (snapshotId: string) => {
     if (!repo) return;
     try {
+      const impact = repo.describeSnapshotUndoImpact(snapshotId);
+      setPendingUndo({ snapshotId, impact });
+    } catch (err) {
+      setFeedback({ type: 'err', text: err instanceof Error ? err.message : String(err) });
+    }
+  };
+
+  const handleConfirmUndo = () => {
+    if (!repo || !pendingUndo) return;
+    const { snapshotId } = pendingUndo;
+    setPendingUndo(null);
+    try {
       repo.undoSnapshot(snapshotId);
-      setFeedback({ type: 'ok', text: '已恢复到变更前的状态' });
+      setFeedback({ type: 'ok', text: '已撤销该操作' });
     } catch (err) {
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : String(err) });
     }
@@ -129,7 +147,7 @@ export default function SettingsScreen() {
     try {
       const bundle = repo.exportBackupBundle();
       const jsonStr = JSON.stringify(bundle, null, 2);
-      const filename = `folio_backup_${new Date().toISOString().slice(0, 10)}.json`;
+      const filename = `folio_backup_${formatLocalDate()}.json`;
 
       if (Platform.OS === 'web') {
         const blob = new Blob([jsonStr], { type: 'application/json' });
@@ -405,9 +423,7 @@ export default function SettingsScreen() {
           {snapshots.length === 0 ? (
             <View style={styles.emptySnapRow}>
               <Feather name="rotate-ccw" size={15} color={Palette.inkMuted} />
-              <Text style={styles.rowSub}>
-                暂无记录。通过助手改动记录本或删除记录本前都会自动留备份，可随时撤销。
-              </Text>
+              <Text style={styles.rowSub}>暂无操作记录</Text>
             </View>
           ) : (
             <>
@@ -427,7 +443,7 @@ export default function SettingsScreen() {
                   {snap.undone ? (
                     <Text style={styles.undoneTag}>已撤销</Text>
                   ) : (
-                    <Pressable onPress={() => handleUndo(snap.id)} style={styles.undoBtn}>
+                    <Pressable onPress={() => handleRequestUndo(snap.id)} style={styles.undoBtn}>
                       <Text style={styles.undoBtnText}>撤销</Text>
                     </Pressable>
                   )}
@@ -484,6 +500,40 @@ export default function SettingsScreen() {
 
         <Text style={styles.versionFoot}>拾录 Folio v1.0 · 纯本地离线记录本</Text>
       </ScrollView>
+
+      <Modal
+        visible={Boolean(pendingUndo)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setPendingUndo(null)}
+      >
+        <View style={styles.confirmBackdrop}>
+          <View style={styles.confirmDialog}>
+            <Text style={styles.confirmTitle}>确认撤销此操作？</Text>
+            {pendingUndo ? (
+              <>
+                <Text style={styles.confirmSummary}>{pendingUndo.impact.summary}</Text>
+                <Text
+                  style={[
+                    styles.confirmWarning,
+                    pendingUndo.impact.isFullRestore && { color: Palette.danger },
+                  ]}
+                >
+                  {pendingUndo.impact.warningText}
+                </Text>
+              </>
+            ) : null}
+            <View style={styles.confirmBtns}>
+              <Pressable onPress={() => setPendingUndo(null)} style={styles.confirmCancelBtn}>
+                <Text style={styles.confirmCancelText}>取消</Text>
+              </Pressable>
+              <Pressable onPress={handleConfirmUndo} style={styles.confirmOkBtn}>
+                <Text style={styles.confirmOkText}>确认撤销</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -785,5 +835,64 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: Palette.inkMuted,
     marginTop: 8,
+  },
+  confirmBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(20, 26, 25, 0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  confirmDialog: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: Palette.bgSurface,
+    borderRadius: 20,
+    padding: 20,
+    gap: 10,
+  },
+  confirmTitle: {
+    fontSize: 16,
+    fontWeight: '800',
+    color: Palette.inkPrimary,
+  },
+  confirmSummary: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  confirmWarning: {
+    fontSize: 13,
+    lineHeight: 19,
+    color: Palette.warning,
+  },
+  confirmBtns: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 6,
+  },
+  confirmCancelBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 12,
+    backgroundColor: Palette.bgSubtle,
+    alignItems: 'center',
+  },
+  confirmCancelText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  confirmOkBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 12,
+    backgroundColor: Palette.danger,
+    alignItems: 'center',
+  },
+  confirmOkText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Palette.inkInverse,
   },
 });

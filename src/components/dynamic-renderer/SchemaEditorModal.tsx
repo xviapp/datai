@@ -1,5 +1,5 @@
 import Feather from '@expo/vector-icons/Feather';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -73,9 +73,16 @@ export function SchemaEditorModal({
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [prevSession, setPrevSession] = useState<{
+    visible: boolean;
+    existingLibrary: LibraryRecord | null | undefined;
+  }>({ visible: false, existingLibrary: undefined });
 
-  useEffect(() => {
-    if (!visible) return;
+  if (
+    visible &&
+    (!prevSession.visible || prevSession.existingLibrary !== existingLibrary)
+  ) {
+    setPrevSession({ visible: true, existingLibrary });
     setErrorMsg(null);
     setAiPrompt('');
     setConfirmDelete(false);
@@ -91,7 +98,12 @@ export function SchemaEditorModal({
       setRightBadgeFieldKey(existingLibrary.views.card.rightBadgeFieldKey ?? '');
       setFooterMetricKeys(existingLibrary.views.card.footerMetricKeys);
     } else {
-      setSlug(`custom_${Math.floor(100 + Math.random() * 899)}`);
+      const usedSlugs = new Set(libraries.map((l) => l.slug));
+      let nextIdx = libraries.length + 1;
+      while (usedSlugs.has(`custom_${nextIdx}`)) {
+        nextIdx += 1;
+      }
+      setSlug(`custom_${nextIdx}`);
       setName('');
       setIcon('📒');
       setColor('teal');
@@ -115,7 +127,9 @@ export function SchemaEditorModal({
       setRightBadgeFieldKey('tag');
       setFooterMetricKeys(['record_date']);
     }
-  }, [visible, existingLibrary]);
+  } else if (!visible && prevSession.visible) {
+    setPrevSession((s) => ({ ...s, visible: false }));
+  }
 
   const addNewField = () => {
     const idx = fields.length + 1;

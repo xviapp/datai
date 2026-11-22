@@ -174,9 +174,8 @@ export default function LibraryWorkspaceScreen() {
               <View style={[styles.emptyStatsIcon, { backgroundColor: tone.soft }]}>
                 <Feather name="bar-chart-2" size={20} color={tone.solid} />
               </View>
-              <Text style={styles.emptyStatsTitle}>还没有为「{library.name}」定制统计</Text>
               <Text style={styles.emptyStatsDesc}>
-                有需要统计的指标时，告诉助手你想看什么图表，生成后就会展示在这里。
+                告诉助手你想看的指标或图表，生成后展示在这里
               </Text>
               <Pressable
                 onPress={() => openOmniCapture(library.slug, 'text')}

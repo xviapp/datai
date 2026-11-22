@@ -3,7 +3,7 @@ import { AudioModule, useAudioStream } from 'expo-audio';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -27,7 +27,9 @@ import { transcribeAudioWithDeepSeek } from '@/ai/deepseek-client';
 import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
+import type { ArchitectLibraryDiff } from '@/db/repository';
 import { createId } from '@/engine/id';
+import { compressImageForAiVision } from '@/engine/image-storage';
 import type { FieldType } from '@/schema/field-defs';
 import type { DashboardWidget, DraftEntryItem } from '@/schema/view-dsl';
 
@@ -80,6 +82,7 @@ export function OmniCaptureModal() {
   const [result, setResult] = useState<UnifiedAssistantResult | null>(null);
   const [drafts, setDrafts] = useState<DraftEntryItem[]>([]);
   const [isRecording, setIsRecording] = useState(false);
+  const [prevModalVisible, setPrevModalVisible] = useState(omniModalVisible);
   const didTriggerActionRef = useRef(false);
 
   // 原生 PCM 音频流直录标准 16kHz 16-bit 单声道 WAV，兼容 DeepSeek /v1/tools/asr
@@ -89,37 +92,21 @@ export function OmniCaptureModal() {
     encoding: 'int16',
   });
 
-  useEffect(() => {
+  if (prevModalVisible !== omniModalVisible) {
+    setPrevModalVisible(omniModalVisible);
     if (!omniModalVisible) {
-      didTriggerActionRef.current = false;
       setErrorMsg(null);
       setSuccessMsg(null);
       setLoadingStep(null);
       setResult(null);
       setDrafts([]);
       if (isRecording) {
-        audioStream?.stop();
         setIsRecording(false);
       }
-      return;
     }
+  }
 
-    if (didTriggerActionRef.current || omniInitialAction === 'text') return;
-    didTriggerActionRef.current = true;
-
-    const timer = setTimeout(() => {
-      if (omniInitialAction === 'camera') {
-        handlePickPhoto(Platform.OS !== 'web');
-      } else if (omniInitialAction === 'voice') {
-        handleStartVoice();
-      }
-    }, 180);
-
-    return () => clearTimeout(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [omniModalVisible, omniInitialAction]);
-
-  const handlePickPhoto = async (fromCamera: boolean) => {
+  const handlePickPhoto = useCallback(async (fromCamera: boolean) => {
     try {
       if (fromCamera) {
         const perm = await ImagePicker.requestCameraPermissionsAsync();
@@ -133,19 +120,19 @@ export function OmniCaptureModal() {
         : ImagePicker.launchImageLibraryAsync;
       const res = await fn({
         mediaTypes: ['images'],
-        quality: 0.75,
-        base64: true,
+        quality: 0.85,
+        base64: Platform.OS === 'web',
       });
-      if (!res.canceled && res.assets[0]?.base64) {
-        const mime = res.assets[0].mimeType || 'image/jpeg';
-        setImageDataUrl(`data:${mime};base64,${res.assets[0].base64}`);
+      if (!res.canceled && res.assets[0]) {
+        const compressed = await compressImageForAiVision(res.assets[0]);
+        setImageDataUrl(compressed);
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
-  };
+  }, []);
 
-  const handleStartVoice = async () => {
+  const handleStartVoice = useCallback(async () => {
     if (Platform.OS === 'web' || !audioStream) {
       setErrorMsg('网页预览暂不支持录音，请直接打字或选择图片（手机端支持语音输入）');
       return;
@@ -165,7 +152,28 @@ export function OmniCaptureModal() {
       setIsRecording(false);
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
-  };
+  }, [audioStream]);
+
+  useEffect(() => {
+    if (!omniModalVisible) {
+      didTriggerActionRef.current = false;
+      audioStream?.stop();
+      return;
+    }
+
+    if (didTriggerActionRef.current || omniInitialAction === 'text') return;
+    didTriggerActionRef.current = true;
+
+    const timer = setTimeout(() => {
+      if (omniInitialAction === 'camera') {
+        void handlePickPhoto(Platform.OS !== 'web');
+      } else if (omniInitialAction === 'voice') {
+        void handleStartVoice();
+      }
+    }, 180);
+
+    return () => clearTimeout(timer);
+  }, [omniModalVisible, omniInitialAction, audioStream, handlePickPhoto, handleStartVoice]);
 
   const handleToggleVoice = async () => {
     if (!isRecording) {
@@ -244,11 +252,17 @@ export function OmniCaptureModal() {
     }
   };
 
+  const architectDiffs: ArchitectLibraryDiff[] =
+    repo && result?.intent === 'architect' ? repo.analyzeArchitectPlanDiff(result.plan) : [];
+  const hasDestructivePlanChanges = architectDiffs.some((d) => d.hasDestructiveChanges);
+
   const handleConfirmPlan = () => {
     if (!repo || result?.intent !== 'architect') return;
     try {
       const plan = result.plan;
-      repo.applyArchitectPlan(plan);
+      repo.applyArchitectPlan(plan, {
+        allowDestructiveFieldChanges: hasDestructivePlanChanges,
+      });
       const firstSlug = plan.libraries[0]?.slug;
       setInputText('');
       setImageDataUrl(undefined);
@@ -394,7 +408,7 @@ export function OmniCaptureModal() {
             {imageDataUrl ? (
               <View style={styles.attachedImgRow}>
                 <Image source={{ uri: imageDataUrl }} style={styles.attachedThumb} contentFit="cover" />
-                <Text style={styles.attachedHint}>已选好图片，发送后自动识别内容</Text>
+                <View style={{ flex: 1 }} />
                 <Pressable onPress={() => setImageDataUrl(undefined)}>
                   <Feather name="trash-2" size={16} color={Palette.danger} />
                 </Pressable>
@@ -404,7 +418,6 @@ export function OmniCaptureModal() {
             {/* 快捷示例（无结果时展示） */}
             {!result && !loadingStep ? (
               <View style={styles.examplesBox}>
-                <Text style={styles.examplesLabel}>试试这样说：</Text>
                 {QUICK_EXAMPLES.map((ex, i) => (
                   <Pressable key={i} onPress={() => setInputText(ex.text)} style={styles.examplePill}>
                     <Text style={styles.exampleTag}>{ex.tag}</Text>
@@ -480,6 +493,55 @@ export function OmniCaptureModal() {
               <View style={styles.resultSection}>
                 <Text style={styles.sectionTitle}>方案预览（确认前不会改动数据）</Text>
                 <Text style={styles.summaryText}>{result.plan.summary}</Text>
+                {architectDiffs.length > 0 ? (
+                  <View
+                    style={[
+                      styles.diffWarnBanner,
+                      hasDestructivePlanChanges && styles.diffDangerBanner,
+                    ]}
+                  >
+                    <Feather
+                      name="alert-triangle"
+                      size={15}
+                      color={hasDestructivePlanChanges ? Palette.danger : Palette.warning}
+                    />
+                    <View style={{ flex: 1, gap: 3 }}>
+                      <Text
+                        style={[
+                          styles.diffWarnTitle,
+                          hasDestructivePlanChanges && { color: Palette.danger },
+                        ]}
+                      >
+                        {hasDestructivePlanChanges
+                          ? '注意：此方案会移除或改动已有字段类型，旧记录中对应值可能无法显示或保存'
+                          : '存量字段变更提示'}
+                      </Text>
+                      {architectDiffs.map((d) => (
+                        <Text key={d.slug} style={styles.diffWarnLine}>
+                          • {d.name}（{d.entryCount} 条记录）：
+                          {[
+                            d.removedFields.length > 0
+                              ? `移除 ${d.removedFields.map((f) => f.label).join('、')}`
+                              : '',
+                            d.typeChangedFields.length > 0
+                              ? `类型变更 ${d.typeChangedFields
+                                  .map(
+                                    (f) =>
+                                      `${f.label}(${FIELD_TYPE_NAMES[f.fromType]}→${FIELD_TYPE_NAMES[f.toType]})`
+                                  )
+                                  .join('、')}`
+                              : '',
+                            d.newlyRequiredFields.length > 0
+                              ? `新增必填 ${d.newlyRequiredFields.map((f) => f.label).join('、')}`
+                              : '',
+                          ]
+                            .filter(Boolean)
+                            .join('；')}
+                        </Text>
+                      ))}
+                    </View>
+                  </View>
+                ) : null}
                 {result.plan.libraries.map((bp) => {
                   const isUpdate = existingSlugs.has(bp.slug);
                   return (
@@ -564,9 +626,17 @@ export function OmniCaptureModal() {
                 <Pressable onPress={() => setResult(null)} style={styles.secondaryBtn}>
                   <Text style={styles.secondaryBtnText}>取消</Text>
                 </Pressable>
-                <Pressable onPress={handleConfirmPlan} style={styles.primaryBtn}>
+                <Pressable
+                  onPress={handleConfirmPlan}
+                  style={[
+                    styles.primaryBtn,
+                    hasDestructivePlanChanges && { backgroundColor: Palette.danger },
+                  ]}
+                >
                   <Feather name="check" size={16} color={Palette.inkInverse} />
-                  <Text style={styles.primaryBtnText}>确认应用</Text>
+                  <Text style={styles.primaryBtnText}>
+                    {hasDestructivePlanChanges ? '已知晓风险，仍要应用' : '确认应用'}
+                  </Text>
                 </Pressable>
               </>
             ) : result?.intent === 'analyst' ? (
@@ -764,6 +834,28 @@ const styles = StyleSheet.create({
     backgroundColor: Palette.dangerSoft,
     padding: 12,
     borderRadius: 12,
+  },
+  diffWarnBanner: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    backgroundColor: Palette.warningSoft,
+    padding: 12,
+    borderRadius: 12,
+  },
+  diffDangerBanner: {
+    backgroundColor: Palette.dangerSoft,
+  },
+  diffWarnTitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.warning,
+    lineHeight: 17,
+  },
+  diffWarnLine: {
+    fontSize: 12,
+    color: Palette.inkSecondary,
+    lineHeight: 17,
   },
   errorText: {
     fontSize: 13,

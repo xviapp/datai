@@ -1,7 +1,7 @@
 import Feather from '@expo/vector-icons/Feather';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   KeyboardAvoidingView,
   Modal,
@@ -18,7 +18,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord } from '@/db/repository';
+import { formatLocalDateOffset } from '@/engine/date';
 import { evaluateFormula } from '@/engine/formula';
+import { resolveImageUri, savePickedImageToStorage } from '@/engine/image-storage';
 import type { FieldDef } from '@/schema/field-defs';
 
 interface DynamicEntryFormModalProps {
@@ -31,9 +33,30 @@ interface DynamicEntryFormModalProps {
 }
 
 function quickDateStr(offsetDays: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + offsetDays);
-  return d.toISOString().slice(0, 10);
+  return formatLocalDateOffset(offsetDays);
+}
+
+function buildInitialFormValues(
+  library: LibraryRecord,
+  initialData?: Record<string, unknown>
+): Record<string, unknown> {
+  const defaults: Record<string, unknown> = {};
+  for (const f of library.fields) {
+    if (initialData && initialData[f.key] !== undefined) {
+      defaults[f.key] = initialData[f.key];
+    } else if (f.type === 'date') {
+      defaults[f.key] = quickDateStr(0);
+    } else if (f.type === 'checkbox') {
+      defaults[f.key] = false;
+    } else if (f.type === 'multi_select' || f.type === 'relation') {
+      defaults[f.key] = [];
+    } else if (f.type === 'select' && f.options?.length && f.required) {
+      defaults[f.key] = f.options[0].value;
+    } else {
+      defaults[f.key] = '';
+    }
+  }
+  return defaults;
 }
 
 export function DynamicEntryFormModal({
@@ -46,47 +69,53 @@ export function DynamicEntryFormModal({
 }: DynamicEntryFormModalProps) {
   const { repo } = useOmni();
   const insets = useSafeAreaInsets();
-  const [formValues, setFormValues] = useState<Record<string, unknown>>({});
+  const [formValues, setFormValues] = useState<Record<string, unknown>>(() =>
+    buildInitialFormValues(library, initialData)
+  );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [prevSession, setPrevSession] = useState({
+    visible: false,
+    librarySlug: library.slug,
+    editingEntryId,
+    initialData,
+  });
 
-  useEffect(() => {
-    if (!visible) return;
-    const defaults: Record<string, unknown> = {};
-    for (const f of library.fields) {
-      if (initialData && initialData[f.key] !== undefined) {
-        defaults[f.key] = initialData[f.key];
-      } else if (f.type === 'date') {
-        defaults[f.key] = quickDateStr(0);
-      } else if (f.type === 'checkbox') {
-        defaults[f.key] = false;
-      } else if (f.type === 'multi_select' || f.type === 'relation') {
-        defaults[f.key] = [];
-      } else if (f.type === 'select' && f.options?.length && f.required) {
-        defaults[f.key] = f.options[0].value;
-      } else {
-        defaults[f.key] = '';
-      }
-    }
-    setFormValues(defaults);
+  if (
+    visible &&
+    (!prevSession.visible ||
+      prevSession.librarySlug !== library.slug ||
+      prevSession.editingEntryId !== editingEntryId ||
+      prevSession.initialData !== initialData)
+  ) {
+    setPrevSession({
+      visible: true,
+      librarySlug: library.slug,
+      editingEntryId,
+      initialData,
+    });
+    setFormValues(buildInitialFormValues(library, initialData));
     setErrorMsg(null);
-  }, [visible, library, initialData]);
+  } else if (!visible && prevSession.visible) {
+    setPrevSession((s) => ({ ...s, visible: false }));
+  }
 
   const setFieldVal = (key: string, val: unknown) => {
     setFormValues((prev) => ({ ...prev, [key]: val }));
   };
 
   const pickImageForField = async (fieldKey: string) => {
-    const res = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      quality: 0.7,
-      base64: true,
-    });
-    if (!res.canceled && res.assets[0]) {
-      const asset = res.assets[0];
-      const uri = asset.base64
-        ? `data:${asset.mimeType || 'image/jpeg'};base64,${asset.base64}`
-        : asset.uri;
-      setFieldVal(fieldKey, uri);
+    try {
+      const res = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.85,
+        base64: Platform.OS === 'web',
+      });
+      if (!res.canceled && res.assets[0]) {
+        const storedPath = await savePickedImageToStorage(res.assets[0]);
+        setFieldVal(fieldKey, storedPath);
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   };
 
@@ -337,7 +366,11 @@ function FieldInputBlock({
       {field.type === 'image' ? (
         <View style={styles.imagePickerRow}>
           {value ? (
-            <Image source={{ uri: String(value) }} style={styles.previewImg} contentFit="cover" />
+            <Image
+              source={{ uri: resolveImageUri(value) }}
+              style={styles.previewImg}
+              contentFit="cover"
+            />
           ) : null}
           <Pressable onPress={onPickImage} style={styles.pickImgBtn}>
             <Feather name="image" size={16} color={Palette.brand} />

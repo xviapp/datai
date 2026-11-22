@@ -1,4 +1,5 @@
 import type { HighlightRule, HighlightTone } from '@/schema/view-dsl';
+import { formatLocalDate } from './date';
 
 export type FormulaValue = number | string | boolean;
 
@@ -242,7 +243,7 @@ export function evaluateFormula(
     function evalBuiltinFn(fnName: string, args: FormulaValue[]): FormulaValue {
       switch (fnName) {
         case 'TODAY':
-          return new Date().toISOString().slice(0, 10);
+          return formatLocalDate();
         case 'DAYS_UNTIL': {
           const diff = daysBetweenTodayAnd(args[0]);
           return diff ?? 0;

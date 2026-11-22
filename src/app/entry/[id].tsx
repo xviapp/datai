@@ -8,6 +8,7 @@ import { DynamicEntryFormModal } from '@/components/dynamic-renderer/DynamicEntr
 import { formatFieldDisplay } from '@/components/dynamic-renderer/DynamicViews';
 import { HighlightTonePalette, Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
+import { resolveImageUri } from '@/engine/image-storage';
 
 export default function EntryDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -136,7 +137,11 @@ export default function EntryDetailScreen() {
               return (
                 <View key={f.key} style={styles.imageFieldBlock}>
                   <Text style={styles.fieldKeyLabel}>{f.label}</Text>
-                  <Image source={{ uri: String(val) }} style={styles.detailImage} contentFit="cover" />
+                  <Image
+                    source={{ uri: resolveImageUri(val) }}
+                    style={styles.detailImage}
+                    contentFit="cover"
+                  />
                 </View>
               );
             }
@@ -190,17 +195,13 @@ export default function EntryDetailScreen() {
         ) : null}
 
         {/* 相关引用 */}
-        <View style={styles.sectionCard}>
-          <View style={styles.sectionHeader}>
-            <Feather name="corner-down-right" size={15} color={Palette.inkSecondary} />
-            <Text style={styles.sectionTitle}>相关引用 ({entry.backlinks.length})</Text>
-          </View>
-          {entry.backlinks.length === 0 ? (
-            <Text style={styles.mutedText}>
-              还没有其他记录关联到这里。在账单、打卡等记录中选中它后，会自动出现在这里。
-            </Text>
-          ) : (
-            entry.backlinks.map((bl) => (
+        {entry.backlinks.length > 0 ? (
+          <View style={styles.sectionCard}>
+            <View style={styles.sectionHeader}>
+              <Feather name="corner-down-right" size={15} color={Palette.inkSecondary} />
+              <Text style={styles.sectionTitle}>相关引用 ({entry.backlinks.length})</Text>
+            </View>
+            {entry.backlinks.map((bl) => (
               <Pressable
                 key={`${bl.fieldKey}-${bl.id}`}
                 onPress={() => router.push(`/entry/${bl.id}`)}
@@ -214,9 +215,9 @@ export default function EntryDetailScreen() {
                   <Feather name="chevron-right" size={15} color={Palette.inkMuted} />
                 </View>
               </Pressable>
-            ))
-          )}
-        </View>
+            ))}
+          </View>
+        ) : null}
       </ScrollView>
 
       <DynamicEntryFormModal

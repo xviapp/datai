@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { OmniRepository } from '@/db/repository';
+import { formatLocalDate } from '@/engine/date';
 import {
   AnalystAnswerSchema,
   ArchitectPlanSchema,
@@ -176,7 +177,7 @@ export async function runOmniCaptureAgent(
   onProgress?: (msg: string) => void
 ): Promise<OmniCaptureResult> {
   const prefs = await getAiPreferences();
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = formatLocalDate();
 
   let webContext = '';
   const shouldEnrich =
@@ -195,19 +196,20 @@ export async function runOmniCaptureAgent(
   const catalog = repo.getAiCatalogPrompt(true);
   const schemaSpec = JSON.stringify(getOmniCaptureJsonSchema());
 
-  const systemPrompt = `你是「个人全能记录 App」的极速智能录入引擎。今天日期是 ${todayStr}。
+  // 固定前缀置顶（不放动态日期），最大化命中 DeepSeek 硬盘前缀缓存
+  const systemPrompt = `你是「个人全能记录 App」的极速智能录入引擎。
 请将用户的输入（文字、小票/物品照片或网页补充信息）精准拆解为一条或多条待入库草稿，严格输出符合以下 JSON Schema 的 JSON 对象：
 ${schemaSpec}
 
 录入规则：
-1. 只能写入下方目录中存在的 librarySlug，且 data 的键必须严格对应各库的物理字段 key（不要填写 rollup 或 formula 字段）。
-2. 日期字段统一输出 "YYYY-MM-DD" 格式（如用户说“今天/刚才”填 "${todayStr}"，“昨天”自动减1天）。
+1. 只能写入用户消息所给目录中存在的 librarySlug，且 data 的键必须严格对应各库的物理字段 key（不要填写 rollup 或 formula 字段）。
+2. 日期字段统一输出 "YYYY-MM-DD" 格式（以用户消息提供的「今天日期」为准；说“今天/刚才”填今天日期，“昨天”自动减 1 天）。
 3. 对于 relation 关联字段：
-   - 若匹配到下方目录「已有记录候选」中的某条记录，请直接填入该记录的真实 ID 数组（如 ["ent_xxx"]）；
+   - 若匹配到目录「已有记录候选」中的某条记录，请直接填入该记录的真实 ID 数组（如 ["ent_xxx"]）；
    - 若一句话同时触发新建两条有关联的记录（例如“花1899买了台Switch” -> 先在 my_assets 新建草稿0，再在 daily_bills 新建草稿1关联它），可在草稿1的关联字段填入 ["@prev:0"] 引用同批次下标为 0 的草稿！
 4. select / multi_select 字段优先匹配该字段已定义的 options 可选值。`;
 
-  const promptBody = `${catalog}\n\n${
+  const promptBody = `今天日期（本地时区）: ${todayStr}\n\n${catalog}\n\n${
     params.targetLibrarySlug ? `用户指定优先归入库: ${params.targetLibrarySlug}\n` : ''
   }用户输入: ${params.text || '（请识别图片内容并提取入库记录）'}${webContext}`;
 
@@ -243,18 +245,19 @@ export async function runAnalystAgent(
   question: string,
   onProgress?: (msg: string) => void
 ): Promise<AnalystAnswer> {
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = formatLocalDate();
   const catalog = repo.getAiCatalogPrompt(false);
   const answerSchemaSpec = JSON.stringify(getAnalystJsonSchema());
 
   onProgress?.('正在核对你的本地记录...');
 
-  const systemPrompt = `你是「个人全能记录 App」的首席数据分析师。今天日期是 ${todayStr}。
+  // 固定前缀置顶（不放动态日期），最大化命中 DeepSeek 硬盘前缀缓存
+  const systemPrompt = `你是「个人全能记录 App」的首席数据分析师。
 你拥有工具 \`execute_readonly_sql\`，可在手机本地 SQLite 只读沙盒上运行 SELECT 查询。
 
 工作铁律：
 1. **绝不凭空心算或编造数字**！回答任何统计、排名、趋势、对比问题前，必须先调用 \`execute_readonly_sql\` 查询真实数据。
-2. 如果第一次 SQL 报错或列名写错，请根据错误信息修正 SQL 重新调用工具。注意：rollup 和 formula 字段不在 v_<slug> 视图中，跨表关联请 JOIN \`entry_relations(source_entry_id, target_entry_id, field_key)\`。
+2. 如果第一次 SQL 报错或列名写错，请根据错误信息修正 SQL 重新调用工具。注意：rollup、formula 和 image 字段不在 v_<slug> 视图中，跨表关联请 JOIN \`entry_relations(source_entry_id, target_entry_id, field_key)\`。
 3. 拿到真实查询结果后，最终回复必须直接输出严格符合以下 JSON Schema 的纯 JSON 字符串（不要包裹额外散文）：
 ${answerSchemaSpec}
 4. 如果该问题适合用数字卡（kpi_number）、柱状图（bar）、折线图（line）或饼图（pie）展示，请一并填写 \`suggestedWidget\`，其 \`readonlySql\` 必须是你刚刚通过工具验证成功的 SQL，且 \`xKey\`/\`yKey\` 与 SQL 返回别名完全一致！`;
@@ -264,7 +267,7 @@ ${answerSchemaSpec}
     onProgress,
     initialMessages: [
       { role: 'system', content: `${systemPrompt}\n\n${catalog}` },
-      { role: 'user', content: question },
+      { role: 'user', content: `今天日期（本地时区）：${todayStr}\n\n${question}` },
     ],
     tools: [
       {

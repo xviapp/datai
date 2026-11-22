@@ -17,6 +17,7 @@ import { TabPageHeader } from '@/components/layout/TabPageHeader';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord, SavedDashboardWidget } from '@/db/repository';
+import { sqlReferencesLibraryView } from '@/db/types';
 
 type StatsTabItem =
   | {
@@ -53,9 +54,8 @@ export default function StatsScreen() {
   // 仅对「已设计统计图表」的记录本生成分组标签
   const libraryTabs: StatsTabItem[] = [];
   for (const lib of libraries) {
-    const viewToken = `v_${lib.slug}`;
     const matched = allWidgets.filter(
-      (w) => w.librarySlug === lib.slug || w.readonlySql.includes(viewToken)
+      (w) => w.librarySlug === lib.slug || sqlReferencesLibraryView(w.readonlySql, lib.slug)
     );
     if (matched.length > 0) {
       libraryTabs.push({
@@ -276,15 +276,10 @@ export default function StatsScreen() {
                   <View style={styles.emptyIconCircle}>
                     <Feather name="star" size={21} color="#D97706" />
                   </View>
-                  <Text style={styles.emptyTitle}>
-                    {tab.kind === 'overview' && allWidgets.length > 0
-                      ? '总览里还没有星标图表'
-                      : '还没有定制统计'}
-                  </Text>
                   <Text style={styles.emptyDesc}>
                     {tab.kind === 'overview' && allWidgets.length > 0
-                      ? '从下方直接挑选已有图表加入总览，或在各记录本分组里点亮图表右上角的 ★。'
-                      : '这里只展示你主动设计过的图表。点右下角按钮说出想看的内容，满意后点「固定到统计」即可。'}
+                      ? '从下方挑选图表加入总览，或在各记录本分组里点亮 ★'
+                      : '点右下角按钮说出想看的图表，满意后固定到统计'}
                   </Text>
                   {allWidgets.length === 0 ? (
                     <Pressable
