@@ -12,8 +12,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
+import { TabPageHeader } from '@/components/layout/TabPageHeader';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord, SavedDashboardWidget } from '@/db/repository';
@@ -123,40 +123,39 @@ export default function StatsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <View style={styles.safeArea}>
       {/* 顶部标题栏 */}
-      <View style={styles.topHeader}>
-        <View style={styles.titleBlock}>
-          <Text style={styles.pageTitle}>统计</Text>
-          <Text style={styles.pageSubtitle}>
-            {manageMode
-              ? '点箭头调顺序，点 ★ 决定是否放进总览'
-              : allWidgets.length > 0
-                ? `总览已选 ${overviewWidgets.length} 项 · 共 ${allWidgets.length} 项定制统计`
-                : '按需定制你关心的统计图表'}
-          </Text>
-        </View>
-
-        {allWidgets.length > 0 ? (
-          <Pressable
-            onPress={() => setManageMode((m) => !m)}
-            style={({ pressed }) => [
-              styles.sortBtn,
-              manageMode && styles.sortBtnActive,
-              pressed && { opacity: 0.8 },
-            ]}
-          >
-            <Feather
-              name={manageMode ? 'check' : 'sliders'}
-              size={14}
-              color={manageMode ? Palette.inkInverse : Palette.inkPrimary}
-            />
-            <Text style={[styles.sortBtnText, manageMode && styles.sortBtnTextActive]}>
-              {manageMode ? '完成' : '排序'}
-            </Text>
-          </Pressable>
-        ) : null}
-      </View>
+      <TabPageHeader
+        title="统计"
+        subtitle={
+          manageMode
+            ? '点箭头调顺序，点 ★ 决定是否放进总览'
+            : allWidgets.length > 0
+              ? `总览已选 ${overviewWidgets.length} 项 · 共 ${allWidgets.length} 项定制统计`
+              : '按需定制你关心的统计图表'
+        }
+        right={
+          allWidgets.length > 0 ? (
+            <Pressable
+              onPress={() => setManageMode((m) => !m)}
+              style={({ pressed }) => [
+                styles.sortBtn,
+                manageMode && styles.sortBtnActive,
+                pressed && { opacity: 0.8 },
+              ]}
+            >
+              <Feather
+                name={manageMode ? 'check' : 'sliders'}
+                size={14}
+                color={manageMode ? Palette.inkInverse : Palette.inkPrimary}
+              />
+              <Text style={[styles.sortBtnText, manageMode && styles.sortBtnTextActive]}>
+                {manageMode ? '完成' : '排序'}
+              </Text>
+            </Pressable>
+          ) : undefined
+        }
+      />
 
       {/* 横向分组胶囊 */}
       {tabs.length > 1 ? (
@@ -226,7 +225,10 @@ export default function StatsScreen() {
             <ScrollView
               key={tab.id}
               style={{ width: screenWidth }}
-              contentContainerStyle={styles.pageContent}
+              contentContainerStyle={[
+                styles.pageContent,
+                tabs.length <= 1 && styles.pageContentNoChips,
+              ]}
               showsVerticalScrollIndicator={false}
             >
               {tab.kind === 'library' ? (
@@ -381,7 +383,7 @@ export default function StatsScreen() {
       >
         <Feather name="message-circle" size={24} color={Palette.inkInverse} />
       </Pressable>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -390,45 +392,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: Palette.bgCanvas,
   },
-  topHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 18,
-    paddingTop: 14,
-    paddingBottom: 10,
-    gap: 10,
-  },
-  titleBlock: {
-    flex: 1,
-    minWidth: 0,
-    gap: 2,
-  },
-  pageTitle: {
-    fontSize: 25,
-    fontWeight: '800',
-    color: Palette.inkPrimary,
-    letterSpacing: -0.5,
-  },
-  pageSubtitle: {
-    fontSize: 12,
-    color: Palette.inkMuted,
-  },
-  headerBtns: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    flexShrink: 0,
-  },
   sortBtn: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    justifyContent: 'center',
+    gap: 5,
+    height: 36,
     backgroundColor: Palette.bgSurface,
     borderWidth: 1,
     borderColor: Palette.borderHairline,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: 13,
     borderRadius: 999,
   },
   sortBtnActive: {
@@ -441,20 +414,6 @@ const styles = StyleSheet.create({
     color: Palette.inkPrimary,
   },
   sortBtnTextActive: {
-    color: Palette.inkInverse,
-  },
-  askBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    backgroundColor: Palette.brand,
-    paddingHorizontal: 13,
-    paddingVertical: 8,
-    borderRadius: 999,
-  },
-  askBtnText: {
-    fontSize: 13,
-    fontWeight: '700',
     color: Palette.inkInverse,
   },
   chipsBarWrap: {
@@ -511,6 +470,9 @@ const styles = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 92,
     gap: 12,
+  },
+  pageContentNoChips: {
+    paddingTop: 4,
   },
   statsFab: {
     position: 'absolute',

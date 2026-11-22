@@ -14,7 +14,6 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { callDeepSeekChat } from '@/ai/deepseek-client';
 import {
   getAiPreferences,
@@ -23,6 +22,7 @@ import {
   saveDeepSeekApiKey,
   type ReasoningEffort,
 } from '@/ai/settings-store';
+import { TabPageHeader } from '@/components/layout/TabPageHeader';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { FullBackupBundle } from '@/db/repository';
@@ -184,14 +184,17 @@ export default function SettingsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <View style={styles.safeArea}>
+      <TabPageHeader
+        title="设置"
+        subtitle={hasApiKey ? '数据仅存本机 · 助手已连接' : '数据仅存本机 · 离线可用'}
+      />
+
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.container}
         keyboardShouldPersistTaps="handled"
       >
-        <Text style={styles.pageTitle}>设置</Text>
-
         {feedback ? (
           <View
             style={[
@@ -481,7 +484,7 @@ export default function SettingsScreen() {
 
         <Text style={styles.versionFoot}>拾录 Folio v1.0 · 纯本地离线记录本</Text>
       </ScrollView>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -495,19 +498,12 @@ const styles = StyleSheet.create({
   },
   container: {
     width: '100%',
-    maxWidth: 760,
+    maxWidth: 880,
     alignSelf: 'center',
     paddingHorizontal: 18,
-    paddingTop: 14,
+    paddingTop: 4,
     paddingBottom: 40,
     gap: 12,
-  },
-  pageTitle: {
-    fontSize: 25,
-    fontWeight: '800',
-    color: Palette.inkPrimary,
-    letterSpacing: -0.5,
-    marginBottom: 2,
   },
   banner: {
     flexDirection: 'row',

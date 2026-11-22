@@ -9,8 +9,8 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
 import { SchemaEditorModal } from '@/components/dynamic-renderer/SchemaEditorModal';
+import { TabPageHeader } from '@/components/layout/TabPageHeader';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord } from '@/db/repository';
@@ -47,45 +47,38 @@ export default function HomeVaultScreen() {
   })();
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <View style={styles.safeArea}>
+      <TabPageHeader
+        title="拾录"
+        subtitle={`${libraries.length} 个记录本 · 共 ${totalEntryCount} 条记录`}
+        right={
+          <>
+            {!hasApiKey ? (
+              <Pressable
+                onPress={() => router.push('/(tabs)/settings')}
+                style={({ pressed }) => [styles.keyStatusPill, pressed && { opacity: 0.75 }]}
+              >
+                <View style={styles.statusDot} />
+                <Text style={styles.keyStatusText}>连接助手</Text>
+              </Pressable>
+            ) : null}
+            <Pressable
+              id="btn-new-library"
+              onPress={() => setCreateModalOpen(true)}
+              style={({ pressed }) => [styles.newLibBtn, pressed && { opacity: 0.85 }]}
+            >
+              <Feather name="plus" size={16} color={Palette.inkInverse} />
+              <Text style={styles.newLibBtnText}>新建</Text>
+            </Pressable>
+          </>
+        }
+      />
+
       <ScrollView
         style={styles.scroll}
         contentContainerStyle={styles.container}
         keyboardShouldPersistTaps="handled"
       >
-        {/* 顶部标题栏 */}
-        <View style={styles.topHeaderBlock}>
-          <View style={styles.topHeader}>
-            <View style={styles.brandBlock}>
-              <Text style={styles.brandTitle} numberOfLines={1}>
-                拾录
-              </Text>
-              <Text style={styles.brandSubtitle}>
-                {libraries.length} 个记录本 · 共 {totalEntryCount} 条记录
-              </Text>
-            </View>
-            <View style={styles.headerActions}>
-              {!hasApiKey ? (
-                <Pressable
-                  onPress={() => router.push('/(tabs)/settings')}
-                  style={({ pressed }) => [styles.keyStatusPill, pressed && { opacity: 0.75 }]}
-                >
-                  <View style={styles.statusDot} />
-                  <Text style={styles.keyStatusText}>连接助手</Text>
-                </Pressable>
-              ) : null}
-              <Pressable
-                id="btn-new-library"
-                onPress={() => setCreateModalOpen(true)}
-                style={({ pressed }) => [styles.newLibBtn, pressed && { opacity: 0.85 }]}
-              >
-                <Feather name="plus" size={16} color={Palette.inkInverse} />
-                <Text style={styles.newLibBtnText}>新建</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-
         {/* 全局搜索 */}
         <View style={styles.searchBar}>
           <Feather name="search" size={16} color={Palette.inkMuted} />
@@ -208,7 +201,7 @@ export default function HomeVaultScreen() {
           }
         }}
       />
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -225,46 +218,17 @@ const styles = StyleSheet.create({
     maxWidth: 880,
     alignSelf: 'center',
     paddingHorizontal: 18,
-    paddingTop: 14,
+    paddingTop: 4,
     paddingBottom: 96,
     gap: 16,
-  },
-  topHeaderBlock: {
-    paddingTop: 4,
-  },
-  topHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 10,
-  },
-  brandBlock: {
-    flex: 1,
-    minWidth: 0,
-    gap: 2,
-  },
-  brandTitle: {
-    fontSize: 25,
-    fontWeight: '800',
-    color: Palette.inkPrimary,
-    letterSpacing: -0.5,
-  },
-  brandSubtitle: {
-    fontSize: 13,
-    color: Palette.inkMuted,
-  },
-  headerActions: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flexShrink: 0,
-    gap: 8,
   },
   keyStatusPill: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 5,
-    paddingHorizontal: 11,
-    paddingVertical: 8,
+    height: 36,
+    paddingHorizontal: 12,
     borderRadius: 999,
     backgroundColor: Palette.bgSurface,
     borderWidth: 1,
@@ -284,10 +248,11 @@ const styles = StyleSheet.create({
   newLibBtn: {
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     gap: 4,
+    height: 36,
     backgroundColor: Palette.brand,
     paddingHorizontal: 14,
-    paddingVertical: 8,
     borderRadius: 999,
   },
   newLibBtnText: {

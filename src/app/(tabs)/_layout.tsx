@@ -10,8 +10,11 @@ export default function TabsLayout() {
 
   return (
     <Tabs
+      detachInactiveScreens={false}
       screenOptions={{
         headerShown: false,
+        lazy: false,
+        animation: 'none',
         tabBarActiveTintColor: Palette.brand,
         tabBarInactiveTintColor: Palette.inkMuted,
         tabBarStyle: {

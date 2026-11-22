@@ -4,7 +4,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import React, { useEffect } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { initialWindowMetrics, SafeAreaProvider } from 'react-native-safe-area-context';
 import { OmniCaptureModal } from '@/components/ai/OmniCaptureModal';
 import { Palette } from '@/constants/design-tokens';
 import { OmniProvider, useOmni } from '@/context/omni-context';
@@ -57,7 +57,7 @@ function AppShell() {
 
 export default function RootLayout() {
   return (
-    <SafeAreaProvider>
+    <SafeAreaProvider initialMetrics={initialWindowMetrics}>
       <Head>
         <title>拾录 · Folio</title>
         <meta
