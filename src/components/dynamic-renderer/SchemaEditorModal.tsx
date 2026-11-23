@@ -74,6 +74,20 @@ const COMMON_FIELD_TYPES: FieldType[] = [
 
 const ADVANCED_FIELD_TYPES: FieldType[] = ['relation', 'rollup', 'formula'];
 
+const ROLLUP_FNS: Array<{ fn: 'SUM' | 'COUNT' | 'AVG' | 'MAX' | 'MIN'; label: string }> = [
+  { fn: 'SUM', label: '求和' },
+  { fn: 'COUNT', label: '计数' },
+  { fn: 'AVG', label: '平均' },
+  { fn: 'MAX', label: '最大' },
+  { fn: 'MIN', label: '最小' },
+];
+
+const CURATED_EMOJIS = [
+  '📒', '📚', '💰', '📷', '💊', '☕',
+  '🏃', '🎬', '✈️', '🍽️', '🪴', '🎵',
+  '🛍️', '📝', '💡', '🎯', '🏠', '🐾',
+];
+
 const TONES: AccentTone[] = ['teal', 'amber', 'rose', 'blue', 'emerald', 'slate'];
 
 export function SchemaEditorModal({
@@ -89,6 +103,9 @@ export function SchemaEditorModal({
   const insets = useSafeAreaInsets();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [openTypePickerKey, setOpenTypePickerKey] = useState<string | null>(null);
+  const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
+  const [hierarchyExpanded, setHierarchyExpanded] = useState(Boolean(defaultParentSlug));
+  const [cardDisplayExpanded, setCardDisplayExpanded] = useState(false);
 
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
@@ -209,11 +226,26 @@ export function SchemaEditorModal({
   } else if (!visible && prevSession.visible) {
     setPrevSession((s) => ({ ...s, visible: false }));
     setOpenTypePickerKey(null);
+    setEmojiPickerOpen(false);
+    setHierarchyExpanded(false);
+    setCardDisplayExpanded(false);
   }
 
   const toggleTypePicker = (rowKey: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     setOpenTypePickerKey((prev) => (prev === rowKey ? null : rowKey));
+  };
+
+  const moveField = (index: number, delta: -1 | 1) => {
+    const target = index + delta;
+    if (target < 0 || target >= fields.length) return;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setFields((prev) => {
+      const next = [...prev];
+      const [item] = next.splice(index, 1);
+      next.splice(target, 0, item);
+      return next;
+    });
   };
 
   const addNewField = () => {
@@ -460,14 +492,22 @@ export function SchemaEditorModal({
             </View>
 
             {/* 基础信息 */}
-            <Text style={styles.sectionTitle}>1. 名称与归属方式</Text>
+            <Text style={styles.sectionTitle}>1. 名称与样式</Text>
             <View style={styles.rowGap}>
-              <TextInput
-                value={icon}
-                onChangeText={setIcon}
-                style={[styles.input, { width: 58, textAlign: 'center', fontSize: 20 }]}
-                maxLength={2}
-              />
+              <Pressable
+                onPress={() => {
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                  setEmojiPickerOpen((v) => !v);
+                }}
+                style={({ pressed }) => [
+                  styles.emojiTriggerBtn,
+                  emojiPickerOpen && styles.emojiTriggerBtnOpen,
+                  pressed && { opacity: 0.78 },
+                ]}
+                accessibilityLabel="选择记录本图标"
+              >
+                <Text style={styles.emojiTriggerText}>{icon || '📒'}</Text>
+              </Pressable>
               <TextInput
                 value={name}
                 onChangeText={setName}
@@ -476,6 +516,44 @@ export function SchemaEditorModal({
                 style={[styles.input, { flex: 1 }]}
               />
             </View>
+
+            {emojiPickerOpen ? (
+              <View style={styles.emojiPanel}>
+                <View style={styles.emojiGrid}>
+                  {CURATED_EMOJIS.map((em) => {
+                    const active = icon === em;
+                    return (
+                      <Pressable
+                        key={em}
+                        onPress={() => {
+                          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                          setIcon(em);
+                          setEmojiPickerOpen(false);
+                        }}
+                        style={({ pressed }) => [
+                          styles.emojiCell,
+                          active && styles.emojiCellActive,
+                          pressed && { opacity: 0.7 },
+                        ]}
+                      >
+                        <Text style={styles.emojiCellText}>{em}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <View style={styles.customEmojiRow}>
+                  <Text style={styles.subFieldHint}>自定义图标：</Text>
+                  <TextInput
+                    value={icon}
+                    onChangeText={setIcon}
+                    maxLength={2}
+                    placeholder="输入 Emoji"
+                    placeholderTextColor={Palette.inkMuted}
+                    style={[styles.smallInput, { width: 96, textAlign: 'center' }]}
+                  />
+                </View>
+              </View>
+            ) : null}
 
             <View style={styles.tonesRow}>
               {TONES.map((t) => {
@@ -495,66 +573,93 @@ export function SchemaEditorModal({
             </View>
 
             {parentCandidates.length > 0 ? (
-              <View style={styles.hierarchyBox}>
-                <Text style={styles.subFieldHint}>层级归属（可选）：</Text>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  <View style={styles.typeChipsRow}>
-                    <Pressable
-                      onPress={() => handleSelectParent('')}
-                      style={[styles.typeChip, !parentLibrarySlug && styles.typeChipActive]}
-                    >
-                      <Text
-                        style={[
-                          styles.typeChipText,
-                          !parentLibrarySlug && styles.typeChipTextActive,
-                        ]}
-                      >
-                        独立主记录本
-                      </Text>
-                    </Pressable>
-                    {parentCandidates.map((cand) => {
-                      const active = parentLibrarySlug === cand.slug;
-                      return (
+              <View style={styles.collapsibleCard}>
+                <Pressable
+                  onPress={() => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    setHierarchyExpanded((v) => !v);
+                  }}
+                  style={({ pressed }) => [styles.collapsibleHeader, pressed && { opacity: 0.75 }]}
+                >
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={styles.collapsibleTitle}>归属与首页显示</Text>
+                    <Text style={styles.collapsibleSub} numberOfLines={1}>
+                      {parentLibrarySlug
+                        ? `附属记录本（${parentCandidates.find((c) => c.slug === parentLibrarySlug)?.name ?? parentLibrarySlug}）`
+                        : '独立主记录本'}
+                      {showOnHome ? ' · 首页显示' : ' · 已收纳'}
+                    </Text>
+                  </View>
+                  <Feather
+                    name={hierarchyExpanded ? 'chevron-up' : 'chevron-down'}
+                    size={16}
+                    color={Palette.inkMuted}
+                  />
+                </Pressable>
+
+                {hierarchyExpanded ? (
+                  <View style={styles.collapsibleBody}>
+                    <Text style={styles.subFieldHint}>层级归属（可选）：</Text>
+                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                      <View style={styles.typeChipsRow}>
                         <Pressable
-                          key={cand.slug}
-                          onPress={() => handleSelectParent(cand.slug)}
-                          style={[styles.typeChip, active && styles.typeChipActive]}
+                          onPress={() => handleSelectParent('')}
+                          style={[styles.typeChip, !parentLibrarySlug && styles.typeChipActive]}
                         >
-                          <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
-                            附属：{cand.icon} {cand.name}
+                          <Text
+                            style={[
+                              styles.typeChipText,
+                              !parentLibrarySlug && styles.typeChipTextActive,
+                            ]}
+                          >
+                            独立主记录本
                           </Text>
                         </Pressable>
-                      );
-                    })}
-                  </View>
-                </ScrollView>
+                        {parentCandidates.map((cand) => {
+                          const active = parentLibrarySlug === cand.slug;
+                          return (
+                            <Pressable
+                              key={cand.slug}
+                              onPress={() => handleSelectParent(cand.slug)}
+                              style={[styles.typeChip, active && styles.typeChipActive]}
+                            >
+                              <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
+                                附属：{cand.icon} {cand.name}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </ScrollView>
 
-                <View style={styles.homeSwitchRow}>
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={styles.homeSwitchTitle}>在首页独立显示卡片</Text>
-                    <Text style={styles.homeSwitchDesc}>
-                      {parentLibrarySlug
-                        ? '关闭后将收纳进主记录本内部切换栏与记录详情时间轴中'
-                        : '关闭后可从全局搜索查看，不在首页网格展示'}
-                    </Text>
-                  </View>
-                  <Switch
-                    value={showOnHome}
-                    onValueChange={setShowOnHome}
-                    trackColor={{ false: Palette.borderStrong, true: Palette.brand }}
-                  />
-                </View>
+                    <View style={styles.homeSwitchRow}>
+                      <View style={{ flex: 1, gap: 2 }}>
+                        <Text style={styles.homeSwitchTitle}>在首页独立显示卡片</Text>
+                        <Text style={styles.homeSwitchDesc}>
+                          {parentLibrarySlug
+                            ? '关闭后将收纳进主记录本内部切换栏与记录详情时间轴中'
+                            : '关闭后可从全局搜索查看，不在首页网格展示'}
+                        </Text>
+                      </View>
+                      <Switch
+                        value={showOnHome}
+                        onValueChange={setShowOnHome}
+                        trackColor={{ false: Palette.borderStrong, true: Palette.brand }}
+                      />
+                    </View>
 
-                {existingLibrary && !parentLibrarySlug && onCreateSubLibrary ? (
-                  <Pressable
-                    onPress={() => onCreateSubLibrary(existingLibrary.slug)}
-                    style={styles.spawnSubBtn}
-                  >
-                    <Feather name="corner-down-right" size={14} color={Palette.brand} />
-                    <Text style={styles.spawnSubText}>
-                      为「{existingLibrary.name}」新建附属子记录本（如阅读记录 / 跟进流水）
-                    </Text>
-                  </Pressable>
+                    {existingLibrary && !parentLibrarySlug && onCreateSubLibrary ? (
+                      <Pressable
+                        onPress={() => onCreateSubLibrary(existingLibrary.slug)}
+                        style={styles.spawnSubBtn}
+                      >
+                        <Feather name="corner-down-right" size={14} color={Palette.brand} />
+                        <Text style={styles.spawnSubText}>
+                          为「{existingLibrary.name}」新建附属子记录本（如阅读记录 / 跟进流水）
+                        </Text>
+                      </Pressable>
+                    ) : null}
+                  </View>
                 ) : null}
               </View>
             ) : null}
@@ -616,6 +721,7 @@ export function SchemaEditorModal({
                         ]}
                       >
                         {typeBadgeLabel}
+                        {field.required ? ' *' : ''}
                       </Text>
                       <Feather
                         name={isPickerOpen ? 'chevron-up' : 'chevron-down'}
@@ -641,6 +747,70 @@ export function SchemaEditorModal({
 
                   {isPickerOpen ? (
                     <View style={styles.typeDropdownPanel}>
+                      {/* 排序、必填与单位快捷设置 */}
+                      <View style={styles.fieldMetaBar}>
+                        <View style={styles.moveBtnsRow}>
+                          <Pressable
+                            disabled={index === 0}
+                            onPress={() => moveField(index, -1)}
+                            style={[styles.metaChipBtn, index === 0 && styles.metaChipDisabled]}
+                          >
+                            <Feather name="arrow-up" size={12} color={Palette.inkSecondary} />
+                            <Text style={styles.metaChipText}>上移</Text>
+                          </Pressable>
+                          <Pressable
+                            disabled={index === fields.length - 1}
+                            onPress={() => moveField(index, 1)}
+                            style={[
+                              styles.metaChipBtn,
+                              index === fields.length - 1 && styles.metaChipDisabled,
+                            ]}
+                          >
+                            <Feather name="arrow-down" size={12} color={Palette.inkSecondary} />
+                            <Text style={styles.metaChipText}>下移</Text>
+                          </Pressable>
+                        </View>
+
+                        {field.type !== 'rollup' && field.type !== 'formula' ? (
+                          <Pressable
+                            onPress={() => updateFieldAt(index, { required: !field.required })}
+                            style={[
+                              styles.metaChipBtn,
+                              field.required && styles.metaChipBtnActive,
+                            ]}
+                          >
+                            <Feather
+                              name={field.required ? 'check-square' : 'square'}
+                              size={12}
+                              color={field.required ? Palette.brand : Palette.inkMuted}
+                            />
+                            <Text
+                              style={[
+                                styles.metaChipText,
+                                field.required && { color: Palette.brand, fontWeight: '700' },
+                              ]}
+                            >
+                              必填
+                            </Text>
+                          </Pressable>
+                        ) : null}
+                      </View>
+
+                      {field.type === 'number' ||
+                      field.type === 'formula' ||
+                      field.type === 'rollup' ? (
+                        <View style={styles.unitRow}>
+                          <Text style={styles.typeGroupLabel}>显示单位（可选）</Text>
+                          <TextInput
+                            value={field.unit ?? ''}
+                            onChangeText={(u) => updateFieldAt(index, { unit: u || undefined })}
+                            placeholder="如：页、分钟、km、元/天"
+                            placeholderTextColor={Palette.inkMuted}
+                            style={[styles.smallInput, styles.unitInput]}
+                          />
+                        </View>
+                      ) : null}
+
                       <Text style={styles.typeGroupLabel}>常用类型</Text>
                       <View style={styles.typeGrid}>
                         {COMMON_FIELD_TYPES.map((t) => {
@@ -809,85 +979,276 @@ export function SchemaEditorModal({
                     />
                   )}
 
-                  {field.type === 'rollup' && (
-                    <View style={styles.rowGap}>
-                      <TextInput
-                        value={field.rollupConfig?.relationFieldKey ?? ''}
-                        onChangeText={(v) =>
-                          updateFieldAt(index, {
-                            rollupConfig: {
-                              relationFieldKey: v,
-                              targetFieldKey: field.rollupConfig?.targetFieldKey ?? 'amount',
-                              fn: field.rollupConfig?.fn ?? 'SUM',
-                            },
-                          })
+                  {field.type === 'rollup' && (() => {
+                    const currentRelKey = field.rollupConfig?.relationFieldKey ?? '';
+                    const currentTargetKey = field.rollupConfig?.targetFieldKey ?? '';
+                    const currentFn = field.rollupConfig?.fn ?? 'SUM';
+
+                    const rollupSources: Array<{
+                      value: string;
+                      label: string;
+                      targetLib: LibraryRecord;
+                    }> = [];
+
+                    for (const rf of fields) {
+                      if (rf.type === 'relation' && rf.relationConfig?.targetLibrarySlug) {
+                        const targetLib = libraries.find(
+                          (l) => l.slug === rf.relationConfig?.targetLibrarySlug
+                        );
+                        if (targetLib) {
+                          rollupSources.push({
+                            value: rf.key,
+                            label: `${rf.label} (${targetLib.icon}${targetLib.name})`,
+                            targetLib,
+                          });
                         }
-                        placeholder="关联key 或 reverse:库.字段"
-                        autoCapitalize="none"
-                        style={[styles.smallInput, { flex: 1 }]}
-                      />
-                      <TextInput
-                        value={field.rollupConfig?.targetFieldKey ?? ''}
-                        onChangeText={(v) =>
-                          updateFieldAt(index, {
-                            rollupConfig: {
-                              relationFieldKey: field.rollupConfig?.relationFieldKey ?? '',
-                              targetFieldKey: v,
-                              fn: field.rollupConfig?.fn ?? 'SUM',
-                            },
-                          })
+                      }
+                    }
+
+                    if (slug) {
+                      for (const otherLib of libraries) {
+                        if (otherLib.slug === slug) continue;
+                        for (const ofield of otherLib.fields) {
+                          if (
+                            ofield.type === 'relation' &&
+                            ofield.relationConfig?.targetLibrarySlug === slug
+                          ) {
+                            rollupSources.push({
+                              value: `reverse:${otherLib.slug}.${ofield.key}`,
+                              label: `关联表：${otherLib.icon} ${otherLib.name}`,
+                              targetLib: otherLib,
+                            });
+                          }
                         }
-                        placeholder="聚合目标字段"
-                        autoCapitalize="none"
-                        style={[styles.smallInput, { width: 105 }]}
-                      />
-                    </View>
-                  )}
+                      }
+                    }
+
+                    const matchedSource = rollupSources.find((s) => s.value === currentRelKey);
+                    const targetFields = matchedSource
+                      ? matchedSource.targetLib.fields.filter(
+                          (tf) =>
+                            tf.type === 'number' ||
+                            tf.type === 'currency' ||
+                            tf.type === 'rating' ||
+                            tf.type === 'formula'
+                        )
+                      : [];
+
+                    return (
+                      <View style={styles.rollupBox}>
+                        {rollupSources.length > 0 ? (
+                          <>
+                            <Text style={styles.typeGroupLabel}>汇总来源</Text>
+                            <View style={styles.typeChipsRow}>
+                              {rollupSources.map((src) => {
+                                const active = src.value === currentRelKey;
+                                return (
+                                  <Pressable
+                                    key={src.value}
+                                    onPress={() => {
+                                      const defaultField =
+                                        src.targetLib.fields.find(
+                                          (tf) => tf.type === 'currency' || tf.type === 'number'
+                                        )?.key ?? src.targetLib.fields[0]?.key ?? 'id';
+                                      updateFieldAt(index, {
+                                        rollupConfig: {
+                                          relationFieldKey: src.value,
+                                          targetFieldKey: defaultField,
+                                          fn: currentFn,
+                                        },
+                                      });
+                                    }}
+                                    style={[styles.typeChip, active && styles.typeChipActive]}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.typeChipText,
+                                        active && styles.typeChipTextActive,
+                                      ]}
+                                    >
+                                      {src.label}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+
+                            <Text style={styles.typeGroupLabel}>统计方式</Text>
+                            <View style={styles.typeChipsRow}>
+                              {ROLLUP_FNS.map((item) => {
+                                const active = currentFn === item.fn;
+                                return (
+                                  <Pressable
+                                    key={item.fn}
+                                    onPress={() =>
+                                      updateFieldAt(index, {
+                                        rollupConfig: {
+                                          relationFieldKey: currentRelKey,
+                                          targetFieldKey: currentTargetKey || 'id',
+                                          fn: item.fn,
+                                        },
+                                      })
+                                    }
+                                    style={[styles.typeChip, active && styles.typeChipActive]}
+                                  >
+                                    <Text
+                                      style={[
+                                        styles.typeChipText,
+                                        active && styles.typeChipTextActive,
+                                      ]}
+                                    >
+                                      {item.label}
+                                    </Text>
+                                  </Pressable>
+                                );
+                              })}
+                            </View>
+
+                            {currentFn !== 'COUNT' && targetFields.length > 0 ? (
+                              <>
+                                <Text style={styles.typeGroupLabel}>目标数值字段</Text>
+                                <View style={styles.typeChipsRow}>
+                                  {targetFields.map((tf) => {
+                                    const active = currentTargetKey === tf.key;
+                                    return (
+                                      <Pressable
+                                        key={tf.key}
+                                        onPress={() =>
+                                          updateFieldAt(index, {
+                                            rollupConfig: {
+                                              relationFieldKey: currentRelKey,
+                                              targetFieldKey: tf.key,
+                                              fn: currentFn,
+                                            },
+                                          })
+                                        }
+                                        style={[styles.typeChip, active && styles.typeChipActive]}
+                                      >
+                                        <Text
+                                          style={[
+                                            styles.typeChipText,
+                                            active && styles.typeChipTextActive,
+                                          ]}
+                                        >
+                                          {tf.label}
+                                        </Text>
+                                      </Pressable>
+                                    );
+                                  })}
+                                </View>
+                              </>
+                            ) : null}
+                          </>
+                        ) : (
+                          <View style={styles.rowGap}>
+                            <TextInput
+                              value={currentRelKey}
+                              onChangeText={(v) =>
+                                updateFieldAt(index, {
+                                  rollupConfig: {
+                                    relationFieldKey: v,
+                                    targetFieldKey: currentTargetKey || 'amount',
+                                    fn: currentFn,
+                                  },
+                                })
+                              }
+                              placeholder="先添加一个「跨表关联」字段或附属表"
+                              placeholderTextColor={Palette.inkMuted}
+                              autoCapitalize="none"
+                              style={[styles.smallInput, { flex: 1 }]}
+                            />
+                            <TextInput
+                              value={currentTargetKey}
+                              onChangeText={(v) =>
+                                updateFieldAt(index, {
+                                  rollupConfig: {
+                                    relationFieldKey: currentRelKey,
+                                    targetFieldKey: v,
+                                    fn: currentFn,
+                                  },
+                                })
+                              }
+                              placeholder="目标字段"
+                              placeholderTextColor={Palette.inkMuted}
+                              autoCapitalize="none"
+                              style={[styles.smallInput, { width: 96 }]}
+                            />
+                          </View>
+                        )}
+                      </View>
+                    );
+                  })()}
                 </View>
               );
             })}
 
-            {/* 3. 列表卡片显示 */}
-            <Text style={styles.sectionTitle}>3. 列表卡片显示</Text>
-            <SlotPickerRow
-              label="主标题"
-              fields={fields}
-              selectedKey={titleFieldKey}
-              onSelect={setTitleFieldKey}
-            />
-            <SlotPickerRow
-              label="副标题"
-              fields={fields}
-              selectedKey={subtitleFieldKey}
-              allowEmpty
-              onSelect={setSubtitleFieldKey}
-            />
-            <SlotPickerRow
-              label="右上角标签"
-              fields={fields}
-              selectedKey={rightBadgeFieldKey}
-              allowEmpty
-              onSelect={setRightBadgeFieldKey}
-            />
+            {/* 3. 列表卡片显示（默认折叠，按需微调） */}
+            <View style={styles.collapsibleCard}>
+              <Pressable
+                onPress={() => {
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                  setCardDisplayExpanded((v) => !v);
+                }}
+                style={({ pressed }) => [styles.collapsibleHeader, pressed && { opacity: 0.75 }]}
+              >
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text style={styles.collapsibleTitle}>3. 列表卡片显示</Text>
+                  <Text style={styles.collapsibleSub} numberOfLines={1}>
+                    主标题：{fields.find((f) => f.key === titleFieldKey)?.label ?? '自动'}
+                    {footerMetricKeys.length > 0 ? ` · ${footerMetricKeys.length} 项重点数值` : ''}
+                  </Text>
+                </View>
+                <Feather
+                  name={cardDisplayExpanded ? 'chevron-up' : 'chevron-down'}
+                  size={16}
+                  color={Palette.inkMuted}
+                />
+              </Pressable>
 
-            <View style={styles.slotBlock}>
-              <Text style={styles.subFieldHint}>底部重点数值（最多选 4 项）：</Text>
-              <View style={styles.typeChipsRow}>
-                {fields.map((f) => {
-                  const active = footerMetricKeys.includes(f.key);
-                  return (
-                    <Pressable
-                      key={f.key}
-                      onPress={() => toggleFooterMetric(f.key)}
-                      style={[styles.typeChip, active && styles.typeChipActive]}
-                    >
-                      <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
-                        {f.label}
-                      </Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
+              {cardDisplayExpanded ? (
+                <View style={styles.collapsibleBody}>
+                  <SlotPickerRow
+                    label="主标题"
+                    fields={fields}
+                    selectedKey={titleFieldKey}
+                    onSelect={setTitleFieldKey}
+                  />
+                  <SlotPickerRow
+                    label="副标题"
+                    fields={fields}
+                    selectedKey={subtitleFieldKey}
+                    allowEmpty
+                    onSelect={setSubtitleFieldKey}
+                  />
+                  <SlotPickerRow
+                    label="右上角标签"
+                    fields={fields}
+                    selectedKey={rightBadgeFieldKey}
+                    allowEmpty
+                    onSelect={setRightBadgeFieldKey}
+                  />
+
+                  <View style={styles.slotBlock}>
+                    <Text style={styles.subFieldHint}>底部重点数值（最多选 4 项）：</Text>
+                    <View style={styles.typeChipsRow}>
+                      {fields.map((f) => {
+                        const active = footerMetricKeys.includes(f.key);
+                        return (
+                          <Pressable
+                            key={f.key}
+                            onPress={() => toggleFooterMetric(f.key)}
+                            style={[styles.typeChip, active && styles.typeChipActive]}
+                          >
+                            <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
+                              {f.label}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  </View>
+                </View>
+              ) : null}
             </View>
 
             {/* 4. 删除整个记录本 */}
@@ -1286,6 +1647,150 @@ const styles = StyleSheet.create({
     height: 38,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  emojiTriggerBtn: {
+    width: 52,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: Palette.bgCanvas,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emojiTriggerBtnOpen: {
+    backgroundColor: Palette.brandSoft,
+    borderColor: Palette.brand,
+  },
+  emojiTriggerText: {
+    fontSize: 22,
+  },
+  emojiPanel: {
+    backgroundColor: Palette.bgCanvas,
+    borderRadius: 14,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    gap: 10,
+  },
+  emojiGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  emojiCell: {
+    width: '15%',
+    flexGrow: 1,
+    height: 38,
+    borderRadius: 10,
+    backgroundColor: Palette.bgSurface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+  },
+  emojiCellActive: {
+    backgroundColor: Palette.brandSoft,
+    borderColor: Palette.brand,
+  },
+  emojiCellText: {
+    fontSize: 19,
+  },
+  customEmojiRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: Palette.borderHairline,
+  },
+  collapsibleCard: {
+    backgroundColor: Palette.bgCanvas,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    overflow: 'hidden',
+  },
+  collapsibleHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+    paddingHorizontal: 13,
+    paddingVertical: 11,
+  },
+  collapsibleTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: Palette.inkPrimary,
+  },
+  collapsibleSub: {
+    fontSize: 11,
+    color: Palette.inkMuted,
+  },
+  collapsibleBody: {
+    paddingHorizontal: 13,
+    paddingBottom: 13,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: Palette.borderHairline,
+    gap: 10,
+  },
+  fieldMetaBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    paddingBottom: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: Palette.borderHairline,
+  },
+  moveBtnsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  metaChipBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 9,
+    paddingVertical: 5,
+    borderRadius: 8,
+    backgroundColor: Palette.bgCanvas,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+  },
+  metaChipBtnActive: {
+    backgroundColor: Palette.brandSoft,
+    borderColor: Palette.brand,
+  },
+  metaChipDisabled: {
+    opacity: 0.35,
+  },
+  metaChipText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  unitRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+  },
+  unitInput: {
+    flex: 1,
+    height: 34,
+    paddingVertical: 0,
+  },
+  rollupBox: {
+    backgroundColor: Palette.bgSurface,
+    borderRadius: 10,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    gap: 7,
   },
   typeChipsRow: {
     flexDirection: 'row',

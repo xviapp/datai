@@ -20,8 +20,10 @@ import { callDeepSeekChat } from '@/ai/deepseek-client';
 import {
   getAiPreferences,
   getDeepSeekApiKey,
+  getLastBackupAt,
   saveAiPreferences,
   saveDeepSeekApiKey,
+  saveLastBackupAt,
   type ReasoningEffort,
 } from '@/ai/settings-store';
 import { TabPageHeader } from '@/components/layout/TabPageHeader';
@@ -48,6 +50,8 @@ export default function SettingsScreen() {
   const [aiExpanded, setAiExpanded] = useState(false);
   const [showAdvancedUrl, setShowAdvancedUrl] = useState(false);
   const [showAllSnapshots, setShowAllSnapshots] = useState(false);
+  const [lastBackupAt, setLastBackupAt] = useState<number | null>(null);
+  const [nowTs, setNowTs] = useState(() => Date.now());
 
   const [testing, setTesting] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -58,12 +62,17 @@ export default function SettingsScreen() {
 
   useEffect(() => {
     (async () => {
-      const k = await getDeepSeekApiKey();
-      const prefs = await getAiPreferences();
+      const [k, prefs, backupTs] = await Promise.all([
+        getDeepSeekApiKey(),
+        getAiPreferences(),
+        getLastBackupAt(),
+      ]);
       setApiKey(k);
       setBaseUrl(prefs.baseUrl);
       setEffort(prefs.architectEffort);
       setEnableWebEnrich(prefs.enableWebEnrich);
+      setLastBackupAt(backupTs);
+      setNowTs(Date.now());
       // 尚未配置 Key 时自动展开，已配置则默认保持收起清爽状态
       setAiExpanded(!k);
     })();
@@ -150,6 +159,7 @@ export default function SettingsScreen() {
       const jsonStr = JSON.stringify(bundle, null, 2);
       const filename = `folio_backup_${formatLocalDate()}.json`;
 
+      const nowTs = Date.now();
       if (Platform.OS === 'web') {
         const blob = new Blob([jsonStr], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
@@ -158,6 +168,9 @@ export default function SettingsScreen() {
         a.download = filename;
         a.click();
         URL.revokeObjectURL(url);
+        await saveLastBackupAt(nowTs);
+        setLastBackupAt(nowTs);
+        setNowTs(nowTs);
         setFeedback({ type: 'ok', text: `已下载备份文件 ${filename}` });
         return;
       }
@@ -167,6 +180,9 @@ export default function SettingsScreen() {
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(outFile.uri, { mimeType: 'application/json' });
       }
+      await saveLastBackupAt(nowTs);
+      setLastBackupAt(nowTs);
+      setNowTs(nowTs);
       setFeedback({ type: 'ok', text: '已打开系统分享导出备份' });
     } catch (err) {
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : String(err) });
@@ -477,19 +493,60 @@ export default function SettingsScreen() {
         {/* 4. 数据与备份（原生列表项） */}
         <Text style={styles.groupHeading}>数据与备份</Text>
         <View style={styles.groupCard}>
-          <Pressable
-            onPress={handleExportJson}
-            style={({ pressed }) => [styles.listRow, pressed && { opacity: 0.78 }]}
-          >
-            <View style={[styles.rowIconWrap, { backgroundColor: Palette.brandSoft }]}>
-              <Feather name="download" size={16} color={Palette.brand} />
-            </View>
-            <View style={{ flex: 1, gap: 2 }}>
-              <Text style={styles.rowTitle}>导出完整备份</Text>
-              <Text style={styles.rowSub}>将所有记录本、内容和统计打包留存</Text>
-            </View>
-            <Feather name="chevron-right" size={18} color={Palette.inkMuted} />
-          </Pressable>
+          {(() => {
+            const backupAgeDays = lastBackupAt
+              ? Math.max(0, Math.floor((nowTs - lastBackupAt) / 86400000))
+              : null;
+            const needsBackupHint =
+              totalEntryCount > 0 && (backupAgeDays === null || backupAgeDays >= 14);
+            const backupStatusLabel =
+              backupAgeDays === null
+                ? '尚未备份'
+                : backupAgeDays === 0
+                  ? '今天已备份'
+                  : `${backupAgeDays}天前`;
+
+            return (
+              <Pressable
+                onPress={handleExportJson}
+                style={({ pressed }) => [styles.listRow, pressed && { opacity: 0.78 }]}
+              >
+                <View style={[styles.rowIconWrap, { backgroundColor: Palette.brandSoft }]}>
+                  <Feather name="download" size={16} color={Palette.brand} />
+                </View>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <View style={styles.titleWithDot}>
+                    <Text style={styles.rowTitle}>导出完整备份</Text>
+                    <View
+                      style={[
+                        styles.statusPill,
+                        {
+                          backgroundColor: needsBackupHint
+                            ? Palette.warningSoft
+                            : Palette.successSoft,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.statusPillText,
+                          { color: needsBackupHint ? Palette.warning : Palette.success },
+                        ]}
+                      >
+                        {backupStatusLabel}
+                      </Text>
+                    </View>
+                  </View>
+                  <Text style={styles.rowSub}>
+                    {needsBackupHint
+                      ? '建议定期导出 JSON 备份，防止更换设备或卸载丢数据'
+                      : '将所有记录本、内容和统计打包留存'}
+                  </Text>
+                </View>
+                <Feather name="chevron-right" size={18} color={Palette.inkMuted} />
+              </Pressable>
+            );
+          })()}
 
           <View style={styles.rowDivider} />
 

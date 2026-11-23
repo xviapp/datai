@@ -6,6 +6,8 @@ import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
+  LayoutAnimation,
   Platform,
   Pressable,
   ScrollView,
@@ -261,6 +263,10 @@ export function OmniCaptureModal() {
   const [result, setResult] = useState<UnifiedAssistantResult | null>(null);
   const [drafts, setDrafts] = useState<DraftEntryItem[]>([]);
   const [isRecording, setIsRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
+  const [recordPulse] = useState(() => new Animated.Value(1));
+  const [composerExpanded, setComposerExpanded] = useState(true);
+  const [editingDraftKey, setEditingDraftKey] = useState<string | null>(null);
 
   const sessionSignature = `${omniModalVisible ? 'open' : 'closed'}::${omniScene}::${omniTargetSlug ?? ''}::${omniEntryContext?.entryId ?? ''}::${omniEntryContext?.activeTab ?? ''}`;
   const [selectedMode, setSelectedMode] = useState<AssistantMode>(() =>
@@ -285,6 +291,9 @@ export function OmniCaptureModal() {
       setLoadingStep(null);
       setResult(null);
       setDrafts([]);
+      setComposerExpanded(true);
+      setEditingDraftKey(null);
+      setRecordSeconds(0);
       if (isRecording) {
         setIsRecording(false);
       }
@@ -293,6 +302,8 @@ export function OmniCaptureModal() {
       setSuccessMsg(null);
       setResult(null);
       setDrafts([]);
+      setComposerExpanded(true);
+      setEditingDraftKey(null);
     }
   }
 
@@ -336,6 +347,7 @@ export function OmniCaptureModal() {
       }
       await audioStream.start();
       await audioStream.startFileRecordingAsync({ format: 'wav', directory: 'cache' });
+      setRecordSeconds(0);
       setIsRecording(true);
     } catch (err) {
       audioStream.stop();
@@ -343,6 +355,36 @@ export function OmniCaptureModal() {
       setErrorMsg(err instanceof Error ? err.message : String(err));
     }
   }, [audioStream]);
+
+  useEffect(() => {
+    if (!isRecording) {
+      recordPulse.stopAnimation();
+      recordPulse.setValue(1);
+      return;
+    }
+    const timer = setInterval(() => {
+      setRecordSeconds((s) => s + 1);
+    }, 1000);
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(recordPulse, {
+          toValue: 0.3,
+          duration: 550,
+          useNativeDriver: true,
+        }),
+        Animated.timing(recordPulse, {
+          toValue: 1,
+          duration: 550,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulse.start();
+    return () => {
+      clearInterval(timer);
+      pulse.stop();
+    };
+  }, [isRecording, recordPulse]);
 
   useEffect(() => {
     if (!omniModalVisible) {
@@ -419,6 +461,25 @@ export function OmniCaptureModal() {
     : (modeOptions[0]?.mode ?? 'auto');
 
   const showCaptureTools = activeMode === 'auto' || activeMode === 'capture';
+  const updateDraftField = (draftIdx: number, fieldKey: string, nextRaw: string, fieldType?: FieldType) => {
+    setDrafts((prev) =>
+      prev.map((d, i) => {
+        if (i !== draftIdx) return d;
+        let parsed: unknown = nextRaw;
+        if (fieldType === 'number' || fieldType === 'currency' || fieldType === 'rating') {
+          const num = Number(nextRaw);
+          parsed = nextRaw.trim() === '' ? '' : Number.isFinite(num) ? num : nextRaw;
+        }
+        return { ...d, data: { ...d.data, [fieldKey]: parsed } };
+      })
+    );
+  };
+
+  const formattedRecordTime = `${String(Math.floor(recordSeconds / 60)).padStart(2, '0')}:${String(
+    recordSeconds % 60
+  ).padStart(2, '0')}`;
+
+  const showComposerBody = !result || composerExpanded;
 
   const handleSend = async (explicitForceIntent?: AssistantIntent) => {
     if (!repo) return;
@@ -452,7 +513,10 @@ export function OmniCaptureModal() {
         effectiveForce
       );
 
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
       setResult(outcome);
+      setComposerExpanded(false);
+      setEditingDraftKey(null);
       if (outcome.intent === 'capture') {
         setDrafts(outcome.capture.drafts);
       }
@@ -677,24 +741,46 @@ export function OmniCaptureModal() {
           </Pressable>
         ) : null}
 
-        {/* 场景模式切换条（带顺滑弹簧滑块，随时可切换） */}
-        <SlidingSegmentedBar
-          compact
-          items={modeOptions.map((opt) => ({
-            key: opt.mode,
-            label: opt.label,
-            icon: opt.icon,
-          }))}
-          activeIndex={Math.max(
-            0,
-            modeOptions.findIndex((opt) => opt.mode === activeMode)
-          )}
-          onSelect={(idx) => {
-            const picked = modeOptions[idx];
-            if (picked) setSelectedMode(picked.mode);
-          }}
-          style={styles.modeBarWrap}
-        />
+        {/* 有结果时默认收起输入区，把视野完整留给结果预览 */}
+        {result && !composerExpanded ? (
+          <Pressable
+            onPress={() => {
+              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              setComposerExpanded(true);
+            }}
+            style={({ pressed }) => [styles.collapsedPromptBar, pressed && { opacity: 0.78 }]}
+          >
+            <Feather name="message-square" size={14} color={Palette.brand} />
+            <Text style={styles.collapsedPromptText} numberOfLines={1}>
+              {inputText.trim() || (imageDataUrl ? '已附带照片识别' : '已发送请求')}
+            </Text>
+            <View style={styles.collapsedPromptAction}>
+              <Text style={styles.collapsedPromptActionText}>修改</Text>
+              <Feather name="chevron-down" size={13} color={Palette.brand} />
+            </View>
+          </Pressable>
+        ) : null}
+
+        {showComposerBody ? (
+          <>
+            {/* 场景模式切换条（带顺滑弹簧滑块，随时可切换） */}
+            <SlidingSegmentedBar
+              compact
+              items={modeOptions.map((opt) => ({
+                key: opt.mode,
+                label: opt.label,
+                icon: opt.icon,
+              }))}
+              activeIndex={Math.max(
+                0,
+                modeOptions.findIndex((opt) => opt.mode === activeMode)
+              )}
+              onSelect={(idx) => {
+                const picked = modeOptions[idx];
+                if (picked) setSelectedMode(picked.mode);
+              }}
+              style={styles.modeBarWrap}
+            />
 
             {omniEntryContext ? (
               <View style={styles.contextBanner}>
@@ -741,13 +827,13 @@ export function OmniCaptureModal() {
                 onPress={handleToggleVoice}
                 style={[styles.toolChip, isRecording && styles.toolChipRecording]}
               >
-                <Feather
-                  name="mic"
-                  size={15}
-                  color={isRecording ? Palette.inkInverse : Palette.brand}
-                />
+                {isRecording ? (
+                  <Animated.View style={[styles.recordingPulseDot, { opacity: recordPulse }]} />
+                ) : (
+                  <Feather name="mic" size={15} color={Palette.brand} />
+                )}
                 <Text style={[styles.toolChipText, isRecording && { color: Palette.inkInverse }]}>
-                  {isRecording ? '停止录音' : '语音'}
+                  {isRecording ? `停止 ${formattedRecordTime}` : '语音'}
                 </Text>
               </Pressable>
 
@@ -768,6 +854,15 @@ export function OmniCaptureModal() {
                 </Text>
               )}
             </View>
+
+            {isRecording ? (
+              <View style={styles.recordingBanner}>
+                <Animated.View style={[styles.recordingBannerDot, { opacity: recordPulse }]} />
+                <Text style={styles.recordingBannerText}>
+                  正在录音 {formattedRecordTime} · 说完后点上方停止按钮自动转文字
+                </Text>
+              </View>
+            ) : null}
 
             {showCaptureTools && imageDataUrl ? (
               <View style={styles.attachedImgRow}>
@@ -801,6 +896,8 @@ export function OmniCaptureModal() {
                 ))}
               </View>
             ) : null}
+          </>
+        ) : null}
 
             {errorMsg ? (
               <View style={styles.errorBanner}>
@@ -863,12 +960,48 @@ export function OmniCaptureModal() {
                             }
                             return String(rawVal ?? '');
                           };
+                          const fieldSig = `${idx}::${k}`;
+                          const isScalarEditable =
+                            !Array.isArray(v) && typeof v !== 'boolean' && fDef?.type !== 'relation';
+                          const isEditingThis = editingDraftKey === fieldSig;
+
                           return (
                             <View key={k} style={styles.draftKvRow}>
                               <Text style={styles.draftKey}>{fDef?.label ?? k}:</Text>
-                              <Text style={styles.draftVal} numberOfLines={3}>
-                                {formatDraftVal(v)}
-                              </Text>
+                              {isEditingThis ? (
+                                <TextInput
+                                  value={String(v ?? '')}
+                                  autoFocus
+                                  onChangeText={(txt) =>
+                                    updateDraftField(idx, k, txt, fDef?.type)
+                                  }
+                                  onBlur={() => setEditingDraftKey(null)}
+                                  onSubmitEditing={() => setEditingDraftKey(null)}
+                                  keyboardType={
+                                    fDef?.type === 'number' || fDef?.type === 'currency'
+                                      ? 'decimal-pad'
+                                      : 'default'
+                                  }
+                                  style={styles.draftInlineInput}
+                                />
+                              ) : isScalarEditable ? (
+                                <Pressable
+                                  onPress={() => setEditingDraftKey(fieldSig)}
+                                  style={({ pressed }) => [
+                                    styles.draftValEditable,
+                                    pressed && { opacity: 0.7 },
+                                  ]}
+                                >
+                                  <Text style={styles.draftVal} numberOfLines={3}>
+                                    {formatDraftVal(v) || '点击填写'}
+                                  </Text>
+                                  <Feather name="edit-3" size={11} color={Palette.inkMuted} />
+                                </Pressable>
+                              ) : (
+                                <Text style={styles.draftVal} numberOfLines={3}>
+                                  {formatDraftVal(v)}
+                                </Text>
+                              )}
                             </View>
                           );
                         })}
@@ -1131,6 +1264,77 @@ const styles = StyleSheet.create({
   },
   modeBarWrap: {
     backgroundColor: Palette.bgCanvas,
+  },
+  collapsedPromptBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: Palette.bgCanvas,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  collapsedPromptText: {
+    flex: 1,
+    fontSize: 13,
+    fontWeight: '600',
+    color: Palette.inkPrimary,
+  },
+  collapsedPromptAction: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  collapsedPromptActionText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.brand,
+  },
+  recordingPulseDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: Palette.inkInverse,
+  },
+  recordingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: Palette.dangerSoft,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 10,
+  },
+  recordingBannerDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: Palette.danger,
+  },
+  recordingBannerText: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.danger,
+  },
+  draftValEditable: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  draftInlineInput: {
+    flex: 1,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.brand,
+    borderRadius: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    fontSize: 13,
+    color: Palette.inkPrimary,
   },
   modeBar: {
     flexDirection: 'row',

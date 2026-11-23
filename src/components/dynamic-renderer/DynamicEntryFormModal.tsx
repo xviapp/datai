@@ -14,7 +14,8 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheetModal } from '@/components/ui/BottomSheetModal';
-import { Palette } from '@/constants/design-tokens';
+import { InlineDatePicker } from '@/components/ui/InlineDatePicker';
+import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord } from '@/db/repository';
 import { formatLocalDateOffset } from '@/engine/date';
@@ -113,13 +114,26 @@ export function DynamicEntryFormModal({
     setPrevSession((s) => ({ ...s, visible: false }));
   }
 
+  const tone = ToneMap[library.color] ?? ToneMap.teal;
+
   const setFieldVal = (key: string, val: unknown) => {
     setFormValues((prev) => ({ ...prev, [key]: val }));
   };
 
-  const pickImageForField = async (fieldKey: string) => {
+  const pickImageForField = async (fieldKey: string, fromCamera = false) => {
     try {
-      const res = await ImagePicker.launchImageLibraryAsync({
+      setErrorMsg(null);
+      if (fromCamera) {
+        const perm = await ImagePicker.requestCameraPermissionsAsync();
+        if (!perm.granted) {
+          setErrorMsg('需要相机权限才能直接拍照');
+          return;
+        }
+      }
+      const fn = fromCamera
+        ? ImagePicker.launchCameraAsync
+        : ImagePicker.launchImageLibraryAsync;
+      const res = await fn({
         mediaTypes: ['images'],
         quality: 0.85,
         base64: Platform.OS === 'web',
@@ -200,17 +214,30 @@ export function DynamicEntryFormModal({
                   field={field}
                   value={formValues[field.key]}
                   allValues={formValues}
+                  accentColor={tone.solid}
+                  accentSoft={tone.soft}
+                  accentInk={tone.ink}
                   onChange={(v) => setFieldVal(field.key, v)}
-                  onPickImage={() => pickImageForField(field.key)}
+                  onPickImage={(fromCamera) => pickImageForField(field.key, fromCamera)}
                 />
               ))}
           </ScrollView>
 
           <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
-            <Pressable onPress={onClose} style={styles.cancelBtn}>
+            <Pressable
+              onPress={onClose}
+              style={({ pressed }) => [styles.cancelBtn, pressed && { opacity: 0.78 }]}
+            >
               <Text style={styles.cancelText}>取消</Text>
             </Pressable>
-            <Pressable onPress={handleSave} style={styles.saveBtn}>
+            <Pressable
+              onPress={handleSave}
+              style={({ pressed }) => [
+                styles.saveBtn,
+                { backgroundColor: tone.solid },
+                pressed && { opacity: 0.85, transform: [{ scale: 0.985 }] },
+              ]}
+            >
               <Feather name="check" size={16} color={Palette.inkInverse} />
               <Text style={styles.saveText}>{editingEntryId ? '保存修改' : '保存'}</Text>
             </Pressable>
@@ -223,21 +250,34 @@ function FieldInputBlock({
   field,
   value,
   allValues,
+  accentColor,
+  accentSoft,
+  accentInk,
   onChange,
   onPickImage,
 }: {
   field: FieldDef;
   value: unknown;
   allValues: Record<string, unknown>;
+  accentColor: string;
+  accentSoft: string;
+  accentInk: string;
   onChange: (val: unknown) => void;
-  onPickImage: () => void;
+  onPickImage: (fromCamera: boolean) => void;
 }) {
   const { repo } = useOmni();
+  const [relSearch, setRelSearch] = useState('');
 
   const relationCandidates = useMemo(() => {
     if (field.type !== 'relation' || !field.relationConfig || !repo) return [];
     return repo.listRelationCandidates(field.relationConfig.targetLibrarySlug);
   }, [field, repo]);
+
+  const filteredRelationCandidates = useMemo(() => {
+    const q = relSearch.trim().toLowerCase();
+    if (!q) return relationCandidates;
+    return relationCandidates.filter((c) => c.title.toLowerCase().includes(q));
+  }, [relationCandidates, relSearch]);
 
   if (field.type === 'rollup') {
     return (
@@ -282,42 +322,26 @@ function FieldInputBlock({
       ) : null}
 
       {field.type === 'number' || field.type === 'currency' ? (
-        <TextInput
-          value={value === undefined || value === null ? '' : String(value)}
-          onChangeText={(txt) => onChange(txt)}
-          keyboardType="decimal-pad"
-          placeholder="0.00"
-          placeholderTextColor={Palette.inkMuted}
-          style={styles.textInput}
-        />
+        <View style={styles.numInputWrap}>
+          {field.type === 'currency' ? <Text style={styles.currencyPrefix}>¥</Text> : null}
+          <TextInput
+            value={value === undefined || value === null ? '' : String(value)}
+            onChangeText={(txt) => onChange(txt)}
+            keyboardType="decimal-pad"
+            placeholder="0.00"
+            placeholderTextColor={Palette.inkMuted}
+            style={styles.numInputInner}
+          />
+          {field.unit ? <Text style={styles.unitSuffix}>{field.unit}</Text> : null}
+        </View>
       ) : null}
 
       {field.type === 'date' ? (
-        <View style={styles.dateBlock}>
-          <TextInput
-            value={String(value ?? '')}
-            onChangeText={onChange}
-            placeholder="YYYY-MM-DD"
-            placeholderTextColor={Palette.inkMuted}
-            style={styles.textInput}
-          />
-          <View style={styles.quickChipsRow}>
-            {[
-              { label: '今天', offset: 0 },
-              { label: '昨天', offset: -1 },
-              { label: '+30天', offset: 30 },
-              { label: '+1年', offset: 365 },
-            ].map((q) => (
-              <Pressable
-                key={q.label}
-                onPress={() => onChange(quickDateStr(q.offset))}
-                style={styles.quickChip}
-              >
-                <Text style={styles.quickChipText}>{q.label}</Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
+        <InlineDatePicker
+          value={String(value ?? '')}
+          onChange={onChange}
+          accentColor={accentColor}
+        />
       ) : null}
 
       {field.type === 'select' ? (
@@ -372,15 +396,23 @@ function FieldInputBlock({
       {field.type === 'rating' ? (
         <View style={styles.starsRow}>
           {[1, 2, 3, 4, 5].map((star) => {
-            const active = Number(value || 0) >= star;
+            const current = Number(value || 0);
+            const active = current >= star;
             return (
-              <Pressable key={star} onPress={() => onChange(star)} style={styles.starBtn}>
+              <Pressable
+                key={star}
+                onPress={() => onChange(current === star ? 0 : star)}
+                style={({ pressed }) => [styles.starBtn, pressed && { transform: [{ scale: 1.12 }] }]}
+              >
                 <Text style={[styles.starIcon, active && styles.starIconActive]}>
                   {active ? '★' : '☆'}
                 </Text>
               </Pressable>
             );
           })}
+          {Number(value || 0) > 0 ? (
+            <Text style={styles.ratingHintText}>{Number(value)} 星（再点可清零）</Text>
+          ) : null}
         </View>
       ) : null}
 
@@ -389,7 +421,7 @@ function FieldInputBlock({
           <Switch
             value={Boolean(value)}
             onValueChange={onChange}
-            trackColor={{ false: Palette.borderStrong, true: Palette.brand }}
+            trackColor={{ false: Palette.borderStrong, true: accentColor }}
           />
           <Text style={styles.switchHint}>{value ? '已开启' : '未开启'}</Text>
         </View>
@@ -404,10 +436,32 @@ function FieldInputBlock({
               contentFit="cover"
             />
           ) : null}
-          <Pressable onPress={onPickImage} style={styles.pickImgBtn}>
-            <Feather name="image" size={16} color={Palette.brand} />
-            <Text style={styles.pickImgText}>{value ? '更换图片' : '从相册选择图片'}</Text>
+          <Pressable
+            onPress={() => onPickImage(false)}
+            style={({ pressed }) => [
+              styles.pickImgBtn,
+              { backgroundColor: accentSoft },
+              pressed && { opacity: 0.78 },
+            ]}
+          >
+            <Feather name="image" size={15} color={accentInk} />
+            <Text style={[styles.pickImgText, { color: accentInk }]}>
+              {value ? '相册更换' : '选照片'}
+            </Text>
           </Pressable>
+          {Platform.OS !== 'web' ? (
+            <Pressable
+              onPress={() => onPickImage(true)}
+              style={({ pressed }) => [
+                styles.pickImgBtn,
+                { backgroundColor: Palette.bgSubtle },
+                pressed && { opacity: 0.78 },
+              ]}
+            >
+              <Feather name="camera" size={15} color={Palette.inkPrimary} />
+              <Text style={[styles.pickImgText, { color: Palette.inkPrimary }]}>拍照</Text>
+            </Pressable>
+          ) : null}
           {value ? (
             <Pressable onPress={() => onChange('')} style={styles.clearImgBtn}>
               <Text style={styles.clearImgText}>移除</Text>
@@ -417,41 +471,60 @@ function FieldInputBlock({
       ) : null}
 
       {field.type === 'relation' ? (
-        <View style={styles.optionsWrap}>
-          {relationCandidates.length === 0 ? (
-            <Text style={styles.readonlyHint}>
-              关联目标库 ({field.relationConfig?.targetLibrarySlug}) 暂无可选记录
-            </Text>
-          ) : (
-            relationCandidates.map((cand) => {
-              const selectedIds = Array.isArray(value) ? value.map(String) : [];
-              const active = selectedIds.includes(cand.id);
-              const allowMulti = field.relationConfig?.allowMultiple ?? true;
+        <View style={styles.relPickerWrap}>
+          {relationCandidates.length > 6 ? (
+            <View style={styles.relSearchBox}>
+              <Feather name="search" size={13} color={Palette.inkMuted} />
+              <TextInput
+                value={relSearch}
+                onChangeText={setRelSearch}
+                placeholder="筛选关联记录..."
+                placeholderTextColor={Palette.inkMuted}
+                style={styles.relSearchInput}
+              />
+            </View>
+          ) : null}
+          <View style={styles.optionsWrap}>
+            {filteredRelationCandidates.length === 0 ? (
+              <Text style={styles.readonlyHint}>
+                {relationCandidates.length === 0
+                  ? `关联目标库 (${field.relationConfig?.targetLibrarySlug}) 暂无可选记录`
+                  : '没有匹配的关联记录'}
+              </Text>
+            ) : (
+              filteredRelationCandidates.map((cand) => {
+                const selectedIds = Array.isArray(value) ? value.map(String) : [];
+                const active = selectedIds.includes(cand.id);
+                const allowMulti = field.relationConfig?.allowMultiple ?? true;
 
-              return (
-                <Pressable
-                  key={cand.id}
-                  onPress={() => {
-                    if (active) {
-                      onChange(selectedIds.filter((x) => x !== cand.id));
-                    } else {
-                      onChange(allowMulti ? [...selectedIds, cand.id] : [cand.id]);
-                    }
-                  }}
-                  style={[styles.relOptionPill, active && styles.relOptionPillActive]}
-                >
-                  <Feather
-                    name={active ? 'check-circle' : 'link'}
-                    size={13}
-                    color={active ? Palette.inkInverse : Palette.brand}
-                  />
-                  <Text style={[styles.optText, active && styles.optTextActive]} numberOfLines={1}>
-                    {cand.title}
-                  </Text>
-                </Pressable>
-              );
-            })
-          )}
+                return (
+                  <Pressable
+                    key={cand.id}
+                    onPress={() => {
+                      if (active) {
+                        onChange(selectedIds.filter((x) => x !== cand.id));
+                      } else {
+                        onChange(allowMulti ? [...selectedIds, cand.id] : [cand.id]);
+                      }
+                    }}
+                    style={[
+                      styles.relOptionPill,
+                      active && { backgroundColor: accentColor, borderColor: accentColor },
+                    ]}
+                  >
+                    <Feather
+                      name={active ? 'check-circle' : 'link'}
+                      size={13}
+                      color={active ? Palette.inkInverse : accentColor}
+                    />
+                    <Text style={[styles.optText, active && styles.optTextActive]} numberOfLines={1}>
+                      {cand.title}
+                    </Text>
+                  </Pressable>
+                );
+              })
+            )}
+          </View>
         </View>
       ) : null}
     </View>
@@ -535,23 +608,58 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     paddingTop: 12,
   },
-  dateBlock: {
-    gap: 8,
-  },
-  quickChipsRow: {
+  numInputWrap: {
     flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: Palette.bgCanvas,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+  },
+  currencyPrefix: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: Palette.inkSecondary,
+    marginRight: 6,
+  },
+  numInputInner: {
+    flex: 1,
+    paddingVertical: 11,
+    fontSize: 15,
+    color: Palette.inkPrimary,
+  },
+  unitSuffix: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: Palette.inkMuted,
+    marginLeft: 6,
+  },
+  relPickerWrap: {
     gap: 8,
   },
-  quickChip: {
-    backgroundColor: Palette.bgSubtle,
+  relSearchBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: Palette.bgCanvas,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    borderRadius: 10,
     paddingHorizontal: 10,
-    paddingVertical: 5,
-    borderRadius: 8,
+    paddingVertical: 7,
   },
-  quickChipText: {
+  relSearchInput: {
+    flex: 1,
+    fontSize: 13,
+    color: Palette.inkPrimary,
+    paddingVertical: 0,
+  },
+  ratingHintText: {
     fontSize: 12,
-    fontWeight: '600',
-    color: Palette.inkSecondary,
+    color: Palette.inkMuted,
+    alignSelf: 'center',
+    marginLeft: 4,
   },
   optionsWrap: {
     flexDirection: 'row',

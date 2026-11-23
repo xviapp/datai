@@ -15,6 +15,18 @@ import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord } from '@/db/repository';
 import { useSafeNavigation } from '@/utils/navigation';
 
+function formatShortRelativeTime(ts: number): string {
+  const now = new Date();
+  const d = new Date(ts);
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfTarget = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diffDays = Math.round((startOfToday - startOfTarget) / 86400000);
+  if (diffDays <= 0) return '今天';
+  if (diffDays === 1) return '昨天';
+  if (diffDays < 7) return `${diffDays}天前`;
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
 export default function HomeVaultScreen() {
   const nav = useSafeNavigation();
   const {
@@ -53,6 +65,16 @@ export default function HomeVaultScreen() {
     if (!repo || revision < 0 || !globalSearch.trim()) return [];
     return repo.searchEntrySummaries(globalSearch, 30);
   }, [repo, revision, globalSearch]);
+
+  const recentHits = useMemo(() => {
+    if (!repo || revision < 0) return [];
+    return repo.listRecentEntrySummaries(6);
+  }, [repo, revision]);
+
+  const latestByLib = useMemo(() => {
+    if (!repo || revision < 0) return new Map<string, { title: string; updatedAt: number }>();
+    return repo.listLatestEntryByLibrary();
+  }, [repo, revision]);
 
   return (
     <View style={styles.safeArea}>
@@ -131,15 +153,44 @@ export default function HomeVaultScreen() {
                     pressed && { opacity: 0.68 },
                   ]}
                 >
-                  <Text style={styles.searchHitTitle} numberOfLines={1}>
-                    {hit.title}
-                  </Text>
-                  <Text style={styles.searchHitLib}>
-                    {hit.libraryIcon} {hit.libraryName}
-                  </Text>
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={styles.searchHitTitle} numberOfLines={1}>
+                      {hit.title}
+                    </Text>
+                    <Text style={styles.searchHitMeta}>
+                      {hit.libraryIcon} {hit.libraryName} · {formatShortRelativeTime(hit.updatedAt)}
+                    </Text>
+                  </View>
+                  <Feather name="chevron-right" size={15} color={Palette.inkMuted} />
                 </Pressable>
               ))
             )}
+          </View>
+        ) : recentHits.length > 0 ? (
+          <View style={styles.recentSection}>
+            <Text style={styles.recentLabel}>最近更新</Text>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.recentStrip}
+            >
+              {recentHits.map((hit) => (
+                <Pressable
+                  key={hit.id}
+                  onPress={() => nav.push(`/entry/${hit.id}`)}
+                  style={({ pressed }) => [
+                    styles.recentPill,
+                    pressed && { opacity: 0.78, transform: [{ scale: 0.97 }] },
+                  ]}
+                >
+                  <Text style={styles.recentEmoji}>{hit.libraryIcon}</Text>
+                  <Text style={styles.recentTitle} numberOfLines={1}>
+                    {hit.title}
+                  </Text>
+                  <Text style={styles.recentTime}>{formatShortRelativeTime(hit.updatedAt)}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
           </View>
         ) : null}
 
@@ -152,6 +203,7 @@ export default function HomeVaultScreen() {
           {visibleLibraries.map((lib) => {
             const tone = ToneMap[lib.color] ?? ToneMap.teal;
             const childLibs = childLibsByParent.get(lib.slug) ?? [];
+            const latest = latestByLib.get(lib.id);
 
             return (
               <Pressable
@@ -164,17 +216,41 @@ export default function HomeVaultScreen() {
                   <View style={[styles.libIconWrap, { backgroundColor: tone.soft }]}>
                     <Text style={styles.libEmoji}>{lib.icon}</Text>
                   </View>
-                  <View style={styles.countPill}>
-                    <Text style={styles.countText}>{lib.entryCount} 条</Text>
+                  <View style={styles.libCardTopRight}>
+                    <View style={styles.countPill}>
+                      <Text style={styles.countText}>{lib.entryCount} 条</Text>
+                    </View>
+                    <Pressable
+                      hitSlop={8}
+                      onPress={(e) => {
+                        e.stopPropagation();
+                        setManagingLibrary(lib);
+                      }}
+                      style={({ pressed }) => [styles.moreIconBtn, pressed && { opacity: 0.6 }]}
+                      accessibilityLabel={`管理${lib.name}`}
+                    >
+                      <Feather name="more-horizontal" size={15} color={Palette.inkMuted} />
+                    </Pressable>
                   </View>
                 </View>
 
                 <Text style={styles.libName} numberOfLines={1}>
                   {lib.name}
                 </Text>
-                <Text style={styles.libDesc} numberOfLines={2}>
-                  {lib.description || '点击查看全部记录'}
-                </Text>
+                {latest ? (
+                  <View style={styles.latestPreviewWrap}>
+                    <Text style={styles.latestPreviewTitle} numberOfLines={1}>
+                      {latest.title}
+                    </Text>
+                    <Text style={styles.latestPreviewTime}>
+                      {formatShortRelativeTime(latest.updatedAt)}更新
+                    </Text>
+                  </View>
+                ) : (
+                  <Text style={styles.libDesc} numberOfLines={2}>
+                    {lib.description || '还没有记录，点进去记第一条'}
+                  </Text>
+                )}
 
                 {childLibs.length > 0 ? (
                   <View style={styles.subLibsRow}>
@@ -353,15 +429,80 @@ const styles = StyleSheet.create({
     borderBottomColor: Palette.borderHairline,
   },
   searchHitTitle: {
-    flex: 1,
     fontSize: 14,
     fontWeight: '600',
     color: Palette.inkPrimary,
   },
-  searchHitLib: {
+  searchHitMeta: {
     fontSize: 12,
-    color: Palette.inkSecondary,
+    color: Palette.inkMuted,
+    fontWeight: '500',
+  },
+  recentSection: {
+    gap: 8,
+  },
+  recentLabel: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.inkMuted,
+    marginLeft: 2,
+  },
+  recentStrip: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingRight: 8,
+  },
+  recentPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    borderRadius: 12,
+    paddingHorizontal: 11,
+    paddingVertical: 8,
+    maxWidth: 210,
+  },
+  recentEmoji: {
+    fontSize: 14,
+  },
+  recentTitle: {
+    fontSize: 13,
     fontWeight: '600',
+    color: Palette.inkPrimary,
+    flexShrink: 1,
+  },
+  recentTime: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: Palette.inkMuted,
+  },
+  libCardTopRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  moreIconBtn: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  latestPreviewWrap: {
+    gap: 2,
+    minHeight: 34,
+    justifyContent: 'center',
+  },
+  latestPreviewTitle: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  latestPreviewTime: {
+    fontSize: 11,
+    color: Palette.inkMuted,
   },
   mutedTip: {
     fontSize: 13,

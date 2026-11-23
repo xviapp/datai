@@ -296,6 +296,8 @@ export function DynamicCalendarView({
   const [monthOffset, setMonthOffset] = useState(0);
   const [monthSlideDir, setMonthSlideDir] = useState<-1 | 0 | 1>(0);
   const [selectedDayStr, setSelectedDayStr] = useState<string | null>(null);
+  const todayStr = formatLocalDate();
+  const canJumpToday = monthOffset !== 0 || (selectedDayStr !== null && selectedDayStr !== todayStr);
 
   const monthInfo = useMemo(() => {
     const base = new Date();
@@ -355,9 +357,24 @@ export function DynamicCalendarView({
           >
             <Feather name="chevron-left" size={18} color={Palette.inkPrimary} />
           </Pressable>
-          <Text style={styles.calMonthTitle}>
-            {monthInfo.year} 年 {monthInfo.month} 月
-          </Text>
+          <View style={styles.calHeaderCenter}>
+            <Text style={styles.calMonthTitle}>
+              {monthInfo.year} 年 {monthInfo.month} 月
+            </Text>
+            {canJumpToday ? (
+              <Pressable
+                hitSlop={6}
+                onPress={() => {
+                  setMonthSlideDir(monthOffset > 0 ? -1 : monthOffset < 0 ? 1 : 0);
+                  setMonthOffset(0);
+                  setSelectedDayStr(todayStr);
+                }}
+                style={({ pressed }) => [styles.todayJumpBtn, pressed && { opacity: 0.72 }]}
+              >
+                <Text style={styles.todayJumpText}>回今天</Text>
+              </Pressable>
+            ) : null}
+          </View>
           <Pressable
             hitSlop={8}
             onPress={() => {
@@ -390,6 +407,7 @@ export function DynamicCalendarView({
             }
             const count = entriesByDate.get(dateStr)?.length ?? 0;
             const selected = selectedDayStr === dateStr;
+            const isToday = dateStr === todayStr;
             const dayNum = Number(dateStr.slice(-2));
 
             return (
@@ -399,11 +417,20 @@ export function DynamicCalendarView({
                 style={({ pressed }) => [
                   styles.dayCell,
                   count > 0 && styles.dayCellHasData,
+                  isToday && !selected && styles.dayCellToday,
                   selected && styles.dayCellSelected,
                   pressed && { opacity: 0.72, transform: [{ scale: 0.93 }] },
                 ]}
               >
-                <Text style={[styles.dayNum, selected && styles.dayNumSelected]}>{dayNum}</Text>
+                <Text
+                  style={[
+                    styles.dayNum,
+                    isToday && !selected && styles.dayNumToday,
+                    selected && styles.dayNumSelected,
+                  ]}
+                >
+                  {dayNum}
+                </Text>
                 {count > 0 ? (
                   <View
                     style={[
@@ -670,6 +697,22 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
+  calHeaderCenter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  todayJumpBtn: {
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+  },
+  todayJumpText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.brand,
+  },
   calNavBtn: {
     padding: 6,
     borderRadius: 8,
@@ -705,6 +748,10 @@ const styles = StyleSheet.create({
   dayCellHasData: {
     backgroundColor: Palette.brandSoft,
   },
+  dayCellToday: {
+    borderWidth: 1.5,
+    borderColor: Palette.brand,
+  },
   dayCellSelected: {
     backgroundColor: Palette.brand,
   },
@@ -712,6 +759,10 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: Palette.inkPrimary,
+  },
+  dayNumToday: {
+    color: Palette.brand,
+    fontWeight: '800',
   },
   dayNumSelected: {
     color: Palette.inkInverse,

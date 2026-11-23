@@ -3,6 +3,8 @@ import { useLocalSearchParams } from 'expo-router';
 import React, { type ComponentRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
+  FlatList,
+  LayoutAnimation,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Pressable,
@@ -29,9 +31,11 @@ import {
 } from '@/components/ui/SlidingSegmentedBar';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
+import type { HydratedEntry } from '@/db/repository';
 import { useSafeNavigation } from '@/utils/navigation';
 
 type ViewTab = 'card' | 'gallery' | 'calendar' | 'stats';
+type SortMode = 'updated' | 'date_desc' | 'metric_desc' | 'title_asc';
 
 const VIEW_TABS: Array<SegmentedTabOption & { key: ViewTab }> = [
   { key: 'card', label: '列表', icon: 'list' },
@@ -50,7 +54,10 @@ export default function LibraryWorkspaceScreen() {
   const slugStr = slug ? String(slug) : '';
   const [activeTabIndex, setActiveTabIndex] = useState(0);
   const [pagerWidth, setPagerWidth] = useState(screenWidth);
+  const [searchOpen, setSearchOpen] = useState(false);
   const [searchText, setSearchText] = useState('');
+  const [selectedFilterVal, setSelectedFilterVal] = useState<string>('');
+  const [sortMode, setSortMode] = useState<SortMode>('updated');
   const [entryModalOpen, setEntryModalOpen] = useState(false);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [createSubForParent, setCreateSubForParent] = useState<string | null>(null);
@@ -68,13 +75,79 @@ export default function LibraryWorkspaceScreen() {
     [repo, revision, slugStr]
   );
 
-  const entries = useMemo(
+  const rawEntries = useMemo(
     () =>
       !repo || revision < 0 || !library
         ? []
         : repo.listHydratedEntries(library.slug, searchText),
     [repo, revision, library, searchText]
   );
+
+  // 自动提取该库主筛选单选字段与默认排序依据字段
+  const primaryFilterField = useMemo(() => {
+    if (!library) return null;
+    const badgeKey = library.views.card.rightBadgeFieldKey;
+    const badgeSelect = badgeKey
+      ? library.fields.find((f) => f.key === badgeKey && f.type === 'select' && f.options?.length)
+      : undefined;
+    return (
+      badgeSelect ??
+      library.fields.find((f) => f.type === 'select' && f.options && f.options.length > 0) ??
+      null
+    );
+  }, [library]);
+
+  const primaryDateField = useMemo(
+    () => library?.fields.find((f) => f.type === 'date') ?? null,
+    [library]
+  );
+
+  const primaryMetricField = useMemo(
+    () =>
+      library?.fields.find(
+        (f) => f.type === 'currency' || f.type === 'number' || f.type === 'rating' || f.type === 'formula'
+      ) ?? null,
+    [library]
+  );
+
+  const availableSortModes = useMemo(() => {
+    const list: Array<{ id: SortMode; label: string }> = [{ id: 'updated', label: '最新更新' }];
+    if (primaryDateField) list.push({ id: 'date_desc', label: `按${primaryDateField.label}` });
+    if (primaryMetricField) list.push({ id: 'metric_desc', label: `按${primaryMetricField.label}` });
+    list.push({ id: 'title_asc', label: '按标题' });
+    return list;
+  }, [primaryDateField, primaryMetricField]);
+
+  const activeSortInfo =
+    availableSortModes.find((m) => m.id === sortMode) ?? availableSortModes[0];
+
+  const entries = useMemo(() => {
+    let list = rawEntries;
+    if (primaryFilterField && selectedFilterVal) {
+      list = list.filter(
+        (e) => String(e.computedData[primaryFilterField.key] ?? '') === selectedFilterVal
+      );
+    }
+    if (activeSortInfo.id === 'updated') return list;
+
+    const copy = [...list];
+    if (activeSortInfo.id === 'date_desc' && primaryDateField) {
+      copy.sort((a, b) =>
+        String(b.computedData[primaryDateField.key] ?? '').localeCompare(
+          String(a.computedData[primaryDateField.key] ?? '')
+        )
+      );
+    } else if (activeSortInfo.id === 'metric_desc' && primaryMetricField) {
+      copy.sort(
+        (a, b) =>
+          (Number(b.computedData[primaryMetricField.key]) || 0) -
+          (Number(a.computedData[primaryMetricField.key]) || 0)
+      );
+    } else if (activeSortInfo.id === 'title_asc') {
+      copy.sort((a, b) => a.titleSummary.localeCompare(b.titleSummary, 'zh-CN'));
+    }
+    return copy;
+  }, [rawEntries, primaryFilterField, selectedFilterVal, activeSortInfo.id, primaryDateField, primaryMetricField]);
 
   const rootParent = useMemo(
     () =>
@@ -105,7 +178,6 @@ export default function LibraryWorkspaceScreen() {
     [repo, revision, library, activeTabIndex]
   );
 
-  // 监听滑动偏移，过半即刻更新选中态，避免等惯性刹停才变亮
   useEffect(() => {
     const listenerId = pagerScrollX.addListener(({ value }) => {
       if (programmaticScrollRef.current) return;
@@ -159,6 +231,9 @@ export default function LibraryWorkspaceScreen() {
   const handleSwitchFamilyLibrary = useCallback(
     (targetSlug: string) => {
       setSearchText('');
+      setSearchOpen(false);
+      setSelectedFilterVal('');
+      setSortMode('updated');
       setActiveTabIndex(0);
       programmaticScrollRef.current = false;
       pagerScrollX.setValue(0);
@@ -167,6 +242,20 @@ export default function LibraryWorkspaceScreen() {
     },
     [nav, pagerScrollX]
   );
+
+  const toggleSearch = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    if (searchOpen && searchText) {
+      setSearchText('');
+    }
+    setSearchOpen((v) => !v);
+  };
+
+  const cycleSortMode = () => {
+    const idx = availableSortModes.findIndex((m) => m.id === activeSortInfo.id);
+    const next = availableSortModes[(idx + 1) % availableSortModes.length];
+    if (next) setSortMode(next.id);
+  };
 
   const onPagerScroll = useMemo(
     () =>
@@ -193,24 +282,95 @@ export default function LibraryWorkspaceScreen() {
   }
 
   const tone = ToneMap[library.color] ?? ToneMap.teal;
+  const showFilterSortBar =
+    Boolean(primaryFilterField?.options?.length) || rawEntries.length > 1;
 
-  const renderSearchBar = () => (
-    <View style={styles.searchBox}>
-      <Feather name="search" size={15} color={Palette.inkMuted} />
-      <TextInput
-        value={searchText}
-        onChangeText={setSearchText}
-        placeholder={`在「${library.name}」中搜索...`}
-        placeholderTextColor={Palette.inkMuted}
-        style={styles.searchInput}
-      />
-      {searchText ? (
-        <Pressable hitSlop={8} onPress={() => setSearchText('')}>
-          <Feather name="x" size={16} color={Palette.inkMuted} />
-        </Pressable>
-      ) : null}
-    </View>
-  );
+  const renderFilterSortBar = () => {
+    if (!showFilterSortBar) return null;
+    return (
+      <View style={styles.filterSortRow}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterChipsScroll}
+          style={{ flex: 1 }}
+        >
+          {primaryFilterField?.options?.length ? (
+            <>
+              <Pressable
+                onPress={() => setSelectedFilterVal('')}
+                style={({ pressed }) => [
+                  styles.filterChip,
+                  !selectedFilterVal && { backgroundColor: tone.soft, borderColor: tone.solid },
+                  pressed && styles.pressedSoft,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.filterChipText,
+                    !selectedFilterVal && { color: tone.ink, fontWeight: '700' },
+                  ]}
+                >
+                  全部 ({rawEntries.length})
+                </Text>
+              </Pressable>
+              {primaryFilterField.options.map((opt) => {
+                const active = selectedFilterVal === opt.value;
+                return (
+                  <Pressable
+                    key={opt.value}
+                    onPress={() => setSelectedFilterVal(active ? '' : opt.value)}
+                    style={({ pressed }) => [
+                      styles.filterChip,
+                      active && { backgroundColor: tone.soft, borderColor: tone.solid },
+                      pressed && styles.pressedSoft,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.filterChipText,
+                        active && { color: tone.ink, fontWeight: '700' },
+                      ]}
+                    >
+                      {opt.value}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </>
+          ) : (
+            <Text style={styles.filterCountHint}>共 {entries.length} 条记录</Text>
+          )}
+        </ScrollView>
+
+        {availableSortModes.length > 1 ? (
+          <Pressable
+            onPress={cycleSortMode}
+            style={({ pressed }) => [
+              styles.sortPillBtn,
+              activeSortInfo.id !== 'updated' && { borderColor: tone.solid, backgroundColor: tone.soft },
+              pressed && styles.pressedScale,
+            ]}
+          >
+            <Feather
+              name="arrow-down"
+              size={12}
+              color={activeSortInfo.id !== 'updated' ? tone.ink : Palette.inkSecondary}
+            />
+            <Text
+              numberOfLines={1}
+              style={[
+                styles.sortPillText,
+                activeSortInfo.id !== 'updated' && { color: tone.ink },
+              ]}
+            >
+              {activeSortInfo.label}
+            </Text>
+          </Pressable>
+        ) : null}
+      </View>
+    );
+  };
 
   return (
     <View style={styles.safeArea}>
@@ -238,6 +398,26 @@ export default function LibraryWorkspaceScreen() {
           </View>
 
           <Pressable
+            onPress={toggleSearch}
+            hitSlop={6}
+            style={({ pressed }) => [
+              styles.iconCircle,
+              (searchOpen || Boolean(searchText)) && { backgroundColor: tone.soft },
+              pressed && styles.pressedScale,
+            ]}
+            accessibilityLabel="搜索本记录本"
+          >
+            <Feather
+              name="search"
+              size={17}
+              color={searchOpen || searchText ? tone.solid : Palette.inkPrimary}
+            />
+            {searchText && !searchOpen ? (
+              <View style={[styles.searchActiveDot, { backgroundColor: tone.solid }]} />
+            ) : null}
+          </Pressable>
+
+          <Pressable
             onPress={() => setSchemaModalOpen(true)}
             hitSlop={6}
             style={({ pressed }) => [styles.iconCircle, pressed && styles.pressedScale]}
@@ -258,6 +438,28 @@ export default function LibraryWorkspaceScreen() {
             <Text style={styles.addBtnText}>记一条</Text>
           </Pressable>
         </View>
+
+        {/* 按需展开的搜索栏，平时隐藏释放列表空间 */}
+        {searchOpen ? (
+          <View style={styles.topSearchWrap}>
+            <View style={styles.searchBox}>
+              <Feather name="search" size={15} color={Palette.inkMuted} />
+              <TextInput
+                value={searchText}
+                onChangeText={setSearchText}
+                autoFocus
+                placeholder={`在「${library.name}」中搜索...`}
+                placeholderTextColor={Palette.inkMuted}
+                style={styles.searchInput}
+              />
+              {searchText ? (
+                <Pressable hitSlop={8} onPress={() => setSearchText('')}>
+                  <Feather name="x-circle" size={16} color={Palette.inkMuted} />
+                </Pressable>
+              ) : null}
+            </View>
+          </View>
+        ) : null}
       </View>
 
       {/* 常驻吸顶：主从库胶囊 + 跟手滑动分段条 */}
@@ -341,23 +543,36 @@ export default function LibraryWorkspaceScreen() {
           onMomentumScrollEnd={handlePagerMomentumEnd}
           style={styles.pager}
         >
-          {/* Page 0：列表 */}
-          <ScrollView
+          {/* Page 0：列表（FlatList 虚拟化渲染，长列表流畅不卡顿） */}
+          <FlatList<HydratedEntry>
+            data={entries}
+            keyExtractor={(item) => item.id}
             nestedScrollEnabled
             keyboardShouldPersistTaps="handled"
+            initialNumToRender={12}
+            maxToRenderPerBatch={10}
+            windowSize={7}
             style={{ width: effectiveWidth }}
             contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
-          >
-            {renderSearchBar()}
-            <DynamicCardListView
-              library={library}
-              entries={entries}
-              onSelectEntry={(id) => nav.push(`/entry/${id}`)}
-              onSelectEntryRelations={(id) =>
-                nav.push({ pathname: '/entry/[id]', params: { id, tab: 'relations' } })
-              }
-            />
-          </ScrollView>
+            ListHeaderComponent={renderFilterSortBar}
+            ListEmptyComponent={
+              <DynamicCardListView
+                library={library}
+                entries={[]}
+                onSelectEntry={(id) => nav.push(`/entry/${id}`)}
+              />
+            }
+            renderItem={({ item }) => (
+              <DynamicCardListView
+                library={library}
+                entries={[item]}
+                onSelectEntry={(id) => nav.push(`/entry/${id}`)}
+                onSelectEntryRelations={(id) =>
+                  nav.push({ pathname: '/entry/[id]', params: { id, tab: 'relations' } })
+                }
+              />
+            )}
+          />
 
           {/* Page 1：画廊 */}
           <ScrollView
@@ -366,7 +581,7 @@ export default function LibraryWorkspaceScreen() {
             style={{ width: effectiveWidth }}
             contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
           >
-            {renderSearchBar()}
+            {renderFilterSortBar()}
             <DynamicGalleryView
               library={library}
               entries={entries}
@@ -381,7 +596,6 @@ export default function LibraryWorkspaceScreen() {
             style={{ width: effectiveWidth }}
             contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
           >
-            {renderSearchBar()}
             <DynamicCalendarView
               library={library}
               entries={entries}
@@ -527,18 +741,33 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 10,
+    gap: 8,
     paddingHorizontal: 16,
     paddingVertical: 10,
+  },
+  topSearchWrap: {
+    width: '100%',
+    maxWidth: 880,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingBottom: 10,
+  },
+  searchActiveDot: {
+    position: 'absolute',
+    top: 7,
+    right: 7,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   stickyControls: {
     width: '100%',
     maxWidth: 880,
     alignSelf: 'center',
     paddingHorizontal: 16,
-    paddingTop: 12,
-    paddingBottom: 8,
-    gap: 10,
+    paddingTop: 10,
+    paddingBottom: 6,
+    gap: 8,
   },
   pagerWrap: {
     flex: 1,
@@ -552,7 +781,54 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     paddingHorizontal: 16,
     paddingTop: 6,
-    gap: 14,
+    gap: 10,
+  },
+  filterSortRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 2,
+  },
+  filterChipsScroll: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  filterChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+  },
+  filterChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  filterCountHint: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.inkMuted,
+  },
+  sortPillBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    flexShrink: 0,
+  },
+  sortPillText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.inkSecondary,
+    maxWidth: 86,
   },
   pressedScale: {
     opacity: 0.78,
@@ -568,6 +844,7 @@ const styles = StyleSheet.create({
     backgroundColor: Palette.bgSubtle,
     alignItems: 'center',
     justifyContent: 'center',
+    position: 'relative',
   },
   titleCenter: {
     flex: 1,
@@ -585,7 +862,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingHorizontal: 14,
+    paddingHorizontal: 13,
     paddingVertical: 8,
     borderRadius: 999,
   },
@@ -602,7 +879,7 @@ const styles = StyleSheet.create({
   },
   familyChip: {
     paddingHorizontal: 12,
-    paddingVertical: 7,
+    paddingVertical: 6,
     borderRadius: 999,
     backgroundColor: Palette.bgSurface,
     borderWidth: 1,
@@ -618,7 +895,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 3,
     paddingHorizontal: 11,
-    paddingVertical: 7,
+    paddingVertical: 6,
     borderRadius: 999,
     borderWidth: 1,
     borderStyle: 'dashed',
@@ -647,9 +924,9 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    backgroundColor: Palette.bgSurface,
+    backgroundColor: Palette.bgCanvas,
     paddingHorizontal: 13,
-    paddingVertical: 9,
+    paddingVertical: 8,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: Palette.borderHairline,
@@ -699,7 +976,8 @@ const styles = StyleSheet.create({
   kpiRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
+    justifyContent: 'space-between',
+    rowGap: 10,
   },
   notFoundBox: {
     flex: 1,

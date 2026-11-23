@@ -1,7 +1,17 @@
 import Feather from '@expo/vector-icons/Feather';
 import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import Svg, { Circle, G, Line, Path, Rect } from 'react-native-svg';
+import Svg, {
+  Circle,
+  Defs,
+  G,
+  Line,
+  LinearGradient,
+  Path,
+  Rect,
+  Stop,
+  Text as SvgText,
+} from 'react-native-svg';
 import { ChartSeriesColors, Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { DashboardWidget } from '@/schema/view-dsl';
@@ -194,30 +204,38 @@ export function SqlWidgetCard({
         <Text style={styles.emptyText}>暂无统计数据</Text>
       ) : widget.chartType === 'pie' ? (
         <View style={styles.pieRow}>
-          <Svg width={120} height={120} viewBox="0 0 120 120">
-            <Circle cx={60} cy={60} r={42} stroke={Palette.bgSubtle} strokeWidth={18} fill="none" />
-            {sumVal > 0 &&
-              (() => {
-                let cursor = 0;
-                return points.map((p, i) => {
-                  const sweep = (p.value / sumVal) * 359.9;
-                  const start = cursor;
-                  const end = cursor + sweep;
-                  cursor = end;
-                  if (sweep < 1) return null;
-                  return (
-                    <Path
-                      key={i}
-                      d={describeArc(60, 60, 42, start, end)}
-                      stroke={p.color}
-                      strokeWidth={18}
-                      strokeLinecap="butt"
-                      fill="none"
-                    />
-                  );
-                });
-              })()}
-          </Svg>
+          <View style={styles.pieRingBox}>
+            <Svg width={124} height={124} viewBox="0 0 124 124">
+              <Circle cx={62} cy={62} r={44} stroke={Palette.bgSubtle} strokeWidth={16} fill="none" />
+              {sumVal > 0 &&
+                (() => {
+                  let cursor = 0;
+                  return points.map((p, i) => {
+                    const sweep = (p.value / sumVal) * 359.9;
+                    const start = cursor;
+                    const end = cursor + sweep;
+                    cursor = end;
+                    if (sweep < 1) return null;
+                    return (
+                      <Path
+                        key={i}
+                        d={describeArc(62, 62, 44, start, end)}
+                        stroke={p.color}
+                        strokeWidth={16}
+                        strokeLinecap="butt"
+                        fill="none"
+                      />
+                    );
+                  });
+                })()}
+            </Svg>
+            <View pointerEvents="none" style={styles.pieCenterOverlay}>
+              <Text style={styles.pieCenterLabel}>总计</Text>
+              <Text style={styles.pieCenterVal} numberOfLines={1} adjustsFontSizeToFit>
+                {formatMetric(sumVal, widget.unitPrefix, widget.unitSuffix)}
+              </Text>
+            </View>
+          </View>
           <View style={styles.legendCol}>
             {points.slice(0, 5).map((p, i) => {
               const pct = sumVal > 0 ? Math.round((p.value / sumVal) * 100) : 0;
@@ -237,24 +255,83 @@ export function SqlWidgetCard({
         </View>
       ) : widget.chartType === 'line' ? (
         <View style={styles.lineWrap}>
-          <Svg width="100%" height={136} viewBox="0 0 320 136">
-            <Line x1={12} y1={112} x2={308} y2={112} stroke={Palette.borderHairline} strokeWidth={1} />
-            <Line x1={12} y1={64} x2={308} y2={64} stroke={Palette.borderHairline} strokeDasharray="3,3" strokeWidth={1} />
-            {points.length > 1 &&
+          <Svg width="100%" height={148} viewBox="0 0 320 148">
+            <Defs>
+              <LinearGradient id={`grad-${widget.id}`} x1="0" y1="0" x2="0" y2="1">
+                <Stop offset="0%" stopColor={tone.solid} stopOpacity={0.22} />
+                <Stop offset="100%" stopColor={tone.solid} stopOpacity={0.01} />
+              </LinearGradient>
+            </Defs>
+            <Line x1={12} y1={124} x2={308} y2={124} stroke={Palette.borderHairline} strokeWidth={1} />
+            <Line x1={12} y1={74} x2={308} y2={74} stroke={Palette.borderHairline} strokeDasharray="3,3" strokeWidth={1} />
+            {points.length > 0 &&
               (() => {
                 const coords = points.map((p, idx) => ({
-                  x: 20 + (idx * 280) / Math.max(1, points.length - 1),
-                  y: 108 - (p.value / maxVal) * 84,
+                  x:
+                    points.length === 1
+                      ? 160
+                      : 22 + (idx * 276) / Math.max(1, points.length - 1),
+                  y: 118 - (p.value / maxVal) * 82,
+                  value: p.value,
                 }));
-                const d = coords
+                const lineD = coords
                   .map((c, idx) => `${idx === 0 ? 'M' : 'L'} ${c.x.toFixed(1)} ${c.y.toFixed(1)}`)
                   .join(' ');
+                const areaD =
+                  coords.length > 1
+                    ? `${lineD} L ${coords[coords.length - 1].x.toFixed(1)} 124 L ${coords[0].x.toFixed(1)} 124 Z`
+                    : '';
+                let peakIdx = 0;
+                for (let i = 1; i < coords.length; i++) {
+                  if (coords[i].value > coords[peakIdx].value) peakIdx = i;
+                }
+                const lastIdx = coords.length - 1;
                 return (
                   <G>
-                    <Path d={d} stroke={tone.solid} strokeWidth={2.5} fill="none" />
-                    {coords.map((c, idx) => (
-                      <Circle key={idx} cx={c.x} cy={c.y} r={4} fill={Palette.bgSurface} stroke={tone.solid} strokeWidth={2.5} />
-                    ))}
+                    {areaD ? <Path d={areaD} fill={`url(#grad-${widget.id})`} /> : null}
+                    {coords.length > 1 ? (
+                      <Path
+                        d={lineD}
+                        stroke={tone.solid}
+                        strokeWidth={2.5}
+                        strokeLinejoin="round"
+                        strokeLinecap="round"
+                        fill="none"
+                      />
+                    ) : null}
+                    {coords.map((c, idx) => {
+                      const showLabel = idx === peakIdx || idx === lastIdx;
+                      return (
+                        <G key={idx}>
+                          <Circle
+                            cx={c.x}
+                            cy={c.y}
+                            r={idx === lastIdx ? 4.5 : 3.5}
+                            fill={Palette.bgSurface}
+                            stroke={tone.solid}
+                            strokeWidth={2.5}
+                          />
+                          {showLabel ? (
+                            <SvgText
+                              x={c.x}
+                              y={Math.max(14, c.y - 10)}
+                              fontSize="10"
+                              fontWeight="700"
+                              fill={tone.ink}
+                              textAnchor={
+                                idx === 0 && coords.length > 1
+                                  ? 'start'
+                                  : idx === lastIdx && coords.length > 1
+                                    ? 'end'
+                                    : 'middle'
+                              }
+                            >
+                              {formatMetric(c.value, widget.unitPrefix, widget.unitSuffix)}
+                            </SvgText>
+                          ) : null}
+                        </G>
+                      );
+                    })}
                   </G>
                 );
               })()}
@@ -305,8 +382,33 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   cardCompact: {
-    flex: 1,
-    minWidth: 155,
+    width: '48.2%',
+    padding: 14,
+  },
+  pieRingBox: {
+    width: 124,
+    height: 124,
+    position: 'relative',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pieCenterOverlay: {
+    position: 'absolute',
+    width: 68,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 1,
+  },
+  pieCenterLabel: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: Palette.inkMuted,
+  },
+  pieCenterVal: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: Palette.inkPrimary,
+    textAlign: 'center',
   },
   cardManage: {
     borderColor: Palette.borderStrong,

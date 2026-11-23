@@ -6,6 +6,8 @@ import React, { type ComponentRef, useCallback, useEffect, useMemo, useRef, useS
 import {
   Animated,
   type LayoutChangeEvent,
+  LayoutAnimation,
+  Modal,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
   Platform,
@@ -23,6 +25,7 @@ import {
   type LockedRelationContext,
 } from '@/components/dynamic-renderer/DynamicEntryFormModal';
 import { formatFieldDisplay } from '@/components/dynamic-renderer/DynamicViews';
+import { ImagePreviewModal } from '@/components/ui/ImagePreviewModal';
 import { SlidingSegmentedBar } from '@/components/ui/SlidingSegmentedBar';
 import { HighlightTonePalette, Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
@@ -76,6 +79,8 @@ export default function EntryDetailScreen() {
 
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showEmptyFields, setShowEmptyFields] = useState(false);
+  const [previewImage, setPreviewImage] = useState<{ uri: string; caption?: string } | null>(null);
   const [subModalOpen, setSubModalOpen] = useState(false);
   const [subModalTarget, setSubModalTarget] = useState<{
     childLibrary: LibraryRecord;
@@ -630,11 +635,19 @@ export default function EntryDetailScreen() {
                     ) : null}
 
                     {imgUri ? (
-                      <Image
-                        source={{ uri: imgUri }}
-                        style={styles.timelinePhoto}
-                        contentFit="cover"
-                      />
+                      <Pressable
+                        onPress={(e) => {
+                          e.stopPropagation();
+                          setPreviewImage({ uri: imgUri, caption: bodyText || dateVal });
+                        }}
+                        style={({ pressed }) => [pressed && { opacity: 0.85 }]}
+                      >
+                        <Image
+                          source={{ uri: imgUri }}
+                          style={styles.timelinePhoto}
+                          contentFit="cover"
+                        />
+                      </Pressable>
                     ) : null}
                   </Pressable>
                 </View>
@@ -839,26 +852,14 @@ export default function EntryDetailScreen() {
             <Text style={styles.editBtnText}>编辑</Text>
           </Pressable>
 
-          {confirmDelete ? (
-            <Pressable
-              onPress={handleDelete}
-              style={({ pressed }) => [styles.confirmDelBtn, pressed && styles.pressedScale]}
-            >
-              <Text style={styles.confirmDelText}>
-                {entry.backlinks.length > 0
-                  ? `确认删除（保留${entry.backlinks.length}条关联）`
-                  : '确认删除'}
-              </Text>
-            </Pressable>
-          ) : (
-            <Pressable
-              onPress={() => setConfirmDelete(true)}
-              hitSlop={6}
-              style={({ pressed }) => [styles.iconBtn, pressed && styles.pressedScale]}
-            >
-              <Feather name="trash-2" size={17} color={Palette.danger} />
-            </Pressable>
-          )}
+          <Pressable
+            onPress={() => setConfirmDelete(true)}
+            hitSlop={6}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.pressedScale]}
+            accessibilityLabel="删除记录"
+          >
+            <Feather name="trash-2" size={17} color={Palette.danger} />
+          </Pressable>
         </View>
       </View>
 
@@ -873,7 +874,12 @@ export default function EntryDetailScreen() {
             ]}
           >
             <View style={styles.heroTopRow}>
-              <Text style={styles.heroTitle}>{entry.titleSummary}</Text>
+              <Text
+                style={[styles.heroTitle, hasMultipleTabs && styles.heroTitleCompact]}
+                numberOfLines={hasMultipleTabs ? 2 : undefined}
+              >
+                {entry.titleSummary}
+              </Text>
               {entry.highlight?.badgeText && hl ? (
                 <View style={[styles.alertPill, { backgroundColor: hl.pillBg }]}>
                   <Text style={[styles.alertText, { color: hl.pillInk }]}>
@@ -887,57 +893,106 @@ export default function EntryDetailScreen() {
             </Text>
 
             {computedFields.length > 0 ? (
-              <View style={styles.heroStatsWrap}>
-                {computedFields.map((cf) => (
-                  <View
-                    key={cf.key}
-                    style={[
-                      styles.computedTile,
-                      computedFields.length === 4 && styles.computedTileHalf,
-                      hl
-                        ? {
-                            backgroundColor: Palette.bgSurface,
-                            borderWidth: 1,
-                            borderColor: Palette.borderHairline,
-                          }
-                        : { backgroundColor: tone.soft },
-                    ]}
-                  >
-                    <Text style={styles.computedLabel} numberOfLines={1}>
-                      {cf.label}
-                    </Text>
-                    <Text
-                      style={[styles.computedVal, { color: tone.ink }]}
-                      numberOfLines={1}
+              hasMultipleTabs ? (
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  contentContainerStyle={styles.heroStatsStrip}
+                >
+                  {computedFields.map((cf) => (
+                    <View
+                      key={cf.key}
+                      style={[
+                        styles.compactMetricPill,
+                        hl
+                          ? {
+                              backgroundColor: Palette.bgSurface,
+                              borderWidth: 1,
+                              borderColor: Palette.borderHairline,
+                            }
+                          : { backgroundColor: tone.soft },
+                      ]}
                     >
-                      {formatFieldDisplay(cf, entry.computedData[cf.key])}
-                    </Text>
-                  </View>
-                ))}
-              </View>
+                      <Text style={styles.compactMetricLabel}>{cf.label}</Text>
+                      <Text style={[styles.compactMetricVal, { color: tone.ink }]}>
+                        {formatFieldDisplay(cf, entry.computedData[cf.key])}
+                      </Text>
+                    </View>
+                  ))}
+                </ScrollView>
+              ) : (
+                <View style={styles.heroStatsWrap}>
+                  {computedFields.map((cf) => (
+                    <View
+                      key={cf.key}
+                      style={[
+                        styles.computedTile,
+                        computedFields.length === 4 && styles.computedTileHalf,
+                        hl
+                          ? {
+                              backgroundColor: Palette.bgSurface,
+                              borderWidth: 1,
+                              borderColor: Palette.borderHairline,
+                            }
+                          : { backgroundColor: tone.soft },
+                      ]}
+                    >
+                      <Text style={styles.computedLabel} numberOfLines={1}>
+                        {cf.label}
+                      </Text>
+                      <Text
+                        style={[styles.computedVal, { color: tone.ink }]}
+                        numberOfLines={1}
+                      >
+                        {formatFieldDisplay(cf, entry.computedData[cf.key])}
+                      </Text>
+                    </View>
+                  ))}
+                </View>
+              )
             ) : null}
           </View>
         );
+
+        const isFieldFilled = (key: string) => {
+          const v = entry.computedData[key];
+          if (v === undefined || v === null || v === '') return false;
+          if (Array.isArray(v) && v.length === 0) return false;
+          return true;
+        };
+        const filledBaseFields = baseFields.filter((f) => isFieldFilled(f.key));
+        const emptyBaseFields = baseFields.filter((f) => !isFieldFilled(f.key));
+        const visibleBaseFields =
+          filledBaseFields.length === 0 || showEmptyFields ? baseFields : filledBaseFields;
 
         const detailInfoNodes = (
           <>
             <View style={styles.sectionCard}>
               <Text style={styles.sectionTitle}>详细信息</Text>
-              {baseFields.map((f, idx) => {
+              {visibleBaseFields.map((f, idx) => {
                 const val = entry.computedData[f.key];
-                const isLast = idx === baseFields.length - 1;
+                const isLast = idx === visibleBaseFields.length - 1;
                 if (f.type === 'image' && val) {
+                  const fullUri = resolveImageUri(val);
                   return (
                     <View
                       key={f.key}
                       style={[styles.imageFieldBlock, !isLast && styles.blockDivider]}
                     >
                       <Text style={styles.fieldKeyLabel}>{f.label}</Text>
-                      <Image
-                        source={{ uri: resolveImageUri(val) }}
-                        style={styles.detailImage}
-                        contentFit="cover"
-                      />
+                      <Pressable
+                        onPress={() => setPreviewImage({ uri: fullUri, caption: f.label })}
+                        style={({ pressed }) => [styles.detailImgPressable, pressed && { opacity: 0.88 }]}
+                      >
+                        <Image
+                          source={{ uri: fullUri }}
+                          style={styles.detailImage}
+                          contentFit="cover"
+                        />
+                        <View style={styles.imgZoomBadge}>
+                          <Feather name="maximize-2" size={12} color={Palette.inkInverse} />
+                        </View>
+                      </Pressable>
                     </View>
                   );
                 }
@@ -964,6 +1019,27 @@ export default function EntryDetailScreen() {
                   </View>
                 );
               })}
+
+              {filledBaseFields.length > 0 && emptyBaseFields.length > 0 ? (
+                <Pressable
+                  onPress={() => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    setShowEmptyFields((v) => !v);
+                  }}
+                  style={({ pressed }) => [styles.emptyFieldsToggle, pressed && { opacity: 0.7 }]}
+                >
+                  <Text style={styles.emptyFieldsToggleText}>
+                    {showEmptyFields
+                      ? '收起未填字段'
+                      : `显示 ${emptyBaseFields.length} 项未填字段`}
+                  </Text>
+                  <Feather
+                    name={showEmptyFields ? 'chevron-up' : 'chevron-down'}
+                    size={13}
+                    color={Palette.inkMuted}
+                  />
+                </Pressable>
+              ) : null}
             </View>
 
             {relationFields.length > 0 ? (
@@ -1167,6 +1243,52 @@ export default function EntryDetailScreen() {
           }}
         />
       ) : null}
+
+      <Modal
+        visible={confirmDelete}
+        transparent
+        statusBarTranslucent
+        navigationBarTranslucent
+        animationType="fade"
+        onRequestClose={() => setConfirmDelete(false)}
+      >
+        <View style={styles.confirmBackdrop}>
+          <View style={styles.confirmDialog}>
+            <Text style={styles.confirmTitle}>删除这条记录？</Text>
+            <Text style={styles.confirmSummary} numberOfLines={2}>
+              「{entry.titleSummary}」
+            </Text>
+            <Text style={styles.confirmHint}>
+              {entry.backlinks.length > 0
+                ? `删除后将保留 ${entry.backlinks.length} 条关联记录，并可从设置页操作记录中撤销。`
+                : '删除后仍可从设置页「最近操作记录」中撤销恢复。'}
+            </Text>
+            <View style={styles.confirmBtns}>
+              <Pressable
+                onPress={() => setConfirmDelete(false)}
+                style={({ pressed }) => [styles.confirmCancelBtn, pressed && { opacity: 0.78 }]}
+              >
+                <Text style={styles.confirmCancelText}>取消</Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setConfirmDelete(false);
+                  handleDelete();
+                }}
+                style={({ pressed }) => [styles.confirmOkBtn, pressed && { opacity: 0.85 }]}
+              >
+                <Text style={styles.confirmOkText}>确认删除</Text>
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      <ImagePreviewModal
+        uri={previewImage?.uri ?? null}
+        caption={previewImage?.caption}
+        onClose={() => setPreviewImage(null)}
+      />
     </View>
   );
 }
@@ -1302,7 +1424,128 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   heroCardCompact: {
-    padding: 14,
+    padding: 13,
+    gap: 5,
+  },
+  heroTitleCompact: {
+    fontSize: 18,
+    lineHeight: 24,
+  },
+  heroStatsStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingTop: 8,
+    marginTop: 4,
+    borderTopWidth: 1,
+    borderTopColor: Palette.borderHairline,
+  },
+  compactMetricPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 10,
+  },
+  compactMetricLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  compactMetricVal: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  detailImgPressable: {
+    position: 'relative',
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  imgZoomBadge: {
+    position: 'absolute',
+    right: 10,
+    bottom: 10,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(18, 24, 23, 0.56)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  emptyFieldsToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    paddingTop: 10,
+    marginTop: 2,
+    borderTopWidth: 1,
+    borderTopColor: Palette.borderHairline,
+  },
+  emptyFieldsToggleText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.inkMuted,
+  },
+  confirmBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(18, 24, 23, 0.46)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  confirmDialog: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: Palette.bgSurface,
+    borderRadius: 20,
+    padding: 20,
+    gap: 10,
+  },
+  confirmTitle: {
+    fontSize: 17,
+    fontWeight: '800',
+    color: Palette.inkPrimary,
+  },
+  confirmSummary: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Palette.inkPrimary,
+  },
+  confirmHint: {
+    fontSize: 13,
+    color: Palette.inkSecondary,
+    lineHeight: 19,
+  },
+  confirmBtns: {
+    flexDirection: 'row',
+    gap: 10,
+    marginTop: 6,
+  },
+  confirmCancelBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 12,
+    backgroundColor: Palette.bgSubtle,
+    alignItems: 'center',
+  },
+  confirmCancelText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Palette.inkSecondary,
+  },
+  confirmOkBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    borderRadius: 12,
+    backgroundColor: Palette.danger,
+    alignItems: 'center',
+  },
+  confirmOkText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: Palette.inkInverse,
   },
   heroTopRow: {
     flexDirection: 'row',

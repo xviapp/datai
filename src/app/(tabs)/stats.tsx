@@ -557,7 +557,8 @@ const styles = StyleSheet.create({
   kpiRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 12,
+    justifyContent: 'space-between',
+    rowGap: 10,
   },
   chartsStack: {
     gap: 12,

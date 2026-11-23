@@ -85,6 +85,7 @@ export interface EntrySearchHit {
   librarySlug: string;
   libraryName: string;
   libraryIcon: string;
+  updatedAt: number;
 }
 
 export interface AiSnapshotItem {
@@ -841,8 +842,9 @@ export class OmniRepository {
       id: string;
       library_id: string;
       title_summary: string;
+      updated_at: number;
     }>(
-      `SELECT id, library_id, title_summary
+      `SELECT id, library_id, title_summary, updated_at
        FROM entries
        WHERE search_text LIKE ? ESCAPE '\\'
        ORDER BY updated_at DESC
@@ -861,9 +863,67 @@ export class OmniRepository {
         librarySlug: lib.slug,
         libraryName: lib.name,
         libraryIcon: lib.icon,
+        updatedAt: r.updated_at,
       });
     }
     return hits;
+  }
+
+  /**
+   * 轻量查询全库最近更新的条目摘要，用于首页快捷回溯条
+   */
+  listRecentEntrySummaries(limit = 6): EntrySearchHit[] {
+    const { byId } = this.ensureLibrariesCache();
+    const rows = this.driver.getAllSync<{
+      id: string;
+      library_id: string;
+      title_summary: string;
+      updated_at: number;
+    }>(
+      `SELECT id, library_id, title_summary, updated_at
+       FROM entries
+       ORDER BY updated_at DESC
+       LIMIT ?`,
+      [limit]
+    );
+
+    const hits: EntrySearchHit[] = [];
+    for (const r of rows) {
+      const lib = byId.get(r.library_id);
+      if (!lib) continue;
+      hits.push({
+        id: r.id,
+        title: r.title_summary,
+        libraryId: lib.id,
+        librarySlug: lib.slug,
+        libraryName: lib.name,
+        libraryIcon: lib.icon,
+        updatedAt: r.updated_at,
+      });
+    }
+    return hits;
+  }
+
+  /**
+   * 查询每个记录本最新一条记录的标题与时间，用于首页记录本卡片动态预览
+   */
+  listLatestEntryByLibrary(): Map<string, { title: string; updatedAt: number }> {
+    const rows = this.driver.getAllSync<{
+      library_id: string;
+      title_summary: string;
+      updated_at: number;
+    }>(
+      `SELECT library_id, title_summary, updated_at
+       FROM entries
+       ORDER BY updated_at DESC`
+    );
+    const map = new Map<string, { title: string; updatedAt: number }>();
+    for (const r of rows) {
+      if (!map.has(r.library_id)) {
+        map.set(r.library_id, { title: r.title_summary, updatedAt: r.updated_at });
+      }
+    }
+    return map;
   }
 
   /**

@@ -3,6 +3,7 @@ import { Platform } from 'react-native';
 
 const KEY_API_TOKEN = 'deepseek_api_key_v1';
 const KEY_PREFS = 'deepseek_prefs_v1';
+const KEY_LAST_BACKUP_AT = 'folio_last_backup_at_v1';
 
 export type ReasoningEffort = 'low' | 'high' | 'max';
 
@@ -69,4 +70,19 @@ export async function saveAiPreferences(prefs: Partial<AiPreferences>): Promise<
   const merged = { ...(await getAiPreferences()), ...prefs };
   await setRawItem(KEY_PREFS, JSON.stringify(merged));
   return merged;
+}
+
+export async function getLastBackupAt(): Promise<number | null> {
+  try {
+    const raw = await getRawItem(KEY_LAST_BACKUP_AT);
+    if (!raw) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function saveLastBackupAt(timestamp = Date.now()): Promise<void> {
+  await setRawItem(KEY_LAST_BACKUP_AT, String(timestamp));
 }
