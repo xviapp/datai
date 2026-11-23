@@ -557,7 +557,47 @@ function runTests() {
     repo.listLibraryViews('my_assets').map((v) => v.viewType)
   );
   assert.equal(restoreRepo.listLibraryRelations().length, repo.listLibraryRelations().length);
-  console.log('   ✓ v4 library_views CRUD, library_relations table & v2 backup round-trip verified');
+
+  // Verify AI Architect plan can authoritatively design/remove/rename/reorder views & undo losslessly
+  const booksBeforeAi = repo.getLibraryBySlug('books')!;
+  const prevBookViewSignature = booksBeforeAi.viewList.map((v) => `${v.name}:${v.viewType}`);
+  const aiViewSnapId = repo.applyArchitectPlan({
+    summary: '给书单重排视图为封面墙优先，并移除多余视图',
+    libraries: [
+      {
+        slug: booksBeforeAi.slug,
+        name: booksBeforeAi.name,
+        description: booksBeforeAi.description,
+        icon: booksBeforeAi.icon,
+        color: booksBeforeAi.color,
+        fields: booksBeforeAi.fields,
+        viewList: [
+          { name: '书墙', viewType: 'gallery' },
+          { name: '书单', viewType: 'card' },
+        ],
+        views: {
+          card: booksBeforeAi.views.card,
+          gallery: booksBeforeAi.views.gallery ?? {
+            titleFieldKey: booksBeforeAi.views.card.titleFieldKey,
+          },
+        },
+      },
+    ],
+    dashboardWidgets: [],
+  });
+  assert.deepEqual(
+    repo.listLibraryViews('books').map((v) => `${v.name}:${v.viewType}`),
+    ['书墙:gallery', '书单:card'],
+    'AI Architect viewList must authoritatively control view order, names, and removals'
+  );
+  repo.undoSnapshot(aiViewSnapId);
+  assert.deepEqual(
+    repo.listLibraryViews('books').map((v) => `${v.name}:${v.viewType}`),
+    prevBookViewSignature,
+    'Undoing AI Architect view plan must restore previous library_views exactly'
+  );
+
+  console.log('   ✓ v4 library_views CRUD, AI view design/undo, library_relations table & v2 backup verified');
 
   console.log('\nALL CORE ENGINE TESTS PASSED!');
 }

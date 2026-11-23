@@ -1107,6 +1107,27 @@ export function OmniCaptureModal() {
                           </Text>
                         </View>
                       </View>
+                      <View style={styles.planViewsRow}>
+                        <Feather name="layout" size={12} color={Palette.brand} />
+                        <Text style={styles.planViewsLabel}>视图：</Text>
+                        {(
+                          bp.viewList && bp.viewList.length > 0
+                            ? bp.viewList
+                            : [
+                                { name: '列表', viewType: 'card' as const },
+                                ...(bp.views.gallery
+                                  ? [{ name: '画廊', viewType: 'gallery' as const }]
+                                  : []),
+                                ...(bp.views.calendar
+                                  ? [{ name: '日历', viewType: 'calendar' as const }]
+                                  : []),
+                              ]
+                        ).map((v, vi) => (
+                          <View key={`${v.viewType}_${vi}`} style={styles.planViewBadge}>
+                            <Text style={styles.planViewBadgeText}>{v.name}</Text>
+                          </View>
+                        ))}
+                      </View>
                       <View style={styles.fieldsWrap}>
                         {bp.fields.map((f) => (
                           <View key={f.key} style={styles.fieldChip}>
@@ -1646,6 +1667,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 6,
+  },
+  planViewsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6,
+  },
+  planViewsLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.inkSecondary,
+  },
+  planViewBadge: {
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 999,
+  },
+  planViewBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.brand,
   },
   fieldChip: {
     backgroundColor: Palette.bgSurface,

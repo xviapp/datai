@@ -430,11 +430,13 @@ export function SchemaEditorModal({
       setAiLoading(true);
       setErrorMsg(null);
       const scopedPrompt = existingLibrary
-        ? `针对已有库 slug="${existingLibrary.slug}" (${existingLibrary.name}) 进行模型/样式调整：${aiPrompt}`
+        ? `针对已有库 slug="${existingLibrary.slug}" (${existingLibrary.name}) 进行数据结构或视图表现调整：${aiPrompt}`
         : defaultParentSlug
           ? `围绕已有主库 slug="${defaultParentSlug}" 新建或调整附属子记录本：${aiPrompt}`
           : aiPrompt;
-      const plan = await runArchitectAgent(repo, scopedPrompt);
+      const plan = await runArchitectAgent(repo, scopedPrompt, undefined, {
+        targetLibrarySlug: existingLibrary?.slug ?? defaultParentSlug ?? undefined,
+      });
       repo.applyArchitectPlan(plan);
       const targetSlug = plan.libraries[0]?.slug || slug;
       onSaved?.(targetSlug);
@@ -669,8 +671,8 @@ export function SchemaEditorModal({
                 onChangeText={setAiPrompt}
                 placeholder={
                   existingLibrary
-                    ? '如：加一个报销状态选项，未报销时标黄提醒'
-                    : '如：做一个咖啡豆记录本，并配一个冲煮记录附属表'
+                    ? '如：加一个报销状态选项，或关闭日历、新增「封面墙」画廊视图'
+                    : '如：做一个咖啡豆记录本（带画廊和冲煮记录附属表）'
                 }
                 placeholderTextColor={Palette.inkMuted}
                 style={styles.aiInput}

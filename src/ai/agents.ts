@@ -98,7 +98,7 @@ export async function detectAssistantIntent(
         role: 'system',
         content: `你是个人记录 App 的意图路由器。根据用户输入与当前所在页面，输出单个 JSON：{"intent":"architect"|"analyst"|"capture"}。
 判定规则：
-- "architect"：用户想新建记录本/数据表，或给当前/已有记录本新增、修改字段、公式、提醒高亮规则、附属子表或卡片样式（哪怕同时顺带要一张图表）。
+- "architect"：用户想新建记录本/数据表，或给当前/已有记录本新增、修改字段、公式、提醒高亮规则、附属子表、卡片样式，或**开启/关闭/重命名/调整排序画廊、日历、统计等视图表现**（哪怕同时顺带要一张图表）。
 - "analyst"：用户想查询、统计、汇总、排名、对比、排查已有记录的数据，或基于已有记录画统计图表。
 - "capture"：用户想录入一条具体的日常记录、进度打卡、书摘随感或跨表关联流水（例如刚买了某物花了多少钱、某本书读到多少页、刚吃了某种药）。`,
       },
@@ -192,34 +192,54 @@ export async function runArchitectAgent(
     parentLibrarySlug: l.parentLibrarySlug ?? undefined,
     showOnHome: l.showOnHome,
     fields: l.fields,
+    viewList: l.viewList.map((v) => ({ name: v.name, viewType: v.viewType })),
     views: l.views,
+  }));
+  const existingRelations = repo.listLibraryRelations().map((r) => ({
+    sourceLibrarySlug: r.sourceLibrarySlug,
+    targetLibrarySlug: r.targetLibrarySlug,
+    fieldKey: r.fieldKey,
+    relationKind: r.relationKind,
+    allowMultiple: r.allowMultiple,
   }));
 
   const schemaSpec = JSON.stringify(getArchitectJsonSchema());
 
   // 固定前缀置顶，最大化命中 DeepSeek 硬盘缓存（0.02元/百万Tokens）
   const systemPrompt = `你是「个人全能记录 App」的首席数据库与界面架构师。
+底层采用「数据表（libraries/entries）」「视图表现表（library_views）」「表间关系表（library_relations）」三层解耦架构。
 你的任务是根据用户描述，输出新建或增量修改的数据表（libraries）以及跨库统计看板（dashboardWidgets），严格输出符合以下 JSON Schema 的单个 JSON 对象：
 ${schemaSpec}
 
 核心设计准则：
-1. slug 与所有 field.key 必须使用英文小写蛇形命名（如 workout_logs, duration_min），系统会自动创建逻辑视图 v_<slug>。
-2. 若跨表存在关联，使用 type="relation" 并设置 relationConfig.targetLibrarySlug；在被关联表上可善用 type="rollup"（聚合正向字段或 "reverse:<源库slug>.<关联字段key>"）以及 type="formula"（支持 + - * /、DAYS_SINCE(date)、DAYS_UNTIL(date)、MAX、MIN、ROUND、IF）。
-3. 为每个库配置美观实用的 views.card（指定 titleFieldKey、subtitleFieldKey、rightBadgeFieldKey、最多3~4个 footerMetricKeys，以及合理的 highlightRules 预警规则；若有日期字段顺手配置 views.calendar；若有图片/评分顺手配置 views.gallery）。
-4. 若修改已有库（slug 相同），必须完整保留该库原有的存量字段 key，在此基础上追加或调整样式，严禁随意改名已有字段导致用户历史数据丢失。
-5. dashboardWidgets 的 readonlySql 只能查询逻辑视图 v_<slug>（注意 rollup 和 formula 字段不在物理 SQL 视图列中，请在 SQL 内直接用基础列与 entry_relations 做聚合计算）。
-6. 当需求包含「主体 + 附属流水/打卡/阅读记录/跟进日志」的 1:N 主从关系（如 书籍+阅读记录、项目+跟进记录、宠物+医疗记录）时：
-   - 将附属子表设置 parentLibrarySlug 指向主表 slug，并默认设 showOnHome: false（收纳进主表内部，保持首页清爽），同时在附属子表中定义指向主表的 type="relation" 字段（allowMultiple: false）。
+1. 【数据结构】slug 与所有 field.key 必须使用英文小写蛇形命名（如 workout_logs, duration_min），系统会自动创建逻辑视图 v_<slug>。
+2. 【表间关系与计算】跨表关联使用 type="relation" 并设置 relationConfig.targetLibrarySlug（系统自动同步至独立 library_relations 表）；在被关联表上可善用 type="rollup"（聚合正向字段或 "reverse:<源库slug>.<关联字段key>"）以及 type="formula"（支持 + - * /、DAYS_SINCE(date)、DAYS_UNTIL(date)、MAX、MIN、ROUND、IF）。
+3. 【按需设计视图（非常重要）】每个库都必须由你主动决定最贴合场景的有序 viewList（落盘到独立 library_views 表），绝不要无脑塞满全部视图：
+   - 必须始终配置实用美观的 views.card（titleFieldKey、subtitleFieldKey、rightBadgeFieldKey、最多3~4个 footerMetricKeys 与合理 highlightRules）。
+   - 极简清单、静态资料、纯文本备忘录：viewList 只放 1 项 [{"name":"列表","viewType":"card"}]（单视图时界面自动隐藏切换栏，极度清爽）。
+   - 强视觉/封面/收藏类（如书单、影视、咖啡豆、穿搭、美食，且含 image 字段）：按需在 viewList 加入 gallery（可起贴切名称如「封面墙」「相册」）并配好 views.gallery；无图片字段的账单/纯清单不要硬塞画廊！
+   - 强时间线/打卡/消费/临期提醒类（如账单、运动、用药、阅读流水，且含 date 字段）：按需在 viewList 加入 calendar（如「日历」「打卡日历」）并配好 views.calendar；无日期意义的资料库不要硬塞日历！
+   - 当本方案为该库设计了 dashboardWidgets，或用户明确需要本库数据分析时，在 viewList 加入 stats（如「统计」）；否则不加空统计视图。
+   - 若用户明确要求“开启/关闭/重命名/调整顺序”某个视图，请在 viewList 中精准体现调整后的最终有序列表（不包含被关闭的视图），同时保留其他未要求改动的视图。
+4. 【安全演进】修改已有库（slug 相同）时，必须完整保留原有存量字段 key（除非用户明确要求删除），严禁随意改名已有字段导致用户历史数据丢失。
+5. 【只读统计】dashboardWidgets 的 readonlySql 只能查询逻辑视图 v_<slug>（注意 rollup 和 formula 字段不在物理 SQL 视图列中，请在 SQL 内直接用基础列与 entry_relations 做聚合计算）。
+6. 【主从附属】当需求包含「主体 + 附属流水/打卡/阅读记录/跟进日志」的 1:N 主从关系（如 书籍+阅读记录、项目+跟进记录、宠物+医疗记录）时：
+   - 将附属子表设置 parentLibrarySlug 指向主表 slug（系统会在 library_relations 标记为 parent_child），默认设 showOnHome: false（收纳进主表内部，保持首页清爽），并在附属子表中定义指向主表的 type="relation" 字段（allowMultiple: false）。
    - 对于书摘、随感、复盘、长备注等段落文本字段，设置 type="text" 且 multiline: true。`;
 
   const focusLib = context?.targetLibrarySlug
     ? allLibs.find((l) => l.slug === context.targetLibrarySlug)
     : undefined;
   const focusBlock = focusLib
-    ? `\n\n[当前所在记录本]：用户正停留在「${focusLib.icon} ${focusLib.name}」(slug: "${focusLib.slug}")。若用户未明确指定其他记录本（例如说“新增一个字段/加个公式/建个附属记录本”），请默认围绕 "${focusLib.slug}" 进行增量演进并完整保留其原有字段。`
+    ? `\n\n[当前所在记录本]：用户正停留在「${focusLib.icon} ${focusLib.name}」(slug: "${focusLib.slug}")，当前启用视图：${focusLib.viewList.map((v) => `${v.name}(${v.viewType})`).join(' / ')}。若用户未明确指定其他记录本（例如说“新增字段/加公式/改视图/关掉日历/加画廊/建附属表”），请默认围绕 "${focusLib.slug}" 进行增量演进并完整保留其原有字段。`
     : '';
 
-  const userMessage = `当前已有库结构 JSON：\n${JSON.stringify(existingLibs)}${focusBlock}\n\n用户的建模/修改需求：\n${userPrompt}`;
+  const relBlock =
+    existingRelations.length > 0
+      ? `\n\n当前表间关系（library_relations）：\n${JSON.stringify(existingRelations)}`
+      : '';
+
+  const userMessage = `当前已有库结构与视图 JSON：\n${JSON.stringify(existingLibs)}${relBlock}${focusBlock}\n\n用户的建模/视图修改需求：\n${userPrompt}`;
 
   const { message } = await callDeepSeekChat({
     thinking: true,

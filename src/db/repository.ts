@@ -206,6 +206,7 @@ type SnapshotPayload =
       kind: 'architect_plan';
       createdLibrarySlugs: string[];
       previousLibraries: Array<Record<string, unknown>>;
+      previousLibraryViews?: Array<Record<string, unknown>>;
       createdWidgetIds: string[];
     }
   | FullBackupBundle;
@@ -601,23 +602,111 @@ export class OmniRepository {
   private syncLibraryViewsFromBlueprintInternal(
     libId: string,
     viewsBundle: LibraryLayoutBundle,
-    isNewLibrary: boolean
+    isNewLibrary: boolean,
+    explicitViewList?: LibraryBlueprint['viewList'],
+    fieldsForDefaults?: FieldDef[]
   ): void {
     const now = Date.now();
     const existingRows = this.driver.getAllSync<{
       id: string;
       view_type: LibraryViewType;
+      config_json: string;
       sort_order: number;
+      created_at: number;
     }>(
-      'SELECT id, view_type, sort_order FROM library_views WHERE library_id = ? ORDER BY sort_order ASC',
+      'SELECT id, view_type, config_json, sort_order, created_at FROM library_views WHERE library_id = ? ORDER BY sort_order ASC',
       [libId]
     );
 
-    const existingByType = new Map<LibraryViewType, { id: string; sort_order: number }>();
+    const existingByType = new Map<
+      LibraryViewType,
+      { id: string; config_json: string; sort_order: number; created_at: number }
+    >();
     for (const r of existingRows) {
       if (!existingByType.has(r.view_type)) {
         existingByType.set(r.view_type, r);
       }
+    }
+
+    // 若蓝图显式提供了有序 viewList（如 AI 建筑师按需设计/增删/重排视图），精准按 viewList 重建 library_views
+    if (explicitViewList && explicitViewList.length > 0) {
+      const titleKey = viewsBundle.card?.titleFieldKey || fieldsForDefaults?.[0]?.key || '';
+      const fallbackImgKey =
+        viewsBundle.card?.coverImageFieldKey ||
+        fieldsForDefaults?.find((f) => f.type === 'image')?.key;
+      const fallbackDateKey = fieldsForDefaults?.find((f) => f.type === 'date')?.key || '';
+      const fallbackRatingKey = fieldsForDefaults?.find((f) => f.type === 'rating')?.key;
+
+      const resolvedGallery: GalleryViewConfig = viewsBundle.gallery ?? {
+        titleFieldKey: titleKey,
+        subtitleFieldKey: viewsBundle.card?.subtitleFieldKey,
+        coverImageFieldKey: fallbackImgKey,
+        badgeFieldKey: viewsBundle.card?.rightBadgeFieldKey,
+        ratingFieldKey: fallbackRatingKey,
+      };
+      const resolvedCalendar: CalendarViewConfig = viewsBundle.calendar ?? {
+        dateFieldKey: fallbackDateKey,
+        titleFieldKey: titleKey,
+        metricFieldKey: viewsBundle.card?.footerMetricKeys?.[0],
+        tagFieldKey: viewsBundle.card?.rightBadgeFieldKey,
+      };
+
+      const usedIds = new Set<string>();
+      this.driver.runSync('DELETE FROM library_views WHERE library_id = ?', [libId]);
+
+      explicitViewList.forEach((item, idx) => {
+        const prev = existingByType.get(item.viewType);
+        const reuseId = prev && !usedIds.has(prev.id) ? prev.id : createId('vw');
+        usedIds.add(reuseId);
+
+        const cfg =
+          item.viewType === 'card'
+            ? viewsBundle.card ?? {}
+            : item.viewType === 'gallery'
+              ? resolvedGallery
+              : item.viewType === 'calendar'
+                ? resolvedCalendar
+                : {};
+
+        const fallbackLabel =
+          item.viewType === 'card'
+            ? '列表'
+            : item.viewType === 'gallery'
+              ? '画廊'
+              : item.viewType === 'calendar'
+                ? '日历'
+                : '统计';
+
+        this.driver.runSync(
+          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            reuseId,
+            libId,
+            item.name.trim() || fallbackLabel,
+            item.viewType,
+            JSON.stringify(cfg),
+            idx,
+            idx === 0 ? 1 : 0,
+            prev?.created_at ?? now,
+            now,
+          ]
+        );
+      });
+
+      const hasGallery = explicitViewList.some((v) => v.viewType === 'gallery');
+      const hasCalendar = explicitViewList.some((v) => v.viewType === 'calendar');
+      const syncedBundle: LibraryLayoutBundle = {
+        card: viewsBundle.card,
+        gallery: hasGallery ? resolvedGallery : undefined,
+        calendar: hasCalendar ? resolvedCalendar : undefined,
+      };
+      this.driver.runSync('UPDATE libraries SET views_json = ?, updated_at = ? WHERE id = ?', [
+        JSON.stringify(syncedBundle),
+        now,
+        libId,
+      ]);
+      return;
     }
 
     let nextOrder =
@@ -1047,7 +1136,13 @@ export class OmniRepository {
     }
 
     compileLibrarySqlView(this.driver, id, bp.slug, normalizedFields);
-    this.syncLibraryViewsFromBlueprintInternal(id, bp.views, !existing);
+    this.syncLibraryViewsFromBlueprintInternal(
+      id,
+      bp.views,
+      !existing,
+      bp.viewList,
+      normalizedFields
+    );
     this.syncAllLibraryRelationsInternal();
     this.invalidateLibrariesCache();
     return id;
@@ -2244,6 +2339,7 @@ export class OmniRepository {
 
     const createdLibrarySlugs: string[] = [];
     const previousLibraries: Array<Record<string, unknown>> = [];
+    const previousLibraryViews: Array<Record<string, unknown>> = [];
     let snapshotId = '';
 
     // 先提交表结构与视图变更，再使用独立只读连接校验并保存看板图表
@@ -2255,6 +2351,11 @@ export class OmniRepository {
         );
         if (existingRaw) {
           previousLibraries.push(existingRaw);
+          const prevViews = this.driver.getAllSync<Record<string, unknown>>(
+            'SELECT * FROM library_views WHERE library_id = ? ORDER BY sort_order ASC',
+            [String(existingRaw.id)]
+          );
+          previousLibraryViews.push(...prevViews);
         } else {
           createdLibrarySlugs.push(bp.slug);
         }
@@ -2264,6 +2365,7 @@ export class OmniRepository {
         kind: 'architect_plan',
         createdLibrarySlugs,
         previousLibraries,
+        previousLibraryViews,
         createdWidgetIds: [],
       });
 
@@ -2291,6 +2393,7 @@ export class OmniRepository {
           kind: 'architect_plan',
           createdLibrarySlugs,
           previousLibraries,
+          previousLibraryViews,
           createdWidgetIds,
         } satisfies SnapshotPayload),
         snapshotId,
@@ -2555,11 +2658,22 @@ export class OmniRepository {
             }
             const fields = JSON.parse(String(prev.fields_json)) as FieldDef[];
             compileLibrarySqlView(this.driver, String(prev.id), String(prev.slug), fields);
-            this.syncLibraryViewsFromBlueprintInternal(
-              String(prev.id),
-              JSON.parse(String(prev.views_json)) as LibraryLayoutBundle,
-              !exists
+            const prevLibId = String(prev.id);
+            const savedPrevViews = (payload.previousLibraryViews ?? []).filter(
+              (v) => String(v.library_id) === prevLibId
             );
+            if (savedPrevViews.length > 0) {
+              this.driver.runSync('DELETE FROM library_views WHERE library_id = ?', [prevLibId]);
+              for (const lv of savedPrevViews) {
+                this.insertRawLibraryView(lv);
+              }
+            } else {
+              this.syncLibraryViewsFromBlueprintInternal(
+                prevLibId,
+                JSON.parse(String(prev.views_json)) as LibraryLayoutBundle,
+                !exists
+              );
+            }
           }
 
           for (const wid of payload.createdWidgetIds) {

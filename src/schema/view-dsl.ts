@@ -84,6 +84,14 @@ export type DashboardWidget = z.infer<typeof DashboardWidgetSchema>;
 export const LibraryViewTypeEnum = z.enum(['card', 'gallery', 'calendar', 'stats']);
 export type LibraryViewType = z.infer<typeof LibraryViewTypeEnum>;
 
+export const LibraryViewBlueprintSchema = z.object({
+  name: z.string().min(1).describe('视图显示名称，如 列表 / 封面墙 / 消费日历 / 数据统计'),
+  viewType: LibraryViewTypeEnum.describe(
+    '视图表现类型：card(列表) | gallery(画廊) | calendar(日历) | stats(统计)'
+  ),
+});
+export type LibraryViewBlueprint = z.infer<typeof LibraryViewBlueprintSchema>;
+
 export const LibraryLayoutBundleSchema = z.object({
   card: CardViewConfigSchema,
   gallery: GalleryViewConfigSchema.optional(),
@@ -111,6 +119,13 @@ export const LibraryBlueprintSchema = z.object({
     .optional()
     .describe('是否在首页网格独立展示卡片；独立主表默认 true，附属子表建议填 false 收纳进主表内部'),
   fields: z.array(FieldDefSchema).min(1),
+  viewList: z
+    .array(LibraryViewBlueprintSchema)
+    .min(1)
+    .optional()
+    .describe(
+      '按需决定的有序视图表现列表（落盘到独立 library_views 表）。只放该记录本真正需要的视图、自定义名称与先后顺序，不要硬塞无用画廊/日历/统计；纯清单类只放 1 项 card 即可'
+    ),
   views: LibraryLayoutBundleSchema,
 });
 
