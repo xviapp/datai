@@ -511,6 +511,54 @@ function runTests() {
   );
   console.log('   ✓ Sub-library hierarchy, multiline quotes, detach-on-delete, undo & v2->v3 migration verified');
 
+  console.log('12. Testing v4 decoupled library_views & library_relations tables + v2 backup...');
+  // Legacy v2 database upgraded all the way to v4 must have backfilled library_views
+  const migratedViews = migratedRepo.listLibraryViews('old_notes');
+  assert.equal(migratedViews.length, 1, 'Minimal library should only have 1 default card view');
+  assert.equal(migratedViews[0].viewType, 'card');
+
+  // Seeded libraries should have tailored on-demand views in library_views table
+  const assetViews = repo.listLibraryViews('my_assets');
+  assert.ok(assetViews.some((v) => v.viewType === 'card'));
+  assert.ok(assetViews.some((v) => v.viewType === 'stats'), 'Assets with widgets must auto-get stats view');
+  assert.ok(!assetViews.some((v) => v.viewType === 'gallery'), 'Assets without gallery config should not force gallery');
+
+  const mediaViews = repo.listLibraryViews('media_vault');
+  assert.ok(mediaViews.some((v) => v.viewType === 'gallery'), 'Media vault should have gallery view');
+
+  // Custom view CRUD (add, rename, reorder, delete)
+  const newCalViewId = repo.addLibraryView('media_vault', 'calendar', '观影日历');
+  assert.ok(repo.listLibraryViews('media_vault').some((v) => v.id === newCalViewId && v.name === '观影日历'));
+  repo.deleteLibraryView(newCalViewId);
+  assert.ok(!repo.listLibraryViews('media_vault').some((v) => v.id === newCalViewId));
+
+  // Table-level library_relations table must mirror relation & parent_child links
+  const bookRelations = repo.listLibraryRelations('books');
+  assert.ok(
+    bookRelations.some((r) => r.sourceLibrarySlug === 'reading_logs' && r.relationKind === 'parent_child'),
+    'library_relations must record parent_child relation for books <-> reading_logs'
+  );
+  const assetRelations = repo.listLibraryRelations('my_assets');
+  assert.ok(
+    assetRelations.some((r) => r.sourceLibrarySlug === 'daily_bills' && r.relationKind === 'reference'),
+    'library_relations must record reference relation for daily_bills -> my_assets'
+  );
+
+  // Full backup v2 round-trip must preserve library_views & library_relations
+  const backupV2 = repo.exportBackupBundle();
+  assert.equal(backupV2.version, 2);
+  assert.ok((backupV2.libraryViews?.length ?? 0) >= 7);
+  assert.ok((backupV2.libraryRelations?.length ?? 0) >= 2);
+  const restoreDriver = createNodeSqliteDriver();
+  const restoreRepo = new OmniRepository(restoreDriver);
+  restoreRepo.importBackupBundle(backupV2);
+  assert.deepEqual(
+    restoreRepo.listLibraryViews('my_assets').map((v) => v.viewType),
+    repo.listLibraryViews('my_assets').map((v) => v.viewType)
+  );
+  assert.equal(restoreRepo.listLibraryRelations().length, repo.listLibraryRelations().length);
+  console.log('   ✓ v4 library_views CRUD, library_relations table & v2 backup round-trip verified');
+
   console.log('\nALL CORE ENGINE TESTS PASSED!');
 }
 

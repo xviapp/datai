@@ -81,6 +81,9 @@ export const DashboardWidgetSchema = z.object({
 
 export type DashboardWidget = z.infer<typeof DashboardWidgetSchema>;
 
+export const LibraryViewTypeEnum = z.enum(['card', 'gallery', 'calendar', 'stats']);
+export type LibraryViewType = z.infer<typeof LibraryViewTypeEnum>;
+
 export const LibraryLayoutBundleSchema = z.object({
   card: CardViewConfigSchema,
   gallery: GalleryViewConfigSchema.optional(),

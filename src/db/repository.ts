@@ -4,10 +4,14 @@ import { buildEntryPayloadValidator, type FieldDef, type FieldType } from '@/sch
 import {
   type AccentTone,
   type ArchitectPlan,
+  type CalendarViewConfig,
+  type CardViewConfig,
   type DashboardWidget,
   type DraftEntryItem,
+  type GalleryViewConfig,
   type LibraryBlueprint,
   type LibraryLayoutBundle,
+  type LibraryViewType,
 } from '@/schema/view-dsl';
 import { MAX_AI_SNAPSHOTS, runCoreMigrations } from './migrations';
 import { buildDefaultSeedBundle } from './seed-templates';
@@ -23,6 +27,41 @@ import {
   type LibraryCatalogItem,
 } from './view-compiler';
 
+export interface LibraryViewRecord {
+  id: string;
+  libraryId: string;
+  name: string;
+  viewType: LibraryViewType;
+  config: Record<string, unknown>;
+  sortOrder: number;
+  isDefault: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface LibraryViewInput {
+  id?: string;
+  name: string;
+  viewType: LibraryViewType;
+  config?: Record<string, unknown>;
+}
+
+export interface LibraryRelationRecord {
+  id: string;
+  sourceLibraryId: string;
+  sourceLibrarySlug: string;
+  sourceLibraryName: string;
+  sourceLibraryIcon: string;
+  targetLibraryId: string;
+  targetLibrarySlug: string;
+  targetLibraryName: string;
+  targetLibraryIcon: string;
+  fieldKey: string;
+  relationKind: 'parent_child' | 'reference';
+  allowMultiple: boolean;
+  createdAt: number;
+}
+
 export interface LibraryRecord {
   id: string;
   slug: string;
@@ -33,6 +72,9 @@ export interface LibraryRecord {
   parentLibrarySlug: string | null;
   showOnHome: boolean;
   fields: FieldDef[];
+  /** 由独立 library_views 表驱动的按需视图列表（有序） */
+  viewList: LibraryViewRecord[];
+  /** 兼容视图配置汇总（由 library_views 聚合生成） */
   views: LibraryLayoutBundle;
   entryCount: number;
   updatedAt: number;
@@ -109,9 +151,11 @@ export interface SavedDashboardWidget extends DashboardWidget {
 }
 
 export interface FullBackupBundle {
-  version: 1;
+  version: 1 | 2;
   exportedAt: string;
   libraries: Array<Record<string, unknown>>;
+  libraryViews?: Array<Record<string, unknown>>;
+  libraryRelations?: Array<Record<string, unknown>>;
   entries: Array<Record<string, unknown>>;
   relations: Array<Record<string, unknown>>;
   widgets: Array<Record<string, unknown>>;
@@ -148,6 +192,7 @@ type SnapshotPayload =
   | {
       kind: 'library_deleted';
       library: Record<string, unknown>;
+      libraryViews?: Array<Record<string, unknown>>;
       entries: Array<Record<string, unknown>>;
       relations: Array<Record<string, unknown>>;
       widgets: Array<Record<string, unknown>>;
@@ -283,20 +328,110 @@ export class OmniRepository {
       ORDER BY l.sort_order ASC, l.created_at ASC
     `);
 
-    const list: LibraryRecord[] = rows.map((r) => ({
-      id: r.id,
-      slug: r.slug,
-      name: r.name,
-      description: r.description,
-      icon: r.icon,
-      color: r.color,
-      parentLibrarySlug: r.parent_slug || null,
-      showOnHome: r.show_on_home !== 0,
-      fields: JSON.parse(r.fields_json) as FieldDef[],
-      views: JSON.parse(r.views_json) as LibraryLayoutBundle,
-      entryCount: Number(r.entry_count ?? 0),
-      updatedAt: r.updated_at,
-    }));
+    const viewRows = this.driver.getAllSync<{
+      id: string;
+      library_id: string;
+      name: string;
+      view_type: LibraryViewType;
+      config_json: string;
+      sort_order: number;
+      is_default: number;
+      created_at: number;
+      updated_at: number;
+    }>(`
+      SELECT id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at
+      FROM library_views
+      ORDER BY sort_order ASC, created_at ASC
+    `);
+
+    const viewsByLibId = new Map<string, LibraryViewRecord[]>();
+    for (const vr of viewRows) {
+      let cfg: Record<string, unknown> = {};
+      try {
+        cfg = JSON.parse(vr.config_json) as Record<string, unknown>;
+      } catch {
+        cfg = {};
+      }
+      const listForLib = viewsByLibId.get(vr.library_id) ?? [];
+      listForLib.push({
+        id: vr.id,
+        libraryId: vr.library_id,
+        name: vr.name,
+        viewType: vr.view_type,
+        config: cfg,
+        sortOrder: vr.sort_order,
+        isDefault: vr.is_default !== 0,
+        createdAt: vr.created_at,
+        updatedAt: vr.updated_at,
+      });
+      viewsByLibId.set(vr.library_id, listForLib);
+    }
+
+    const list: LibraryRecord[] = rows.map((r) => {
+      const fields = JSON.parse(r.fields_json) as FieldDef[];
+      const legacyBundle = JSON.parse(r.views_json) as LibraryLayoutBundle;
+      const rawViewList = viewsByLibId.get(r.id) ?? [];
+      const viewList: LibraryViewRecord[] =
+        rawViewList.length > 0
+          ? rawViewList
+          : [
+              {
+                id: `vw_${r.id}_card`,
+                libraryId: r.id,
+                name: '列表',
+                viewType: 'card',
+                config: (legacyBundle.card ?? {}) as unknown as Record<string, unknown>,
+                sortOrder: 0,
+                isDefault: true,
+                createdAt: r.updated_at,
+                updatedAt: r.updated_at,
+              },
+            ];
+
+      const cardRow = viewList.find((v) => v.viewType === 'card');
+      const galleryRow = viewList.find((v) => v.viewType === 'gallery');
+      const calendarRow = viewList.find((v) => v.viewType === 'calendar');
+
+      const mergedViews: LibraryLayoutBundle = {
+        card: {
+          ...legacyBundle.card,
+          ...(cardRow?.config as Partial<CardViewConfig> | undefined),
+        },
+        gallery: galleryRow
+          ? ({
+              ...(legacyBundle.gallery ?? {
+                titleFieldKey: legacyBundle.card.titleFieldKey || fields[0]?.key || '',
+              }),
+              ...(galleryRow.config as Partial<GalleryViewConfig>),
+            } as GalleryViewConfig)
+          : undefined,
+        calendar: calendarRow
+          ? ({
+              ...(legacyBundle.calendar ?? {
+                dateFieldKey: fields.find((f) => f.type === 'date')?.key || '',
+                titleFieldKey: legacyBundle.card.titleFieldKey || fields[0]?.key || '',
+              }),
+              ...(calendarRow.config as Partial<CalendarViewConfig>),
+            } as CalendarViewConfig)
+          : undefined,
+      };
+
+      return {
+        id: r.id,
+        slug: r.slug,
+        name: r.name,
+        description: r.description,
+        icon: r.icon,
+        color: r.color,
+        parentLibrarySlug: r.parent_slug || null,
+        showOnHome: r.show_on_home !== 0,
+        fields,
+        viewList,
+        views: mergedViews,
+        entryCount: Number(r.entry_count ?? 0),
+        updatedAt: r.updated_at,
+      };
+    });
 
     const byId = new Map<string, LibraryRecord>();
     const bySlug = new Map<string, LibraryRecord>();
@@ -381,8 +516,427 @@ export class OmniRepository {
     return this.ensureLibrariesCache().list;
   }
 
+  listLibraryViews(librarySlug: string): LibraryViewRecord[] {
+    return this.ensureLibrariesCache().bySlug.get(librarySlug)?.viewList ?? [];
+  }
+
+  listLibraryRelations(librarySlug?: string): LibraryRelationRecord[] {
+    const { byId, bySlug } = this.ensureLibrariesCache();
+    const targetLib = librarySlug ? bySlug.get(librarySlug) : undefined;
+    if (librarySlug && !targetLib) return [];
+
+    const rows = targetLib
+      ? this.driver.getAllSync<{
+          id: string;
+          source_library_id: string;
+          target_library_id: string;
+          field_key: string;
+          relation_kind: 'parent_child' | 'reference';
+          allow_multiple: number;
+          created_at: number;
+        }>(
+          `SELECT id, source_library_id, target_library_id, field_key, relation_kind, allow_multiple, created_at
+           FROM library_relations
+           WHERE source_library_id = ? OR target_library_id = ?
+           ORDER BY created_at ASC`,
+          [targetLib.id, targetLib.id]
+        )
+      : this.driver.getAllSync<{
+          id: string;
+          source_library_id: string;
+          target_library_id: string;
+          field_key: string;
+          relation_kind: 'parent_child' | 'reference';
+          allow_multiple: number;
+          created_at: number;
+        }>(
+          `SELECT id, source_library_id, target_library_id, field_key, relation_kind, allow_multiple, created_at
+           FROM library_relations
+           ORDER BY created_at ASC`
+        );
+
+    const result: LibraryRelationRecord[] = [];
+    for (const r of rows) {
+      const src = byId.get(r.source_library_id);
+      const tgt = byId.get(r.target_library_id);
+      if (!src || !tgt) continue;
+      result.push({
+        id: r.id,
+        sourceLibraryId: src.id,
+        sourceLibrarySlug: src.slug,
+        sourceLibraryName: src.name,
+        sourceLibraryIcon: src.icon,
+        targetLibraryId: tgt.id,
+        targetLibrarySlug: tgt.slug,
+        targetLibraryName: tgt.name,
+        targetLibraryIcon: tgt.icon,
+        fieldKey: r.field_key,
+        relationKind: r.relation_kind === 'parent_child' ? 'parent_child' : 'reference',
+        allowMultiple: r.allow_multiple !== 0,
+        createdAt: r.created_at,
+      });
+    }
+    return result;
+  }
+
   listChildLibraries(parentSlug: string): LibraryRecord[] {
-    return this.ensureLibrariesCache().list.filter((l) => l.parentLibrarySlug === parentSlug);
+    const { list, bySlug, byId } = this.ensureLibrariesCache();
+    const parent = bySlug.get(parentSlug);
+    if (!parent) return [];
+
+    const relRows = this.driver.getAllSync<{ source_library_id: string }>(
+      `SELECT source_library_id FROM library_relations
+       WHERE target_library_id = ? AND relation_kind = 'parent_child'`,
+      [parent.id]
+    );
+    if (relRows.length > 0) {
+      const idSet = new Set(relRows.map((r) => r.source_library_id));
+      const matched = list.filter((l) => idSet.has(l.id) || l.parentLibrarySlug === parentSlug);
+      if (matched.length > 0) return matched;
+      return relRows.map((r) => byId.get(r.source_library_id)).filter(Boolean) as LibraryRecord[];
+    }
+    return list.filter((l) => l.parentLibrarySlug === parentSlug);
+  }
+
+  private syncLibraryViewsFromBlueprintInternal(
+    libId: string,
+    viewsBundle: LibraryLayoutBundle,
+    isNewLibrary: boolean
+  ): void {
+    const now = Date.now();
+    const existingRows = this.driver.getAllSync<{
+      id: string;
+      view_type: LibraryViewType;
+      sort_order: number;
+    }>(
+      'SELECT id, view_type, sort_order FROM library_views WHERE library_id = ? ORDER BY sort_order ASC',
+      [libId]
+    );
+
+    const existingByType = new Map<LibraryViewType, { id: string; sort_order: number }>();
+    for (const r of existingRows) {
+      if (!existingByType.has(r.view_type)) {
+        existingByType.set(r.view_type, r);
+      }
+    }
+
+    let nextOrder =
+      existingRows.length > 0
+        ? Math.max(...existingRows.map((r) => r.sort_order)) + 1
+        : 0;
+
+    // 1. 主列表视图始终存在，更新其配置
+    const cardRow = existingByType.get('card');
+    if (cardRow) {
+      this.driver.runSync(
+        'UPDATE library_views SET config_json = ?, updated_at = ? WHERE id = ?',
+        [JSON.stringify(viewsBundle.card ?? {}), now, cardRow.id]
+      );
+    } else {
+      this.driver.runSync(
+        `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          createId('vw'),
+          libId,
+          '列表',
+          'card',
+          JSON.stringify(viewsBundle.card ?? {}),
+          isNewLibrary ? 0 : nextOrder++,
+          1,
+          now,
+          now,
+        ]
+      );
+      if (isNewLibrary) nextOrder = 1;
+    }
+
+    // 2. 画廊视图（仅在蓝图配置时创建/更新）
+    if (viewsBundle.gallery) {
+      const galRow = existingByType.get('gallery');
+      if (galRow) {
+        this.driver.runSync(
+          'UPDATE library_views SET config_json = ?, updated_at = ? WHERE id = ?',
+          [JSON.stringify(viewsBundle.gallery), now, galRow.id]
+        );
+      } else {
+        this.driver.runSync(
+          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            createId('vw'),
+            libId,
+            '画廊',
+            'gallery',
+            JSON.stringify(viewsBundle.gallery),
+            nextOrder++,
+            0,
+            now,
+            now,
+          ]
+        );
+      }
+    }
+
+    // 3. 日历视图（仅在蓝图配置时创建/更新）
+    if (viewsBundle.calendar) {
+      const calRow = existingByType.get('calendar');
+      if (calRow) {
+        this.driver.runSync(
+          'UPDATE library_views SET config_json = ?, updated_at = ? WHERE id = ?',
+          [JSON.stringify(viewsBundle.calendar), now, calRow.id]
+        );
+      } else {
+        this.driver.runSync(
+          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            createId('vw'),
+            libId,
+            '日历',
+            'calendar',
+            JSON.stringify(viewsBundle.calendar),
+            nextOrder++,
+            0,
+            now,
+            now,
+          ]
+        );
+      }
+    }
+  }
+
+  private ensureStatsViewForLibraryInternal(libSlug: string): void {
+    const libRow = this.driver.getFirstSync<{ id: string }>(
+      'SELECT id FROM libraries WHERE slug = ?',
+      [libSlug]
+    );
+    if (!libRow) return;
+    const existing = this.driver.getFirstSync<{ id: string }>(
+      "SELECT id FROM library_views WHERE library_id = ? AND view_type = 'stats'",
+      [libRow.id]
+    );
+    if (existing) return;
+
+    const maxRow = this.driver.getFirstSync<{ max_order: number | null }>(
+      'SELECT MAX(sort_order) AS max_order FROM library_views WHERE library_id = ?',
+      [libRow.id]
+    );
+    const now = Date.now();
+    this.driver.runSync(
+      `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        createId('vw'),
+        libRow.id,
+        '统计',
+        'stats',
+        '{}',
+        (maxRow?.max_order ?? -1) + 1,
+        0,
+        now,
+        now,
+      ]
+    );
+  }
+
+  private syncAllLibraryRelationsInternal(): void {
+    const now = Date.now();
+    const libs = this.driver.getAllSync<{
+      id: string;
+      slug: string;
+      parent_slug: string | null;
+      fields_json: string;
+    }>('SELECT id, slug, parent_slug, fields_json FROM libraries');
+
+    const slugToId = new Map<string, string>();
+    for (const l of libs) {
+      slugToId.set(l.slug, l.id);
+    }
+
+    this.driver.execSync('DELETE FROM library_relations;');
+
+    for (const lib of libs) {
+      let fields: FieldDef[] = [];
+      try {
+        fields = JSON.parse(lib.fields_json) as FieldDef[];
+      } catch {
+        fields = [];
+      }
+
+      for (const f of fields) {
+        if (f.type !== 'relation' || !f.relationConfig?.targetLibrarySlug) continue;
+        const targetId = slugToId.get(f.relationConfig.targetLibrarySlug);
+        if (!targetId) continue;
+        const relationKind =
+          lib.parent_slug && f.relationConfig.targetLibrarySlug === lib.parent_slug
+            ? 'parent_child'
+            : 'reference';
+        const allowMultiple = f.relationConfig.allowMultiple === false ? 0 : 1;
+        this.driver.runSync(
+          `INSERT OR IGNORE INTO library_relations (id, source_library_id, target_library_id, field_key, relation_kind, allow_multiple, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `lrel_${lib.id}_${f.key}`,
+            lib.id,
+            targetId,
+            f.key,
+            relationKind,
+            allowMultiple,
+            now,
+          ]
+        );
+      }
+    }
+  }
+
+  private buildDefaultConfigForViewType(
+    lib: LibraryRecord,
+    viewType: LibraryViewType
+  ): Record<string, unknown> {
+    const titleKey = lib.views.card.titleFieldKey || lib.fields[0]?.key || '';
+    if (viewType === 'card') {
+      return lib.views.card as unknown as Record<string, unknown>;
+    }
+    if (viewType === 'gallery') {
+      return {
+        titleFieldKey: titleKey,
+        subtitleFieldKey: lib.views.card.subtitleFieldKey,
+        coverImageFieldKey:
+          lib.views.card.coverImageFieldKey || lib.fields.find((f) => f.type === 'image')?.key,
+        badgeFieldKey: lib.views.card.rightBadgeFieldKey,
+        ratingFieldKey: lib.fields.find((f) => f.type === 'rating')?.key,
+      };
+    }
+    if (viewType === 'calendar') {
+      return {
+        dateFieldKey: lib.fields.find((f) => f.type === 'date')?.key || '',
+        titleFieldKey: titleKey,
+        metricFieldKey: lib.views.card.footerMetricKeys[0],
+        tagFieldKey: lib.views.card.rightBadgeFieldKey,
+      };
+    }
+    return {};
+  }
+
+  /**
+   * 原子保存某记录本在独立 library_views 表中的完整按需视图配置（增删、改名、排序）
+   */
+  saveLibraryViews(librarySlug: string, nextViews: LibraryViewInput[]): void {
+    const lib = this.getLibraryBySlug(librarySlug);
+    if (!lib) throw new Error(`记录本不存在: ${librarySlug}`);
+    if (nextViews.length === 0) {
+      throw new Error('每个记录本至少需要保留 1 个视图');
+    }
+
+    const now = Date.now();
+    this.driver.withTransactionSync(() => {
+      const existingById = new Map(lib.viewList.map((v) => [v.id, v]));
+      const existingByType = new Map(lib.viewList.map((v) => [v.viewType, v]));
+
+      this.driver.runSync('DELETE FROM library_views WHERE library_id = ?', [lib.id]);
+
+      const resolvedConfigs = new Map<LibraryViewType, Record<string, unknown>>();
+      nextViews.forEach((v, idx) => {
+        const prev = (v.id ? existingById.get(v.id) : undefined) ?? existingByType.get(v.viewType);
+        const cfg =
+          v.config ??
+          prev?.config ??
+          this.buildDefaultConfigForViewType(lib, v.viewType);
+        if (!resolvedConfigs.has(v.viewType)) {
+          resolvedConfigs.set(v.viewType, cfg);
+        }
+        const id = v.id && existingById.has(v.id) ? v.id : createId('vw');
+        this.driver.runSync(
+          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            id,
+            lib.id,
+            v.name.trim() || (v.viewType === 'card' ? '列表' : v.viewType === 'gallery' ? '画廊' : v.viewType === 'calendar' ? '日历' : '统计'),
+            v.viewType,
+            JSON.stringify(cfg),
+            idx,
+            idx === 0 ? 1 : 0,
+            prev?.createdAt ?? now,
+            now,
+          ]
+        );
+      });
+
+      // 同步回填兼容列 libraries.views_json
+      const syncedBundle: LibraryLayoutBundle = {
+        card: (resolvedConfigs.get('card') as unknown as CardViewConfig) ?? lib.views.card,
+        gallery: resolvedConfigs.has('gallery')
+          ? (resolvedConfigs.get('gallery') as unknown as GalleryViewConfig)
+          : undefined,
+        calendar: resolvedConfigs.has('calendar')
+          ? (resolvedConfigs.get('calendar') as unknown as CalendarViewConfig)
+          : undefined,
+      };
+      this.driver.runSync('UPDATE libraries SET views_json = ?, updated_at = ? WHERE id = ?', [
+        JSON.stringify(syncedBundle),
+        now,
+        lib.id,
+      ]);
+    });
+    this.notify();
+  }
+
+  addLibraryView(
+    librarySlug: string,
+    viewType: LibraryViewType,
+    name?: string,
+    config?: Record<string, unknown>
+  ): string {
+    const lib = this.getLibraryBySlug(librarySlug);
+    if (!lib) throw new Error(`记录本不存在: ${librarySlug}`);
+    const defaultLabel =
+      viewType === 'card'
+        ? '列表'
+        : viewType === 'gallery'
+          ? '画廊'
+          : viewType === 'calendar'
+            ? '日历'
+            : '统计';
+    const nextList: LibraryViewInput[] = [
+      ...lib.viewList.map((v) => ({
+        id: v.id,
+        name: v.name,
+        viewType: v.viewType,
+        config: v.config,
+      })),
+      {
+        name: name?.trim() || defaultLabel,
+        viewType,
+        config: config ?? this.buildDefaultConfigForViewType(lib, viewType),
+      },
+    ];
+    this.saveLibraryViews(librarySlug, nextList);
+    const updated = this.listLibraryViews(librarySlug);
+    return updated[updated.length - 1]?.id ?? '';
+  }
+
+  deleteLibraryView(viewId: string): void {
+    const row = this.driver.getFirstSync<{ library_id: string }>(
+      'SELECT library_id FROM library_views WHERE id = ?',
+      [viewId]
+    );
+    if (!row) return;
+    const lib = this.getLibraryById(row.library_id);
+    if (!lib) return;
+    if (lib.viewList.length <= 1) {
+      throw new Error('至少需要保留 1 个视图');
+    }
+    const remaining: LibraryViewInput[] = lib.viewList
+      .filter((v) => v.id !== viewId)
+      .map((v) => ({
+        id: v.id,
+        name: v.name,
+        viewType: v.viewType,
+        config: v.config,
+      }));
+    this.saveLibraryViews(lib.slug, remaining);
   }
 
   getLibraryBySlug(slug: string): LibraryRecord | null {
@@ -493,6 +1047,8 @@ export class OmniRepository {
     }
 
     compileLibrarySqlView(this.driver, id, bp.slug, normalizedFields);
+    this.syncLibraryViewsFromBlueprintInternal(id, bp.views, !existing);
+    this.syncAllLibraryRelationsInternal();
     this.invalidateLibrariesCache();
     return id;
   }
@@ -513,6 +1069,10 @@ export class OmniRepository {
       if (rawLib) {
         const libId = String(rawLib.id);
         const libName = String(rawLib.name ?? slug);
+        const libViews = this.driver.getAllSync<Record<string, unknown>>(
+          'SELECT * FROM library_views WHERE library_id = ? ORDER BY sort_order ASC',
+          [libId]
+        );
         const libEntries = this.driver.getAllSync<Record<string, unknown>>(
           'SELECT * FROM entries WHERE library_id = ? ORDER BY created_at ASC',
           [libId]
@@ -541,6 +1101,7 @@ export class OmniRepository {
         this.saveSnapshotInternal(`删除记录本「${libName}」`, {
           kind: 'library_deleted',
           library: rawLib,
+          libraryViews: libViews,
           entries: libEntries,
           relations: libRelations,
           widgets: matchedWidgets,
@@ -562,6 +1123,7 @@ export class OmniRepository {
 
       dropLibrarySqlView(this.driver, slug);
       this.driver.runSync('DELETE FROM libraries WHERE slug = ?', [slug]);
+      this.syncAllLibraryRelationsInternal();
     });
     this.notify();
   }
@@ -1520,6 +2082,13 @@ export class OmniRepository {
         Date.now(),
       ]
     );
+    // 图表落盘后，自动为相关记录本在 library_views 表中按需点亮「统计」视图
+    const allLibSlugs = this.driver.getAllSync<{ slug: string }>('SELECT slug FROM libraries');
+    for (const row of allLibSlugs) {
+      if (row.slug === librarySlug || sqlReferencesLibraryView(w.readonlySql, row.slug)) {
+        this.ensureStatsViewForLibraryInternal(row.slug);
+      }
+    }
     return id;
   }
 
@@ -1914,6 +2483,17 @@ export class OmniRepository {
           this.insertRawLibrary(l);
           const fields = JSON.parse(String(l.fields_json)) as FieldDef[];
           compileLibrarySqlView(this.driver, String(l.id), String(l.slug), fields);
+          if (payload.libraryViews && payload.libraryViews.length > 0) {
+            for (const lv of payload.libraryViews) {
+              this.insertRawLibraryView(lv);
+            }
+          } else {
+            this.syncLibraryViewsFromBlueprintInternal(
+              String(l.id),
+              JSON.parse(String(l.views_json)) as LibraryLayoutBundle,
+              true
+            );
+          }
           for (const e of payload.entries) {
             this.insertRawEntry(e);
           }
@@ -1929,6 +2509,7 @@ export class OmniRepository {
               );
             }
           }
+          this.syncAllLibraryRelationsInternal();
         } else if (payload.kind === 'architect_plan') {
           for (const slug of payload.createdLibrarySlugs) {
             dropLibrarySqlView(this.driver, slug);
@@ -1974,11 +2555,17 @@ export class OmniRepository {
             }
             const fields = JSON.parse(String(prev.fields_json)) as FieldDef[];
             compileLibrarySqlView(this.driver, String(prev.id), String(prev.slug), fields);
+            this.syncLibraryViewsFromBlueprintInternal(
+              String(prev.id),
+              JSON.parse(String(prev.views_json)) as LibraryLayoutBundle,
+              !exists
+            );
           }
 
           for (const wid of payload.createdWidgetIds) {
             this.driver.runSync('DELETE FROM dashboard_widgets WHERE id = ?', [wid]);
           }
+          this.syncAllLibraryRelationsInternal();
         }
       } else {
         // 兼容旧版全量备份快照
@@ -2081,14 +2668,38 @@ export class OmniRepository {
     );
   }
 
+  private insertRawLibraryView(lv: Record<string, unknown>): void {
+    this.driver.runSync(
+      `INSERT OR REPLACE INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        String(lv.id),
+        String(lv.library_id),
+        String(lv.name ?? '列表'),
+        String(lv.view_type ?? 'card'),
+        String(lv.config_json ?? '{}'),
+        Number(lv.sort_order ?? 0),
+        Number(lv.is_default ?? 0),
+        Number(lv.created_at ?? Date.now()),
+        Number(lv.updated_at ?? Date.now()),
+      ]
+    );
+  }
+
   /**
-   * 导出/导入完整纯单机离线快照包
+   * 导出/导入完整纯单机离线快照包（含独立的 library_views 与 library_relations 表）
    */
   exportBackupBundle(): FullBackupBundle {
     return {
-      version: 1,
+      version: 2,
       exportedAt: new Date().toISOString(),
       libraries: this.driver.getAllSync('SELECT * FROM libraries ORDER BY sort_order ASC'),
+      libraryViews: this.driver.getAllSync(
+        'SELECT * FROM library_views ORDER BY library_id ASC, sort_order ASC'
+      ),
+      libraryRelations: this.driver.getAllSync(
+        'SELECT * FROM library_relations ORDER BY created_at ASC'
+      ),
       entries: this.driver.getAllSync('SELECT * FROM entries ORDER BY created_at ASC'),
       relations: this.driver.getAllSync('SELECT * FROM entry_relations'),
       widgets: this.driver.getAllSync('SELECT * FROM dashboard_widgets ORDER BY sort_order ASC'),
@@ -2103,11 +2714,32 @@ export class OmniRepository {
 
     this.driver.execSync('DELETE FROM entry_relations;');
     this.driver.execSync('DELETE FROM entries;');
+    this.driver.execSync('DELETE FROM library_views;');
+    this.driver.execSync('DELETE FROM library_relations;');
     this.driver.execSync('DELETE FROM dashboard_widgets;');
     this.driver.execSync('DELETE FROM libraries;');
 
     for (const l of bundle.libraries) {
       this.insertRawLibrary(l);
+    }
+
+    if (bundle.libraryViews && bundle.libraryViews.length > 0) {
+      for (const lv of bundle.libraryViews) {
+        this.insertRawLibraryView(lv);
+      }
+    } else {
+      // 兼容旧版 v1 备份：自动由 views_json 生成 library_views 行
+      for (const l of bundle.libraries) {
+        try {
+          this.syncLibraryViewsFromBlueprintInternal(
+            String(l.id),
+            JSON.parse(String(l.views_json)) as LibraryLayoutBundle,
+            true
+          );
+        } catch {
+          // ignore malformed legacy views_json
+        }
+      }
     }
 
     for (const e of bundle.entries) {
@@ -2133,6 +2765,22 @@ export class OmniRepository {
       this.insertRawWidget(w);
     }
 
+    // 兼容旧版 v1 备份时若没有自带 stats 视图，则根据导入的图表补齐
+    if (!bundle.libraryViews || bundle.libraryViews.length === 0) {
+      for (const l of bundle.libraries) {
+        const slug = String(l.slug);
+        const hasWidget = bundle.widgets.some(
+          (w) =>
+            w.library_slug === slug ||
+            sqlReferencesLibraryView(String(w.readonly_sql ?? ''), slug)
+        );
+        if (hasWidget) {
+          this.ensureStatsViewForLibraryInternal(slug);
+        }
+      }
+    }
+
+    this.syncAllLibraryRelationsInternal();
     this.ensureViewsCompiled();
   }
 

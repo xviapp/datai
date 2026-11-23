@@ -31,18 +31,18 @@ import {
 } from '@/components/ui/SlidingSegmentedBar';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
-import type { HydratedEntry } from '@/db/repository';
+import type { HydratedEntry, LibraryViewRecord } from '@/db/repository';
+import type { LibraryViewType } from '@/schema/view-dsl';
 import { useSafeNavigation } from '@/utils/navigation';
 
-type ViewTab = 'card' | 'gallery' | 'calendar' | 'stats';
 type SortMode = 'updated' | 'date_desc' | 'metric_desc' | 'title_asc';
 
-const VIEW_TABS: Array<SegmentedTabOption & { key: ViewTab }> = [
-  { key: 'card', label: '列表', icon: 'list' },
-  { key: 'gallery', label: '画廊', icon: 'grid' },
-  { key: 'calendar', label: '日历', icon: 'calendar' },
-  { key: 'stats', label: '统计', icon: 'pie-chart' },
-];
+const VIEW_TYPE_ICONS: Record<LibraryViewType, React.ComponentProps<typeof Feather>['name']> = {
+  card: 'list',
+  gallery: 'grid',
+  calendar: 'calendar',
+  stats: 'pie-chart',
+};
 
 export default function LibraryWorkspaceScreen() {
   const { slug } = useLocalSearchParams<{ slug: string }>();
@@ -67,12 +67,32 @@ export default function LibraryWorkspaceScreen() {
   const programmaticScrollRef = useRef(false);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const activeTab: ViewTab = VIEW_TABS[activeTabIndex]?.key ?? 'card';
   const effectiveWidth = pagerWidth > 0 ? pagerWidth : screenWidth;
 
   const library = useMemo(
     () => (!repo || revision < 0 || !slugStr ? null : repo.getLibraryBySlug(slugStr)),
     [repo, revision, slugStr]
+  );
+
+  // 直接由独立 library_views 表驱动本记录本按需展现的视图列表
+  const activeViews: LibraryViewRecord[] = useMemo(
+    () => library?.viewList ?? [],
+    [library]
+  );
+
+  const safeTabIndex = Math.min(activeTabIndex, Math.max(0, activeViews.length - 1));
+  const currentView = activeViews[safeTabIndex];
+  const hasMultipleViews = activeViews.length > 1;
+  const statsViewIdx = activeViews.findIndex((v) => v.viewType === 'stats');
+
+  const segmentedItems: SegmentedTabOption[] = useMemo(
+    () =>
+      activeViews.map((v) => ({
+        key: v.id,
+        label: v.name,
+        icon: VIEW_TYPE_ICONS[v.viewType] ?? 'list',
+      })),
+    [activeViews]
   );
 
   const rawEntries = useMemo(
@@ -83,7 +103,6 @@ export default function LibraryWorkspaceScreen() {
     [repo, revision, library, searchText]
   );
 
-  // 自动提取该库主筛选单选字段与默认排序依据字段
   const primaryFilterField = useMemo(() => {
     if (!library) return null;
     const badgeKey = library.views.card.rightBadgeFieldKey;
@@ -105,7 +124,11 @@ export default function LibraryWorkspaceScreen() {
   const primaryMetricField = useMemo(
     () =>
       library?.fields.find(
-        (f) => f.type === 'currency' || f.type === 'number' || f.type === 'rating' || f.type === 'formula'
+        (f) =>
+          f.type === 'currency' ||
+          f.type === 'number' ||
+          f.type === 'rating' ||
+          f.type === 'formula'
       ) ?? null,
     [library]
   );
@@ -147,7 +170,14 @@ export default function LibraryWorkspaceScreen() {
       copy.sort((a, b) => a.titleSummary.localeCompare(b.titleSummary, 'zh-CN'));
     }
     return copy;
-  }, [rawEntries, primaryFilterField, selectedFilterVal, activeSortInfo.id, primaryDateField, primaryMetricField]);
+  }, [
+    rawEntries,
+    primaryFilterField,
+    selectedFilterVal,
+    activeSortInfo.id,
+    primaryDateField,
+    primaryMetricField,
+  ]);
 
   const rootParent = useMemo(
     () =>
@@ -169,28 +199,31 @@ export default function LibraryWorkspaceScreen() {
     [rootParent, childLibraries]
   );
 
-  // 滑到日历或统计页时再按需查询该库统计图表，保证进入列表页首帧丝滑
+  // 仅当该记录本配置了统计视图且当前处于或邻近统计页时才按需查询图表
+  const shouldLoadStats =
+    statsViewIdx >= 0 && Math.abs(safeTabIndex - statsViewIdx) <= 1;
   const designedStatsWidgets = useMemo(
     () =>
-      !repo || revision < 0 || !library || activeTabIndex < 2
+      !repo || revision < 0 || !library || !shouldLoadStats
         ? []
         : repo.listWidgetsForLibrary(library.slug),
-    [repo, revision, library, activeTabIndex]
+    [repo, revision, library, shouldLoadStats]
   );
 
   useEffect(() => {
+    if (!hasMultipleViews) return;
     const listenerId = pagerScrollX.addListener(({ value }) => {
       if (programmaticScrollRef.current) return;
       const nextIdx = Math.max(
         0,
-        Math.min(VIEW_TABS.length - 1, Math.round(value / Math.max(1, effectiveWidth)))
+        Math.min(activeViews.length - 1, Math.round(value / Math.max(1, effectiveWidth)))
       );
       setActiveTabIndex((prev) => (prev === nextIdx ? prev : nextIdx));
     });
     return () => {
       pagerScrollX.removeListener(listenerId);
     };
-  }, [pagerScrollX, effectiveWidth]);
+  }, [hasMultipleViews, pagerScrollX, activeViews.length, effectiveWidth]);
 
   useEffect(() => {
     return () => {
@@ -221,11 +254,11 @@ export default function LibraryWorkspaceScreen() {
       const offsetX = e.nativeEvent.contentOffset.x;
       const nextIdx = Math.max(
         0,
-        Math.min(VIEW_TABS.length - 1, Math.round(offsetX / Math.max(1, effectiveWidth)))
+        Math.min(activeViews.length - 1, Math.round(offsetX / Math.max(1, effectiveWidth)))
       );
       setActiveTabIndex(nextIdx);
     },
-    [effectiveWidth]
+    [activeViews.length, effectiveWidth]
   );
 
   const handleSwitchFamilyLibrary = useCallback(
@@ -284,6 +317,7 @@ export default function LibraryWorkspaceScreen() {
   const tone = ToneMap[library.color] ?? ToneMap.teal;
   const showFilterSortBar =
     Boolean(primaryFilterField?.options?.length) || rawEntries.length > 1;
+  const isCurrentStats = currentView?.viewType === 'stats';
 
   const renderFilterSortBar = () => {
     if (!showFilterSortBar) return null;
@@ -348,7 +382,10 @@ export default function LibraryWorkspaceScreen() {
             onPress={cycleSortMode}
             style={({ pressed }) => [
               styles.sortPillBtn,
-              activeSortInfo.id !== 'updated' && { borderColor: tone.solid, backgroundColor: tone.soft },
+              activeSortInfo.id !== 'updated' && {
+                borderColor: tone.solid,
+                backgroundColor: tone.soft,
+              },
               pressed && styles.pressedScale,
             ]}
           >
@@ -369,6 +406,145 @@ export default function LibraryWorkspaceScreen() {
           </Pressable>
         ) : null}
       </View>
+    );
+  };
+
+  const renderViewPage = (view: LibraryViewRecord, viewIndex: number, fullWidth?: number) => {
+    const pageStyle = fullWidth ? { width: fullWidth } : styles.singlePage;
+
+    if (view.viewType === 'card') {
+      return (
+        <FlatList<HydratedEntry>
+          key={view.id}
+          data={entries}
+          keyExtractor={(item) => item.id}
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          initialNumToRender={12}
+          maxToRenderPerBatch={10}
+          windowSize={7}
+          style={pageStyle}
+          contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
+          ListHeaderComponent={renderFilterSortBar}
+          ListEmptyComponent={
+            <DynamicCardListView
+              library={library}
+              entries={[]}
+              onSelectEntry={(id) => nav.push(`/entry/${id}`)}
+            />
+          }
+          renderItem={({ item }) => (
+            <DynamicCardListView
+              library={library}
+              entries={[item]}
+              onSelectEntry={(id) => nav.push(`/entry/${id}`)}
+              onSelectEntryRelations={(id) =>
+                nav.push({ pathname: '/entry/[id]', params: { id, tab: 'relations' } })
+              }
+            />
+          )}
+        />
+      );
+    }
+
+    if (view.viewType === 'gallery') {
+      return (
+        <ScrollView
+          key={view.id}
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          style={pageStyle}
+          contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
+        >
+          {renderFilterSortBar()}
+          <DynamicGalleryView
+            library={library}
+            entries={entries}
+            onSelectEntry={(id) => nav.push(`/entry/${id}`)}
+          />
+        </ScrollView>
+      );
+    }
+
+    if (view.viewType === 'calendar') {
+      return (
+        <ScrollView
+          key={view.id}
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          style={pageStyle}
+          contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
+        >
+          <DynamicCalendarView
+            library={library}
+            entries={entries}
+            onSelectEntry={(id) => nav.push(`/entry/${id}`)}
+          />
+        </ScrollView>
+      );
+    }
+
+    return (
+      <ScrollView
+        key={view.id}
+        nestedScrollEnabled
+        keyboardShouldPersistTaps="handled"
+        style={pageStyle}
+        contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
+      >
+        {designedStatsWidgets.length === 0 ? (
+          <View style={styles.emptyStatsCard}>
+            <View style={[styles.emptyStatsIcon, { backgroundColor: tone.soft }]}>
+              <Feather name="bar-chart-2" size={20} color={tone.solid} />
+            </View>
+            <Text style={styles.emptyStatsDesc}>
+              告诉助手你想看的指标或图表，生成后展示在这里
+            </Text>
+            <Pressable
+              onPress={() => openOmniCapture(library.slug, 'text', undefined, 'stats')}
+              style={({ pressed }) => [
+                styles.emptyStatsBtn,
+                { backgroundColor: tone.solid },
+                pressed && styles.pressedScale,
+              ]}
+            >
+              <Text style={styles.emptyStatsBtnText}>去定制统计</Text>
+            </Pressable>
+          </View>
+        ) : (
+          <View style={styles.statsWrap}>
+            {designedStatsWidgets.some((w) => w.chartType === 'kpi_number') ? (
+              <View style={styles.kpiRow}>
+                {designedStatsWidgets
+                  .filter((w) => w.chartType === 'kpi_number')
+                  .map((w) => (
+                    <SqlWidgetCard
+                      key={w.id}
+                      widget={w}
+                      compact
+                      paused={safeTabIndex !== viewIndex}
+                      pinnedOverview={w.pinnedOverview}
+                      onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
+                      onDelete={(id) => repo?.deleteDashboardWidget(id)}
+                    />
+                  ))}
+              </View>
+            ) : null}
+            {designedStatsWidgets
+              .filter((w) => w.chartType !== 'kpi_number')
+              .map((w) => (
+                <SqlWidgetCard
+                  key={w.id}
+                  widget={w}
+                  paused={safeTabIndex !== viewIndex}
+                  pinnedOverview={w.pinnedOverview}
+                  onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
+                  onDelete={(id) => repo?.deleteDashboardWidget(id)}
+                />
+              ))}
+          </View>
+        )}
+      </ScrollView>
     );
   };
 
@@ -439,7 +615,6 @@ export default function LibraryWorkspaceScreen() {
           </Pressable>
         </View>
 
-        {/* 按需展开的搜索栏，平时隐藏释放列表空间 */}
         {searchOpen ? (
           <View style={styles.topSearchWrap}>
             <View style={styles.searchBox}>
@@ -462,218 +637,107 @@ export default function LibraryWorkspaceScreen() {
         ) : null}
       </View>
 
-      {/* 常驻吸顶：主从库胶囊 + 跟手滑动分段条 */}
-      <View style={styles.stickyControls}>
-        {familyLibraries.length > 1 ? (
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.familyBar}
-          >
-            {familyLibraries.map((item, idx) => {
-              const active = item.slug === library.slug;
-              const itemTone = ToneMap[item.color] ?? ToneMap.teal;
-              return (
-                <Pressable
-                  key={item.id}
-                  onPress={() => {
-                    if (!active) {
-                      handleSwitchFamilyLibrary(item.slug);
-                    }
-                  }}
-                  style={({ pressed }) => [
-                    styles.familyChip,
-                    active && {
-                      backgroundColor: itemTone.soft,
-                      borderColor: itemTone.solid,
-                    },
-                    pressed && !active && styles.pressedSoft,
-                  ]}
-                >
-                  <Text
-                    style={[
-                      styles.familyChipText,
-                      active && { color: itemTone.ink, fontWeight: '800' },
+      {/* 按需显示顶部吸顶区：有主从库或多视图时才渲染，单视图记录本零多余占位 */}
+      {familyLibraries.length > 1 || hasMultipleViews ? (
+        <View style={styles.stickyControls}>
+          {familyLibraries.length > 1 ? (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.familyBar}
+            >
+              {familyLibraries.map((item, idx) => {
+                const active = item.slug === library.slug;
+                const itemTone = ToneMap[item.color] ?? ToneMap.teal;
+                return (
+                  <Pressable
+                    key={item.id}
+                    onPress={() => {
+                      if (!active) {
+                        handleSwitchFamilyLibrary(item.slug);
+                      }
+                    }}
+                    style={({ pressed }) => [
+                      styles.familyChip,
+                      active && {
+                        backgroundColor: itemTone.soft,
+                        borderColor: itemTone.solid,
+                      },
+                      pressed && !active && styles.pressedSoft,
                     ]}
                   >
-                    {idx > 0 ? '↳ ' : ''}
-                    {item.icon} {item.name} · {item.entryCount}
-                  </Text>
-                </Pressable>
-              );
-            })}
-            {rootParent ? (
-              <Pressable
-                onPress={() => setCreateSubForParent(rootParent.slug)}
-                style={({ pressed }) => [styles.familyAddChip, pressed && styles.pressedSoft]}
-              >
-                <Feather name="plus" size={13} color={Palette.inkSecondary} />
-                <Text style={styles.familyAddText}>附属表</Text>
-              </Pressable>
-            ) : null}
-          </ScrollView>
-        ) : null}
-
-        <SlidingSegmentedBar
-          items={VIEW_TABS}
-          activeIndex={activeTabIndex}
-          onSelect={handleSelectViewTab}
-          activeColor={tone.solid}
-          scrollX={pagerScrollX}
-          pageWidth={effectiveWidth}
-        />
-      </View>
-
-      {/* 左右滑动切换 4 个视图页（每页独立垂直滚动与滚动位置记忆） */}
-      <ContentTransitionView transitionKey={library.slug} style={styles.pagerWrap}>
-        <Animated.ScrollView
-          ref={pagerRef}
-          horizontal
-          pagingEnabled
-          nestedScrollEnabled
-          showsHorizontalScrollIndicator={false}
-          scrollEventThrottle={16}
-          onLayout={(e) => {
-            const w = e.nativeEvent.layout.width;
-            if (w > 0 && Math.abs(w - pagerWidth) > 0.5) {
-              setPagerWidth(w);
-            }
-          }}
-          onScroll={onPagerScroll}
-          onMomentumScrollEnd={handlePagerMomentumEnd}
-          style={styles.pager}
-        >
-          {/* Page 0：列表（FlatList 虚拟化渲染，长列表流畅不卡顿） */}
-          <FlatList<HydratedEntry>
-            data={entries}
-            keyExtractor={(item) => item.id}
-            nestedScrollEnabled
-            keyboardShouldPersistTaps="handled"
-            initialNumToRender={12}
-            maxToRenderPerBatch={10}
-            windowSize={7}
-            style={{ width: effectiveWidth }}
-            contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
-            ListHeaderComponent={renderFilterSortBar}
-            ListEmptyComponent={
-              <DynamicCardListView
-                library={library}
-                entries={[]}
-                onSelectEntry={(id) => nav.push(`/entry/${id}`)}
-              />
-            }
-            renderItem={({ item }) => (
-              <DynamicCardListView
-                library={library}
-                entries={[item]}
-                onSelectEntry={(id) => nav.push(`/entry/${id}`)}
-                onSelectEntryRelations={(id) =>
-                  nav.push({ pathname: '/entry/[id]', params: { id, tab: 'relations' } })
-                }
-              />
-            )}
-          />
-
-          {/* Page 1：画廊 */}
-          <ScrollView
-            nestedScrollEnabled
-            keyboardShouldPersistTaps="handled"
-            style={{ width: effectiveWidth }}
-            contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
-          >
-            {renderFilterSortBar()}
-            <DynamicGalleryView
-              library={library}
-              entries={entries}
-              onSelectEntry={(id) => nav.push(`/entry/${id}`)}
-            />
-          </ScrollView>
-
-          {/* Page 2：日历 */}
-          <ScrollView
-            nestedScrollEnabled
-            keyboardShouldPersistTaps="handled"
-            style={{ width: effectiveWidth }}
-            contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
-          >
-            <DynamicCalendarView
-              library={library}
-              entries={entries}
-              onSelectEntry={(id) => nav.push(`/entry/${id}`)}
-            />
-          </ScrollView>
-
-          {/* Page 3：统计 */}
-          <ScrollView
-            nestedScrollEnabled
-            keyboardShouldPersistTaps="handled"
-            style={{ width: effectiveWidth }}
-            contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
-          >
-            {designedStatsWidgets.length === 0 ? (
-              <View style={styles.emptyStatsCard}>
-                <View style={[styles.emptyStatsIcon, { backgroundColor: tone.soft }]}>
-                  <Feather name="bar-chart-2" size={20} color={tone.solid} />
-                </View>
-                <Text style={styles.emptyStatsDesc}>
-                  告诉助手你想看的指标或图表，生成后展示在这里
-                </Text>
+                    <Text
+                      style={[
+                        styles.familyChipText,
+                        active && { color: itemTone.ink, fontWeight: '800' },
+                      ]}
+                    >
+                      {idx > 0 ? '↳ ' : ''}
+                      {item.icon} {item.name} · {item.entryCount}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+              {rootParent ? (
                 <Pressable
-                  onPress={() => openOmniCapture(library.slug, 'text', undefined, 'stats')}
-                  style={({ pressed }) => [
-                    styles.emptyStatsBtn,
-                    { backgroundColor: tone.solid },
-                    pressed && styles.pressedScale,
-                  ]}
+                  onPress={() => setCreateSubForParent(rootParent.slug)}
+                  style={({ pressed }) => [styles.familyAddChip, pressed && styles.pressedSoft]}
                 >
-                  <Text style={styles.emptyStatsBtnText}>去定制统计</Text>
+                  <Feather name="plus" size={13} color={Palette.inkSecondary} />
+                  <Text style={styles.familyAddText}>附属表</Text>
                 </Pressable>
-              </View>
-            ) : (
-              <View style={styles.statsWrap}>
-                {designedStatsWidgets.some((w) => w.chartType === 'kpi_number') ? (
-                  <View style={styles.kpiRow}>
-                    {designedStatsWidgets
-                      .filter((w) => w.chartType === 'kpi_number')
-                      .map((w) => (
-                        <SqlWidgetCard
-                          key={w.id}
-                          widget={w}
-                          compact
-                          paused={activeTabIndex !== 3}
-                          pinnedOverview={w.pinnedOverview}
-                          onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
-                          onDelete={(id) => repo?.deleteDashboardWidget(id)}
-                        />
-                      ))}
-                  </View>
-                ) : null}
-                {designedStatsWidgets
-                  .filter((w) => w.chartType !== 'kpi_number')
-                  .map((w) => (
-                    <SqlWidgetCard
-                      key={w.id}
-                      widget={w}
-                      paused={activeTabIndex !== 3}
-                      pinnedOverview={w.pinnedOverview}
-                      onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
-                      onDelete={(id) => repo?.deleteDashboardWidget(id)}
-                    />
-                  ))}
-              </View>
-            )}
-          </ScrollView>
-        </Animated.ScrollView>
+              ) : null}
+            </ScrollView>
+          ) : null}
+
+          {hasMultipleViews ? (
+            <SlidingSegmentedBar
+              items={segmentedItems}
+              activeIndex={safeTabIndex}
+              onSelect={handleSelectViewTab}
+              activeColor={tone.solid}
+              scrollX={pagerScrollX}
+              pageWidth={effectiveWidth}
+            />
+          ) : null}
+        </View>
+      ) : null}
+
+      {/* 内容区：单视图直接呈现；多视图支持跟手左右滑动 Pager */}
+      <ContentTransitionView transitionKey={library.slug} style={styles.pagerWrap}>
+        {hasMultipleViews ? (
+          <Animated.ScrollView
+            ref={pagerRef}
+            horizontal
+            pagingEnabled
+            nestedScrollEnabled
+            showsHorizontalScrollIndicator={false}
+            scrollEventThrottle={16}
+            onLayout={(e) => {
+              const w = e.nativeEvent.layout.width;
+              if (w > 0 && Math.abs(w - pagerWidth) > 0.5) {
+                setPagerWidth(w);
+              }
+            }}
+            onScroll={onPagerScroll}
+            onMomentumScrollEnd={handlePagerMomentumEnd}
+            style={styles.pager}
+          >
+            {activeViews.map((view, idx) => renderViewPage(view, idx, effectiveWidth))}
+          </Animated.ScrollView>
+        ) : currentView ? (
+          renderViewPage(currentView, 0)
+        ) : null}
       </ContentTransitionView>
 
-      {/* 右下角场景化助手按钮（统计 Tab 直达数据分析师，其余视图进入本库助理） */}
+      {/* 右下角场景化助手按钮 */}
       <Pressable
-        accessibilityLabel={activeTab === 'stats' ? '针对本库问数据或定制图表' : '本库随手说与智能助手'}
+        accessibilityLabel={isCurrentStats ? '针对本库问数据或定制图表' : '本库随手说与智能助手'}
         onPress={() =>
-          openOmniCapture(library.slug, 'text', undefined, activeTab === 'stats' ? 'stats' : 'library')
+          openOmniCapture(library.slug, 'text', undefined, isCurrentStats ? 'stats' : 'library')
         }
         onLongPress={() =>
-          openOmniCapture(library.slug, 'voice', undefined, activeTab === 'stats' ? 'stats' : 'library')
+          openOmniCapture(library.slug, 'voice', undefined, isCurrentStats ? 'stats' : 'library')
         }
         style={({ pressed }) => [
           styles.fabBtn,
@@ -682,8 +746,8 @@ export default function LibraryWorkspaceScreen() {
         ]}
       >
         <Feather
-          name={activeTab === 'stats' ? 'bar-chart-2' : 'message-circle'}
-          size={activeTab === 'stats' ? 23 : 24}
+          name={isCurrentStats ? 'bar-chart-2' : 'message-circle'}
+          size={isCurrentStats ? 23 : 24}
           color={Palette.inkInverse}
         />
       </Pressable>
@@ -775,12 +839,15 @@ const styles = StyleSheet.create({
   pager: {
     flex: 1,
   },
+  singlePage: {
+    flex: 1,
+  },
   pageContent: {
     width: '100%',
     maxWidth: 880,
     alignSelf: 'center',
     paddingHorizontal: 16,
-    paddingTop: 6,
+    paddingTop: 8,
     gap: 10,
   },
   filterSortRow: {

@@ -1,6 +1,6 @@
-import type { SyncSqlDriver } from './types';
+import { sqlReferencesLibraryView, type SyncSqlDriver } from './types';
 
-export const LATEST_SCHEMA_VERSION = 3;
+export const LATEST_SCHEMA_VERSION = 4;
 export const MAX_AI_SNAPSHOTS = 20;
 
 export const CORE_MIGRATION_SQL = `
@@ -19,6 +19,38 @@ CREATE TABLE IF NOT EXISTS libraries (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS library_views (
+  id TEXT PRIMARY KEY NOT NULL,
+  library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  view_type TEXT NOT NULL,
+  config_json TEXT NOT NULL DEFAULT '{}',
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  is_default INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_library_views_library
+  ON library_views(library_id, sort_order ASC);
+
+CREATE TABLE IF NOT EXISTS library_relations (
+  id TEXT PRIMARY KEY NOT NULL,
+  source_library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  target_library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  field_key TEXT NOT NULL,
+  relation_kind TEXT NOT NULL DEFAULT 'reference',
+  allow_multiple INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  UNIQUE(source_library_id, field_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_library_relations_source
+  ON library_relations(source_library_id);
+
+CREATE INDEX IF NOT EXISTS idx_library_relations_target
+  ON library_relations(target_library_id);
 
 CREATE TABLE IF NOT EXISTS entries (
   id TEXT PRIMARY KEY NOT NULL,
@@ -81,6 +113,146 @@ CREATE TABLE IF NOT EXISTS ai_snapshots (
 function getUserVersion(driver: SyncSqlDriver): number {
   const row = driver.getFirstSync<{ user_version: number }>('PRAGMA user_version');
   return Number(row?.user_version ?? 0);
+}
+
+function backfillViewsAndRelationsV4(driver: SyncSqlDriver): void {
+  const now = Date.now();
+  const libs = driver.getAllSync<{
+    id: string;
+    slug: string;
+    parent_slug: string | null;
+    fields_json: string;
+    views_json: string;
+  }>('SELECT id, slug, parent_slug, fields_json, views_json FROM libraries');
+
+  const widgets = driver.getAllSync<{ library_slug: string | null; readonly_sql: string }>(
+    'SELECT library_slug, readonly_sql FROM dashboard_widgets'
+  );
+
+  const slugToId = new Map<string, string>();
+  for (const lib of libs) {
+    slugToId.set(lib.slug, lib.id);
+  }
+
+  for (const lib of libs) {
+    // 1. 回填 library_views（仅在该库还没有视图记录时）
+    const existingViewCount = driver.getFirstSync<{ cnt: number }>(
+      'SELECT COUNT(*) AS cnt FROM library_views WHERE library_id = ?',
+      [lib.id]
+    );
+    if (!existingViewCount || existingViewCount.cnt === 0) {
+      let parsedViews: {
+        card?: Record<string, unknown>;
+        gallery?: Record<string, unknown>;
+        calendar?: Record<string, unknown>;
+      } = {};
+      try {
+        parsedViews = JSON.parse(lib.views_json);
+      } catch {
+        parsedViews = {};
+      }
+
+      let order = 0;
+      driver.runSync(
+        `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          `vw_${lib.id}_card`,
+          lib.id,
+          '列表',
+          'card',
+          JSON.stringify(parsedViews.card ?? {}),
+          order++,
+          1,
+          now,
+          now,
+        ]
+      );
+
+      if (parsedViews.gallery) {
+        driver.runSync(
+          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `vw_${lib.id}_gallery`,
+            lib.id,
+            '画廊',
+            'gallery',
+            JSON.stringify(parsedViews.gallery),
+            order++,
+            0,
+            now,
+            now,
+          ]
+        );
+      }
+
+      if (parsedViews.calendar) {
+        driver.runSync(
+          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `vw_${lib.id}_calendar`,
+            lib.id,
+            '日历',
+            'calendar',
+            JSON.stringify(parsedViews.calendar),
+            order++,
+            0,
+            now,
+            now,
+          ]
+        );
+      }
+
+      const hasWidgets = widgets.some(
+        (w) => w.library_slug === lib.slug || sqlReferencesLibraryView(w.readonly_sql, lib.slug)
+      );
+      if (hasWidgets) {
+        driver.runSync(
+          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [`vw_${lib.id}_stats`, lib.id, '统计', 'stats', '{}', order++, 0, now, now]
+        );
+      }
+    }
+
+    // 2. 回填 library_relations（表级关联关系）
+    let parsedFields: Array<{
+      key?: string;
+      type?: string;
+      relationConfig?: { targetLibrarySlug?: string; allowMultiple?: boolean };
+    }> = [];
+    try {
+      parsedFields = JSON.parse(lib.fields_json);
+    } catch {
+      parsedFields = [];
+    }
+
+    for (const f of parsedFields) {
+      if (f.type !== 'relation' || !f.key || !f.relationConfig?.targetLibrarySlug) continue;
+      const targetId = slugToId.get(f.relationConfig.targetLibrarySlug);
+      if (!targetId) continue;
+      const relationKind =
+        lib.parent_slug && f.relationConfig.targetLibrarySlug === lib.parent_slug
+          ? 'parent_child'
+          : 'reference';
+      const allowMultiple = f.relationConfig.allowMultiple === false ? 0 : 1;
+      driver.runSync(
+        `INSERT OR IGNORE INTO library_relations (id, source_library_id, target_library_id, field_key, relation_kind, allow_multiple, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          `lrel_${lib.id}_${f.key}`,
+          lib.id,
+          targetId,
+          f.key,
+          relationKind,
+          allowMultiple,
+          now,
+        ]
+      );
+    }
+  }
 }
 
 /**
@@ -155,6 +327,13 @@ export function runCoreMigrations(driver: SyncSqlDriver): void {
         );
       }
 
+      driver.execSync('PRAGMA user_version = 3;');
+      version = 3;
+    }
+
+    if (version < 4) {
+      // v4: 数据/表现/关系解耦 — 将存量视图与表间关系迁入独立的 library_views 与 library_relations 表
+      backfillViewsAndRelationsV4(driver);
       driver.execSync(`PRAGMA user_version = ${LATEST_SCHEMA_VERSION};`);
     }
   });

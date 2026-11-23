@@ -16,9 +16,9 @@ import { runArchitectAgent } from '@/ai/agents';
 import { BottomSheetModal } from '@/components/ui/BottomSheetModal';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
-import type { LibraryRecord } from '@/db/repository';
+import type { LibraryRecord, LibraryViewInput } from '@/db/repository';
 import type { FieldDef, FieldType } from '@/schema/field-defs';
-import type { AccentTone, LibraryBlueprint } from '@/schema/view-dsl';
+import type { AccentTone, LibraryBlueprint, LibraryViewType } from '@/schema/view-dsl';
 
 interface SchemaEditorModalProps {
   visible: boolean;
@@ -88,6 +88,18 @@ const CURATED_EMOJIS = [
   '🛍️', '📝', '💡', '🎯', '🏠', '🐾',
 ];
 
+const VIEW_TYPE_META: Record<
+  LibraryViewType,
+  { label: string; icon: React.ComponentProps<typeof Feather>['name'] }
+> = {
+  card: { label: '列表', icon: 'list' },
+  gallery: { label: '画廊', icon: 'grid' },
+  calendar: { label: '日历', icon: 'calendar' },
+  stats: { label: '统计', icon: 'pie-chart' },
+};
+
+const ALL_VIEW_TYPES: LibraryViewType[] = ['card', 'gallery', 'calendar', 'stats'];
+
 const TONES: AccentTone[] = ['teal', 'amber', 'rose', 'blue', 'emerald', 'slate'];
 
 export function SchemaEditorModal({
@@ -121,6 +133,9 @@ export function SchemaEditorModal({
   const [subtitleFieldKey, setSubtitleFieldKey] = useState('');
   const [rightBadgeFieldKey, setRightBadgeFieldKey] = useState('');
   const [footerMetricKeys, setFooterMetricKeys] = useState<string[]>([]);
+  const [viewDrafts, setViewDrafts] = useState<Array<{ id?: string; name: string; viewType: LibraryViewType }>>([
+    { name: '列表', viewType: 'card' },
+  ]);
 
   // Inline AI evolution
   const [aiPrompt, setAiPrompt] = useState('');
@@ -155,6 +170,15 @@ export function SchemaEditorModal({
       setSubtitleFieldKey(existingLibrary.views.card.subtitleFieldKey ?? '');
       setRightBadgeFieldKey(existingLibrary.views.card.rightBadgeFieldKey ?? '');
       setFooterMetricKeys(existingLibrary.views.card.footerMetricKeys);
+      setViewDrafts(
+        existingLibrary.viewList.length > 0
+          ? existingLibrary.viewList.map((v) => ({
+              id: v.id,
+              name: v.name,
+              viewType: v.viewType,
+            }))
+          : [{ name: '列表', viewType: 'card' }]
+      );
     } else {
       const usedSlugs = new Set(libraries.map((l) => l.slug));
       let nextIdx = libraries.length + 1;
@@ -198,6 +222,7 @@ export function SchemaEditorModal({
         setSubtitleFieldKey('record_date');
         setRightBadgeFieldKey('');
         setFooterMetricKeys(['record_date']);
+        setViewDrafts([{ name: '列表', viewType: 'card' }]);
       } else {
         setIcon('📒');
         setColor('teal');
@@ -221,6 +246,7 @@ export function SchemaEditorModal({
         setSubtitleFieldKey('record_date');
         setRightBadgeFieldKey('tag');
         setFooterMetricKeys(['record_date']);
+        setViewDrafts([{ name: '列表', viewType: 'card' }]);
       }
     }
   } else if (!visible && prevSession.visible) {
@@ -343,6 +369,33 @@ export function SchemaEditorModal({
     }
   };
 
+  const addViewDraft = (viewType: LibraryViewType) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setViewDrafts((prev) => [...prev, { name: VIEW_TYPE_META[viewType].label, viewType }]);
+  };
+
+  const removeViewDraft = (idx: number) => {
+    if (viewDrafts.length <= 1) return;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setViewDrafts((prev) => prev.filter((_, i) => i !== idx));
+  };
+
+  const moveViewDraft = (idx: number, delta: -1 | 1) => {
+    const target = idx + delta;
+    if (target < 0 || target >= viewDrafts.length) return;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setViewDrafts((prev) => {
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.splice(target, 0, item);
+      return next;
+    });
+  };
+
+  const updateViewDraftName = (idx: number, nextName: string) => {
+    setViewDrafts((prev) => prev.map((v, i) => (i === idx ? { ...v, name: nextName } : v)));
+  };
+
   const handleManualSave = () => {
     if (!repo) return;
     try {
@@ -362,6 +415,34 @@ export function SchemaEditorModal({
       const imgField = fields.find((f) => f.type === 'image');
       const ratingField = fields.find((f) => f.type === 'rating');
 
+      const cardConfig = {
+        titleFieldKey: validTitleKey,
+        subtitleFieldKey: subtitleFieldKey || undefined,
+        coverImageFieldKey: imgField?.key,
+        rightBadgeFieldKey: rightBadgeFieldKey || undefined,
+        footerMetricKeys: footerMetricKeys.filter((k) => fields.some((f) => f.key === k)),
+        sortFieldKey: dateField?.key,
+        sortDir: 'desc' as const,
+        highlightRules: existingLibrary?.views.card.highlightRules ?? [],
+      };
+      const galleryConfig = {
+        titleFieldKey: validTitleKey,
+        subtitleFieldKey: subtitleFieldKey || undefined,
+        coverImageFieldKey: imgField?.key,
+        badgeFieldKey: rightBadgeFieldKey || undefined,
+        ratingFieldKey: ratingField?.key,
+      };
+      const calendarConfig = {
+        dateFieldKey: dateField?.key ?? '',
+        titleFieldKey: validTitleKey,
+        metricFieldKey: footerMetricKeys[0],
+      };
+
+      const normalizedViews =
+        viewDrafts.length > 0 ? viewDrafts : [{ name: '列表', viewType: 'card' as LibraryViewType }];
+      const hasGallery = normalizedViews.some((v) => v.viewType === 'gallery');
+      const hasCalendar = normalizedViews.some((v) => v.viewType === 'calendar');
+
       const blueprint: LibraryBlueprint = {
         slug: cleanSlug,
         name: name.trim(),
@@ -373,34 +454,29 @@ export function SchemaEditorModal({
         showOnHome,
         fields,
         views: {
-          card: {
-            titleFieldKey: validTitleKey,
-            subtitleFieldKey: subtitleFieldKey || undefined,
-            coverImageFieldKey: imgField?.key,
-            rightBadgeFieldKey: rightBadgeFieldKey || undefined,
-            footerMetricKeys: footerMetricKeys.filter((k) => fields.some((f) => f.key === k)),
-            sortFieldKey: dateField?.key,
-            sortDir: 'desc',
-            highlightRules: existingLibrary?.views.card.highlightRules ?? [],
-          },
-          gallery: {
-            titleFieldKey: validTitleKey,
-            subtitleFieldKey: subtitleFieldKey || undefined,
-            coverImageFieldKey: imgField?.key,
-            badgeFieldKey: rightBadgeFieldKey || undefined,
-            ratingFieldKey: ratingField?.key,
-          },
-          calendar: dateField
-            ? {
-                dateFieldKey: dateField.key,
-                titleFieldKey: validTitleKey,
-                metricFieldKey: footerMetricKeys[0],
-              }
-            : undefined,
+          card: cardConfig,
+          gallery: hasGallery ? galleryConfig : undefined,
+          calendar: hasCalendar ? calendarConfig : undefined,
         },
       };
 
       repo.upsertLibrary(blueprint);
+
+      const viewInputs: LibraryViewInput[] = normalizedViews.map((v) => ({
+        id: v.id,
+        name: v.name.trim() || VIEW_TYPE_META[v.viewType].label,
+        viewType: v.viewType,
+        config:
+          v.viewType === 'card'
+            ? (cardConfig as unknown as Record<string, unknown>)
+            : v.viewType === 'gallery'
+              ? (galleryConfig as unknown as Record<string, unknown>)
+              : v.viewType === 'calendar'
+                ? (calendarConfig as unknown as Record<string, unknown>)
+                : {},
+      }));
+      repo.saveLibraryViews(cleanSlug, viewInputs);
+
       onSaved?.(cleanSlug);
       onClose();
     } catch (err) {
@@ -1182,7 +1258,84 @@ export function SchemaEditorModal({
               );
             })}
 
-            {/* 3. 列表卡片显示（默认折叠，按需微调） */}
+            {/* 3. 视图管理（独立 View 表：按需开启画廊 / 日历 / 统计，支持改名与排序） */}
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionTitle}>3. 视图表现 ({viewDrafts.length})</Text>
+              <Text style={styles.viewSectionHint}>仅 1 个视图时自动隐藏切换栏</Text>
+            </View>
+            <View style={styles.viewsManagerCard}>
+              {viewDrafts.map((v, idx) => {
+                const meta = VIEW_TYPE_META[v.viewType];
+                return (
+                  <View key={v.id ?? `${v.viewType}_${idx}`} style={styles.viewManageRow}>
+                    <View style={styles.viewTypeTag}>
+                      <Feather name={meta.icon} size={13} color={Palette.brand} />
+                      <Text style={styles.viewTypeTagText}>{meta.label}</Text>
+                    </View>
+                    <TextInput
+                      value={v.name}
+                      onChangeText={(txt) => updateViewDraftName(idx, txt)}
+                      placeholder={meta.label}
+                      placeholderTextColor={Palette.inkMuted}
+                      style={[styles.smallInput, styles.viewNameInput]}
+                    />
+                    <Pressable
+                      disabled={idx === 0}
+                      onPress={() => moveViewDraft(idx, -1)}
+                      hitSlop={4}
+                      style={[styles.viewMiniBtn, idx === 0 && styles.metaChipDisabled]}
+                    >
+                      <Feather name="arrow-up" size={13} color={Palette.inkSecondary} />
+                    </Pressable>
+                    <Pressable
+                      disabled={idx === viewDrafts.length - 1}
+                      onPress={() => moveViewDraft(idx, 1)}
+                      hitSlop={4}
+                      style={[
+                        styles.viewMiniBtn,
+                        idx === viewDrafts.length - 1 && styles.metaChipDisabled,
+                      ]}
+                    >
+                      <Feather name="arrow-down" size={13} color={Palette.inkSecondary} />
+                    </Pressable>
+                    {viewDrafts.length > 1 ? (
+                      <Pressable
+                        onPress={() => removeViewDraft(idx)}
+                        hitSlop={4}
+                        style={styles.viewMiniBtn}
+                        accessibilityLabel="移除该视图"
+                      >
+                        <Feather name="x" size={14} color={Palette.danger} />
+                      </Pressable>
+                    ) : null}
+                  </View>
+                );
+              })}
+
+              {ALL_VIEW_TYPES.some((vt) => !viewDrafts.some((d) => d.viewType === vt)) ? (
+                <View style={styles.addViewRow}>
+                  <Text style={styles.subFieldHint}>按需添加：</Text>
+                  {ALL_VIEW_TYPES.filter((vt) => !viewDrafts.some((d) => d.viewType === vt)).map(
+                    (vt) => (
+                      <Pressable
+                        key={vt}
+                        onPress={() => addViewDraft(vt)}
+                        style={({ pressed }) => [
+                          styles.addViewChip,
+                          pressed && { opacity: 0.72 },
+                        ]}
+                      >
+                        <Feather name="plus" size={12} color={Palette.brand} />
+                        <Feather name={VIEW_TYPE_META[vt].icon} size={12} color={Palette.brand} />
+                        <Text style={styles.addViewChipText}>{VIEW_TYPE_META[vt].label}</Text>
+                      </Pressable>
+                    )
+                  )}
+                </View>
+              ) : null}
+            </View>
+
+            {/* 4. 列表卡片显示（默认折叠，按需微调） */}
             <View style={styles.collapsibleCard}>
               <Pressable
                 onPress={() => {
@@ -1192,7 +1345,7 @@ export function SchemaEditorModal({
                 style={({ pressed }) => [styles.collapsibleHeader, pressed && { opacity: 0.75 }]}
               >
                 <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={styles.collapsibleTitle}>3. 列表卡片显示</Text>
+                  <Text style={styles.collapsibleTitle}>列表卡片显示字段</Text>
                   <Text style={styles.collapsibleSub} numberOfLines={1}>
                     主标题：{fields.find((f) => f.key === titleFieldKey)?.label ?? '自动'}
                     {footerMetricKeys.length > 0 ? ` · ${footerMetricKeys.length} 项重点数值` : ''}
@@ -1791,6 +1944,75 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Palette.borderHairline,
     gap: 7,
+  },
+  viewSectionHint: {
+    fontSize: 11,
+    color: Palette.inkMuted,
+  },
+  viewsManagerCard: {
+    backgroundColor: Palette.bgCanvas,
+    borderRadius: 14,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    gap: 8,
+  },
+  viewManageRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  viewTypeTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 9,
+    height: 36,
+    borderRadius: 9,
+  },
+  viewTypeTagText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.brand,
+  },
+  viewNameInput: {
+    flex: 1,
+    height: 36,
+    paddingVertical: 0,
+  },
+  viewMiniBtn: {
+    width: 28,
+    height: 32,
+    borderRadius: 8,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addViewRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: Palette.borderHairline,
+  },
+  addViewChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: Palette.brandSoft,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 999,
+  },
+  addViewChipText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.brand,
   },
   typeChipsRow: {
     flexDirection: 'row',
