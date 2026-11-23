@@ -1,23 +1,29 @@
 import Feather from '@expo/vector-icons/Feather';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
-import { useLocalSearchParams, useRouter } from 'expo-router';
-import React, { useState } from 'react';
+import { useLocalSearchParams } from 'expo-router';
+import React, { type ComponentRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Animated,
+  type LayoutChangeEvent,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   DynamicEntryFormModal,
   type LockedRelationContext,
 } from '@/components/dynamic-renderer/DynamicEntryFormModal';
 import { formatFieldDisplay } from '@/components/dynamic-renderer/DynamicViews';
+import { SlidingSegmentedBar } from '@/components/ui/SlidingSegmentedBar';
 import { HighlightTonePalette, Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type {
@@ -27,6 +33,7 @@ import type {
 } from '@/db/repository';
 import { formatLocalDate } from '@/engine/date';
 import { resolveImageUri, savePickedImageToStorage } from '@/engine/image-storage';
+import { useSafeNavigation } from '@/utils/navigation';
 
 type DetailTabItem =
   | { key: 'detail'; label: string; icon: 'file-text' }
@@ -41,8 +48,9 @@ type DetailTabItem =
 
 export default function EntryDetailScreen() {
   const { id, tab } = useLocalSearchParams<{ id: string; tab?: string }>();
-  const router = useRouter();
+  const nav = useSafeNavigation();
   const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
   const { repo, revision, openOmniCapture } = useOmni();
 
   const entryIdStr = id ? String(id) : '';
@@ -58,8 +66,17 @@ export default function EntryDetailScreen() {
     setSelectedTabKey(requestedTab ? requestedTab : 'detail');
   }
 
+  const [pagerWidth, setPagerWidth] = useState(screenWidth);
+  const [pagerScrollX] = useState(() => new Animated.Value(0));
+  const pagerRef = useRef<ComponentRef<typeof Animated.ScrollView>>(null);
+  const chipsScrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  const chipLayoutsRef = useRef<Record<number, { x: number; width: number }>>({});
+  const programmaticScrollRef = useRef(false);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const [editOpen, setEditOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [subModalOpen, setSubModalOpen] = useState(false);
   const [subModalTarget, setSubModalTarget] = useState<{
     childLibrary: LibraryRecord;
     lockedRelation: LockedRelationContext;
@@ -70,56 +87,56 @@ export default function EntryDetailScreen() {
   const [quickImages, setQuickImages] = useState<Record<string, string>>({});
   const [quickError, setQuickError] = useState<string | null>(null);
 
-  const hydratedBundle =
-    !repo || revision < 0 || !entryIdStr ? null : repo.getHydratedEntryById(entryIdStr);
+  const hydratedBundle = useMemo(
+    () =>
+      !repo || revision < 0 || !entryIdStr ? null : repo.getHydratedEntryById(entryIdStr),
+    [repo, revision, entryIdStr]
+  );
 
-  if (!hydratedBundle || !repo) {
-    return (
-      <SafeAreaView style={styles.safeArea}>
-        <View style={styles.center}>
-          <Text style={styles.emptyTitle}>该记录不存在或已被删除</Text>
-          <Pressable onPress={() => router.back()} style={styles.primaryPill}>
-            <Text style={styles.primaryPillText}>返回上一页</Text>
-          </Pressable>
-        </View>
-      </SafeAreaView>
+  const childSections: ChildLibrarySection[] = useMemo(() => {
+    if (!repo || revision < 0 || !hydratedBundle) return [];
+    return repo.listChildSectionsForEntry(
+      hydratedBundle.entry.id,
+      hydratedBundle.library.slug
     );
-  }
+  }, [repo, revision, hydratedBundle]);
 
-  const { entry, library } = hydratedBundle;
-  const childSections: ChildLibrarySection[] = repo.listChildSectionsForEntry(
-    entry.id,
-    library.slug
-  );
-  const childSlugSet = new Set(childSections.map((s) => s.childLibrary.slug));
-  const backlinkGroups: BacklinkGroupSection[] = repo.listBacklinkGroupsForEntry(
-    entry.id,
-    childSlugSet
-  );
-  const totalBacklinkCount = backlinkGroups.reduce((sum, g) => sum + g.entries.length, 0);
+  const backlinkGroups: BacklinkGroupSection[] = useMemo(() => {
+    if (!repo || revision < 0 || !hydratedBundle) return [];
+    const childSlugSet = new Set(childSections.map((s) => s.childLibrary.slug));
+    return repo.listBacklinkGroupsForEntry(hydratedBundle.entry.id, childSlugSet);
+  }, [repo, revision, hydratedBundle, childSections]);
 
-  const detailTabs: DetailTabItem[] = [
-    { key: 'detail', label: '详情', icon: 'file-text' },
-    ...childSections.map(
-      (section): DetailTabItem => ({
-        key: `child:${section.childLibrary.slug}`,
-        label: section.childLibrary.name,
-        count: section.entries.length,
-        emoji: section.childLibrary.icon,
-        section,
-      })
-    ),
-    ...(totalBacklinkCount > 0
-      ? ([
-          {
-            key: 'backlinks',
-            label: childSections.length > 0 ? '关联引用' : '关联记录',
-            count: totalBacklinkCount,
-            icon: 'link-2',
-          },
-        ] as DetailTabItem[])
-      : []),
-  ];
+  const totalBacklinkCount = useMemo(
+    () => backlinkGroups.reduce((sum, g) => sum + g.entries.length, 0),
+    [backlinkGroups]
+  );
+
+  const detailTabs: DetailTabItem[] = useMemo(
+    () => [
+      { key: 'detail', label: '详情', icon: 'file-text' },
+      ...childSections.map(
+        (section): DetailTabItem => ({
+          key: `child:${section.childLibrary.slug}`,
+          label: section.childLibrary.name,
+          count: section.entries.length,
+          emoji: section.childLibrary.icon,
+          section,
+        })
+      ),
+      ...(totalBacklinkCount > 0
+        ? ([
+            {
+              key: 'backlinks',
+              label: childSections.length > 0 ? '关联引用' : '关联记录',
+              count: totalBacklinkCount,
+              icon: 'link-2',
+            },
+          ] as DetailTabItem[])
+        : []),
+    ],
+    [childSections, totalBacklinkCount]
+  );
 
   const hasMultipleTabs = detailTabs.length > 1;
   const activeTabKey = (() => {
@@ -132,6 +149,135 @@ export default function EntryDetailScreen() {
     }
     return 'detail';
   })();
+
+  const activeTabIndex = Math.max(
+    0,
+    detailTabs.findIndex((t) => t.key === activeTabKey)
+  );
+  const effectiveWidth = pagerWidth > 0 ? pagerWidth : screenWidth;
+
+  const scrollChipIntoView = useCallback(
+    (idx: number) => {
+      const layout = chipLayoutsRef.current[idx];
+      if (!layout || !chipsScrollRef.current) return;
+      const targetX = Math.max(0, layout.x - effectiveWidth / 2 + layout.width / 2);
+      chipsScrollRef.current.scrollTo({ x: targetX, animated: true });
+    },
+    [effectiveWidth]
+  );
+
+  // 路由切换或携带 ?tab=relations 进入时，立即对齐到对应分页
+  useEffect(() => {
+    if (!hasMultipleTabs) return;
+    const targetX = activeTabIndex * effectiveWidth;
+    pagerScrollX.setValue(targetX);
+    const frame = requestAnimationFrame(() => {
+      pagerRef.current?.scrollTo({ x: targetX, animated: false });
+      scrollChipIntoView(activeTabIndex);
+    });
+    return () => cancelAnimationFrame(frame);
+    // 仅在路由签名或分页宽度初始化变化时同步初始页
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeSignature, effectiveWidth, hasMultipleTabs]);
+
+  // 手势左右滑动过半即时同步选中 Tab 与胶囊居中
+  useEffect(() => {
+    if (!hasMultipleTabs) return;
+    const listenerId = pagerScrollX.addListener(({ value }) => {
+      if (programmaticScrollRef.current) return;
+      const nextIdx = Math.max(
+        0,
+        Math.min(detailTabs.length - 1, Math.round(value / Math.max(1, effectiveWidth)))
+      );
+      const nextTab = detailTabs[nextIdx];
+      if (!nextTab) return;
+      setSelectedTabKey((prev) => {
+        if (prev === nextTab.key) return prev;
+        scrollChipIntoView(nextIdx);
+        return nextTab.key;
+      });
+    });
+    return () => {
+      pagerScrollX.removeListener(listenerId);
+    };
+  }, [hasMultipleTabs, pagerScrollX, detailTabs, effectiveWidth, scrollChipIntoView]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    };
+  }, []);
+
+  const handleSelectDetailTab = useCallback(
+    (idx: number) => {
+      const targetTab = detailTabs[idx];
+      if (!targetTab) return;
+      programmaticScrollRef.current = true;
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+      scrollTimerRef.current = setTimeout(() => {
+        programmaticScrollRef.current = false;
+      }, 380);
+      setSelectedTabKey(targetTab.key);
+      pagerRef.current?.scrollTo({ x: idx * effectiveWidth, animated: true });
+      scrollChipIntoView(idx);
+    },
+    [detailTabs, effectiveWidth, scrollChipIntoView]
+  );
+
+  const handlePagerMomentumEnd = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      programmaticScrollRef.current = false;
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current);
+        scrollTimerRef.current = null;
+      }
+      const offsetX = e.nativeEvent.contentOffset.x;
+      const nextIdx = Math.max(
+        0,
+        Math.min(detailTabs.length - 1, Math.round(offsetX / Math.max(1, effectiveWidth)))
+      );
+      const nextTab = detailTabs[nextIdx];
+      if (nextTab) {
+        setSelectedTabKey(nextTab.key);
+        scrollChipIntoView(nextIdx);
+      }
+    },
+    [detailTabs, effectiveWidth, scrollChipIntoView]
+  );
+
+  const handleChipLayout = useCallback(
+    (idx: number) => (e: LayoutChangeEvent) => {
+      const { x, width } = e.nativeEvent.layout;
+      chipLayoutsRef.current[idx] = { x, width };
+    },
+    []
+  );
+
+  const onPagerScroll = useMemo(
+    () =>
+      Animated.event([{ nativeEvent: { contentOffset: { x: pagerScrollX } } }], {
+        useNativeDriver: true,
+      }),
+    [pagerScrollX]
+  );
+
+  if (!hydratedBundle || !repo) {
+    return (
+      <View style={[styles.safeArea, { paddingTop: insets.top }]}>
+        <View style={styles.center}>
+          <Text style={styles.emptyTitle}>该记录不存在或已被删除</Text>
+          <Pressable
+            onPress={nav.back}
+            style={({ pressed }) => [styles.primaryPill, pressed && styles.pressedSoft]}
+          >
+            <Text style={styles.primaryPillText}>返回上一页</Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
+
+  const { entry, library } = hydratedBundle;
 
   const activeChildTab = detailTabs.find(
     (t): t is Extract<DetailTabItem, { key: `child:${string}` }> =>
@@ -151,7 +297,7 @@ export default function EntryDetailScreen() {
 
   const handleDelete = () => {
     repo.deleteEntry(entry.id);
-    router.back();
+    nav.back();
   };
 
   const handleOpenLockedModal = (
@@ -169,6 +315,7 @@ export default function EntryDetailScreen() {
       },
       initialData: prefill,
     });
+    setSubModalOpen(true);
   };
 
   const handlePickQuickImage = async (childSlug: string) => {
@@ -281,8 +428,8 @@ export default function EntryDetailScreen() {
       <View key={childLibrary.id} style={styles.sectionCard}>
         <View style={styles.subSectionHeader}>
           <Pressable
-            onPress={() => router.push(`/library/${childLibrary.slug}`)}
-            style={styles.sectionHeader}
+            onPress={() => nav.openLibrary(childLibrary.slug)}
+            style={({ pressed }) => [styles.sectionHeader, pressed && styles.pressedSoft]}
           >
             <Text style={styles.sectionTitle}>
               {childLibrary.icon} {childLibrary.name} ({subEntries.length})
@@ -433,10 +580,10 @@ export default function EntryDetailScreen() {
                   </View>
 
                   <Pressable
-                    onPress={() => router.push(`/entry/${sub.id}`)}
+                    onPress={() => nav.push(`/entry/${sub.id}`)}
                     style={({ pressed }) => [
                       styles.timelineCard,
-                      pressed && { opacity: 0.82 },
+                      pressed && { opacity: 0.82, transform: [{ scale: 0.988 }] },
                     ]}
                   >
                     <View style={styles.timelineMetaRow}>
@@ -515,8 +662,8 @@ export default function EntryDetailScreen() {
       <View key={`${sourceLibrary.slug}::${relationFieldKey}`} style={styles.sectionCard}>
         <View style={styles.subSectionHeader}>
           <Pressable
-            onPress={() => router.push(`/library/${sourceLibrary.slug}`)}
-            style={styles.backlinkHeaderLeft}
+            onPress={() => nav.openLibrary(sourceLibrary.slug)}
+            style={({ pressed }) => [styles.backlinkHeaderLeft, pressed && styles.pressedSoft]}
           >
             <View style={styles.sectionHeader}>
               <Text style={styles.sectionTitle}>
@@ -571,11 +718,11 @@ export default function EntryDetailScreen() {
             return (
               <Pressable
                 key={relEntry.id}
-                onPress={() => router.push(`/entry/${relEntry.id}`)}
+                onPress={() => nav.push(`/entry/${relEntry.id}`)}
                 style={({ pressed }) => [
                   styles.backlinkEntryCard,
                   relHl && { backgroundColor: relHl.bg },
-                  pressed && { opacity: 0.82 },
+                  pressed && { opacity: 0.82, transform: [{ scale: 0.988 }] },
                 ]}
               >
                 {coverUri ? (
@@ -656,180 +803,123 @@ export default function EntryDetailScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
-      {/* 顶部栏 */}
-      <View style={styles.topNav}>
-        <Pressable onPress={() => router.back()} style={styles.iconBtn}>
-          <Feather name="arrow-left" size={19} color={Palette.inkPrimary} />
-        </Pressable>
+    <View style={styles.safeArea}>
+      {/* 顶部栏（静态 insets.top，消除 Android 进栈顶栏跳动） */}
+      <View style={[styles.topNavOuter, { paddingTop: insets.top }]}>
+        <View style={styles.topNav}>
+          <Pressable
+            onPress={nav.back}
+            hitSlop={6}
+            style={({ pressed }) => [styles.iconBtn, pressed && styles.pressedScale]}
+            accessibilityLabel="返回"
+          >
+            <Feather name="arrow-left" size={19} color={Palette.inkPrimary} />
+          </Pressable>
 
-        <Pressable
-          onPress={() => router.push(`/library/${library.slug}`)}
-          style={[styles.libTagBtn, { backgroundColor: tone.soft }]}
-        >
-          <Text style={[styles.libTagText, { color: tone.ink }]}>
-            {library.icon} {library.name}
-          </Text>
-        </Pressable>
-
-        <View style={{ flex: 1 }} />
-
-        <Pressable onPress={() => setEditOpen(true)} style={styles.editBtn}>
-          <Feather name="edit-2" size={14} color={Palette.inkPrimary} />
-          <Text style={styles.editBtnText}>编辑</Text>
-        </Pressable>
-
-        {confirmDelete ? (
-          <Pressable onPress={handleDelete} style={styles.confirmDelBtn}>
-            <Text style={styles.confirmDelText}>
-              {entry.backlinks.length > 0
-                ? `确认删除（保留${entry.backlinks.length}条关联）`
-                : '确认删除'}
+          <Pressable
+            onPress={() => nav.openLibrary(library.slug)}
+            style={({ pressed }) => [
+              styles.libTagBtn,
+              { backgroundColor: tone.soft },
+              pressed && styles.pressedScale,
+            ]}
+          >
+            <Text style={[styles.libTagText, { color: tone.ink }]}>
+              {library.icon} {library.name}
             </Text>
           </Pressable>
-        ) : (
-          <Pressable onPress={() => setConfirmDelete(true)} style={styles.iconBtn}>
-            <Feather name="trash-2" size={17} color={Palette.danger} />
+
+          <View style={{ flex: 1 }} />
+
+          <Pressable
+            onPress={() => setEditOpen(true)}
+            style={({ pressed }) => [styles.editBtn, pressed && styles.pressedScale]}
+          >
+            <Feather name="edit-2" size={14} color={Palette.inkPrimary} />
+            <Text style={styles.editBtnText}>编辑</Text>
           </Pressable>
-        )}
+
+          {confirmDelete ? (
+            <Pressable
+              onPress={handleDelete}
+              style={({ pressed }) => [styles.confirmDelBtn, pressed && styles.pressedScale]}
+            >
+              <Text style={styles.confirmDelText}>
+                {entry.backlinks.length > 0
+                  ? `确认删除（保留${entry.backlinks.length}条关联）`
+                  : '确认删除'}
+              </Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={() => setConfirmDelete(true)}
+              hitSlop={6}
+              style={({ pressed }) => [styles.iconBtn, pressed && styles.pressedScale]}
+            >
+              <Feather name="trash-2" size={17} color={Palette.danger} />
+            </Pressable>
+          )}
+        </View>
       </View>
 
-      <ScrollView
-        style={styles.scroll}
-        contentContainerStyle={[styles.container, { paddingBottom: 92 + insets.bottom }]}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* 主标题与核心汇总指标卡（跨 Tab 常驻顶部） */}
-        <View style={[styles.heroCard, hl && { backgroundColor: hl.bg }]}>
-          <View style={styles.heroTopRow}>
-            <Text style={styles.heroTitle}>{entry.titleSummary}</Text>
-            {entry.highlight?.badgeText && hl ? (
-              <View style={[styles.alertPill, { backgroundColor: hl.pillBg }]}>
-                <Text style={[styles.alertText, { color: hl.pillInk }]}>
-                  {entry.highlight.badgeText}
-                </Text>
+      {/* 主标题与核心汇总指标卡 */}
+      {(() => {
+        const heroCardNode = (
+          <View
+            style={[
+              styles.heroCard,
+              hasMultipleTabs && styles.heroCardCompact,
+              hl && { backgroundColor: hl.bg },
+            ]}
+          >
+            <View style={styles.heroTopRow}>
+              <Text style={styles.heroTitle}>{entry.titleSummary}</Text>
+              {entry.highlight?.badgeText && hl ? (
+                <View style={[styles.alertPill, { backgroundColor: hl.pillBg }]}>
+                  <Text style={[styles.alertText, { color: hl.pillInk }]}>
+                    {entry.highlight.badgeText}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+            <Text style={styles.timestampText}>
+              更新于 {new Date(entry.updatedAt).toLocaleString('zh-CN')}
+            </Text>
+
+            {computedFields.length > 0 ? (
+              <View style={styles.heroStatsWrap}>
+                {computedFields.map((cf) => (
+                  <View
+                    key={cf.key}
+                    style={[
+                      styles.computedTile,
+                      computedFields.length === 4 && styles.computedTileHalf,
+                      hl
+                        ? {
+                            backgroundColor: Palette.bgSurface,
+                            borderWidth: 1,
+                            borderColor: Palette.borderHairline,
+                          }
+                        : { backgroundColor: tone.soft },
+                    ]}
+                  >
+                    <Text style={styles.computedLabel} numberOfLines={1}>
+                      {cf.label}
+                    </Text>
+                    <Text
+                      style={[styles.computedVal, { color: tone.ink }]}
+                      numberOfLines={1}
+                    >
+                      {formatFieldDisplay(cf, entry.computedData[cf.key])}
+                    </Text>
+                  </View>
+                ))}
               </View>
             ) : null}
           </View>
-          <Text style={styles.timestampText}>
-            更新于 {new Date(entry.updatedAt).toLocaleString('zh-CN')}
-          </Text>
+        );
 
-          {computedFields.length > 0 ? (
-            <View style={styles.heroStatsWrap}>
-              {computedFields.map((cf) => (
-                <View
-                  key={cf.key}
-                  style={[
-                    styles.computedTile,
-                    computedFields.length === 4 && styles.computedTileHalf,
-                    hl
-                      ? {
-                          backgroundColor: Palette.bgSurface,
-                          borderWidth: 1,
-                          borderColor: Palette.borderHairline,
-                        }
-                      : { backgroundColor: tone.soft },
-                  ]}
-                >
-                  <Text style={styles.computedLabel} numberOfLines={1}>
-                    {cf.label}
-                  </Text>
-                  <Text
-                    style={[styles.computedVal, { color: tone.ink }]}
-                    numberOfLines={1}
-                  >
-                    {formatFieldDisplay(cf, entry.computedData[cf.key])}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          ) : null}
-        </View>
-
-        {/* 按需显示的详情 / 附属子记录 / 关联记录 Tab 栏 */}
-        {hasMultipleTabs ? (
-          detailTabs.length <= 3 ? (
-            <View style={styles.detailTabsBar}>
-              {detailTabs.map((t) => {
-                const active = activeTabKey === t.key;
-                return (
-                  <Pressable
-                    key={t.key}
-                    onPress={() => setSelectedTabKey(t.key)}
-                    style={[
-                      styles.detailTabPill,
-                      active && { backgroundColor: tone.solid },
-                    ]}
-                  >
-                    {'emoji' in t ? (
-                      <Text style={styles.detailTabEmoji}>{t.emoji}</Text>
-                    ) : (
-                      <Feather
-                        name={t.icon}
-                        size={13}
-                        color={active ? Palette.inkInverse : Palette.inkSecondary}
-                      />
-                    )}
-                    <Text
-                      style={[
-                        styles.detailTabText,
-                        active && { color: Palette.inkInverse },
-                      ]}
-                      numberOfLines={1}
-                    >
-                      {t.label}
-                      {'count' in t ? ` (${t.count})` : ''}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          ) : (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              style={styles.detailTabsScroll}
-              contentContainerStyle={styles.detailTabsScrollContent}
-            >
-              {detailTabs.map((t) => {
-                const active = activeTabKey === t.key;
-                return (
-                  <Pressable
-                    key={t.key}
-                    onPress={() => setSelectedTabKey(t.key)}
-                    style={[
-                      styles.detailTabScrollPill,
-                      active && { backgroundColor: tone.solid },
-                    ]}
-                  >
-                    {'emoji' in t ? (
-                      <Text style={styles.detailTabEmoji}>{t.emoji}</Text>
-                    ) : (
-                      <Feather
-                        name={t.icon}
-                        size={13}
-                        color={active ? Palette.inkInverse : Palette.inkSecondary}
-                      />
-                    )}
-                    <Text
-                      style={[
-                        styles.detailTabText,
-                        active && { color: Palette.inkInverse },
-                      ]}
-                    >
-                      {t.label}
-                      {'count' in t ? ` (${t.count})` : ''}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </ScrollView>
-          )
-        ) : null}
-
-        {/* Tab 1：基础详细信息 + 正向归属关联 */}
-        {activeTabKey === 'detail' ? (
+        const detailInfoNodes = (
           <>
             <View style={styles.sectionCard}>
               <Text style={styles.sectionTitle}>详细信息</Text>
@@ -893,10 +983,10 @@ export default function EntryDetailScreen() {
                         refs.map((ref) => (
                           <Pressable
                             key={ref.id}
-                            onPress={() => router.push(`/entry/${ref.id}`)}
+                            onPress={() => nav.push(`/entry/${ref.id}`)}
                             style={({ pressed }) => [
                               styles.linkCard,
-                              pressed && { opacity: 0.78 },
+                              pressed && { opacity: 0.78, transform: [{ scale: 0.988 }] },
                             ]}
                           >
                             <Text style={styles.linkTitle}>
@@ -919,16 +1009,127 @@ export default function EntryDetailScreen() {
               </View>
             ) : null}
           </>
-        ) : null}
+        );
 
-        {/* Tab 2..k：特定附属子记录本（原位快记 + 时间轴） */}
-        {activeChildTab ? renderChildSection(activeChildTab.section) : null}
+        if (!hasMultipleTabs) {
+          return (
+            <ScrollView
+              style={styles.scroll}
+              contentContainerStyle={[styles.container, { paddingBottom: 92 + insets.bottom }]}
+              keyboardShouldPersistTaps="handled"
+            >
+              {heroCardNode}
+              {detailInfoNodes}
+            </ScrollView>
+          );
+        }
 
-        {/* Tab 末项：跨表反向关联记录分组卡片 */}
-        {activeTabKey === 'backlinks'
-          ? backlinkGroups.map((group) => renderBacklinkGroup(group))
-          : null}
-      </ScrollView>
+        return (
+          <>
+            {/* 多 Tab 时顶部吸顶：核心摘要卡 + 跟手滑块 / 横向胶囊条 */}
+            <View style={styles.multiTabHeader}>
+              {heroCardNode}
+
+              {detailTabs.length <= 3 ? (
+                <SlidingSegmentedBar
+                  items={detailTabs.map((t) => ({
+                    key: t.key,
+                    label: `${t.label}${'count' in t ? ` (${t.count})` : ''}`,
+                    emoji: 'emoji' in t ? t.emoji : undefined,
+                    icon: 'icon' in t ? t.icon : undefined,
+                  }))}
+                  activeIndex={activeTabIndex}
+                  onSelect={handleSelectDetailTab}
+                  activeColor={tone.solid}
+                  scrollX={pagerScrollX}
+                  pageWidth={effectiveWidth}
+                />
+              ) : (
+                <ScrollView
+                  ref={chipsScrollRef}
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={styles.detailTabsScroll}
+                  contentContainerStyle={styles.detailTabsScrollContent}
+                >
+                  {detailTabs.map((t, idx) => {
+                    const active = idx === activeTabIndex;
+                    return (
+                      <Pressable
+                        key={t.key}
+                        onLayout={handleChipLayout(idx)}
+                        onPress={() => handleSelectDetailTab(idx)}
+                        style={({ pressed }) => [
+                          styles.detailTabScrollPill,
+                          active && { backgroundColor: tone.solid },
+                          pressed && !active && styles.pressedSoft,
+                        ]}
+                      >
+                        {'emoji' in t ? (
+                          <Text style={styles.detailTabEmoji}>{t.emoji}</Text>
+                        ) : (
+                          <Feather
+                            name={t.icon}
+                            size={13}
+                            color={active ? Palette.inkInverse : Palette.inkSecondary}
+                          />
+                        )}
+                        <Text
+                          style={[
+                            styles.detailTabText,
+                            active && { color: Palette.inkInverse },
+                          ]}
+                        >
+                          {t.label}
+                          {'count' in t ? ` (${t.count})` : ''}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </ScrollView>
+              )}
+            </View>
+
+            {/* 可左右手势滑动的多 Tab 内容分页 */}
+            <Animated.ScrollView
+              ref={pagerRef}
+              horizontal
+              pagingEnabled
+              nestedScrollEnabled
+              showsHorizontalScrollIndicator={false}
+              scrollEventThrottle={16}
+              onLayout={(e) => {
+                const w = e.nativeEvent.layout.width;
+                if (w > 0 && Math.abs(w - pagerWidth) > 0.5) {
+                  setPagerWidth(w);
+                }
+              }}
+              onScroll={onPagerScroll}
+              onMomentumScrollEnd={handlePagerMomentumEnd}
+              style={styles.scroll}
+            >
+              {detailTabs.map((t) => (
+                <ScrollView
+                  key={t.key}
+                  nestedScrollEnabled
+                  keyboardShouldPersistTaps="handled"
+                  style={{ width: effectiveWidth }}
+                  contentContainerStyle={[
+                    styles.pagerPageContent,
+                    { paddingBottom: 92 + insets.bottom },
+                  ]}
+                >
+                  {t.key === 'detail' ? detailInfoNodes : null}
+                  {'section' in t ? renderChildSection(t.section) : null}
+                  {t.key === 'backlinks'
+                    ? backlinkGroups.map((group) => renderBacklinkGroup(group))
+                    : null}
+                </ScrollView>
+              ))}
+            </Animated.ScrollView>
+          </>
+        );
+      })()}
 
       {/* 右下角随行助理：自动携带当前主记录与所在 Tab 上下文 */}
       <Pressable
@@ -954,11 +1155,11 @@ export default function EntryDetailScreen() {
 
       {subModalTarget ? (
         <DynamicEntryFormModal
-          visible={Boolean(subModalTarget)}
+          visible={subModalOpen}
           library={subModalTarget.childLibrary}
           initialData={subModalTarget.initialData}
           lockedRelation={subModalTarget.lockedRelation}
-          onClose={() => setSubModalTarget(null)}
+          onClose={() => setSubModalOpen(false)}
           onSaved={() => {
             const targetSlug = subModalTarget.childLibrary.slug;
             setQuickTexts((prev) => ({ ...prev, [targetSlug]: '' }));
@@ -966,7 +1167,7 @@ export default function EntryDetailScreen() {
           }}
         />
       ) : null}
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -996,6 +1197,12 @@ const styles = StyleSheet.create({
     color: Palette.inkInverse,
     fontWeight: '700',
   },
+  topNavOuter: {
+    width: '100%',
+    backgroundColor: Palette.bgSurface,
+    borderBottomWidth: 1,
+    borderBottomColor: Palette.borderHairline,
+  },
   topNav: {
     width: '100%',
     maxWidth: 820,
@@ -1005,9 +1212,16 @@ const styles = StyleSheet.create({
     gap: 8,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    backgroundColor: Palette.bgSurface,
-    borderBottomWidth: 1,
-    borderBottomColor: Palette.borderHairline,
+  },
+  pressedScale: {
+    opacity: 0.78,
+    transform: [{ scale: 0.95 }],
+  },
+  pressedSoft: {
+    opacity: 0.72,
+  },
+  tabBodyStack: {
+    gap: 14,
   },
   iconBtn: {
     width: 36,
@@ -1062,6 +1276,23 @@ const styles = StyleSheet.create({
     paddingBottom: 48,
     gap: 14,
   },
+  multiTabHeader: {
+    width: '100%',
+    maxWidth: 820,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    paddingBottom: 8,
+    gap: 10,
+  },
+  pagerPageContent: {
+    width: '100%',
+    maxWidth: 820,
+    alignSelf: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 6,
+    gap: 14,
+  },
   heroCard: {
     backgroundColor: Palette.bgSurface,
     borderRadius: 18,
@@ -1069,6 +1300,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Palette.borderHairline,
     gap: 6,
+  },
+  heroCardCompact: {
+    padding: 14,
   },
   heroTopRow: {
     flexDirection: 'row',

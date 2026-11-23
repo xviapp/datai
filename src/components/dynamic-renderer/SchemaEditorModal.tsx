@@ -2,9 +2,7 @@ import Feather from '@expo/vector-icons/Feather';
 import React, { useState } from 'react';
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Modal,
-  Platform,
+  LayoutAnimation,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,10 +13,11 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { runArchitectAgent } from '@/ai/agents';
+import { BottomSheetModal } from '@/components/ui/BottomSheetModal';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord } from '@/db/repository';
-import { FieldTypeEnum, type FieldDef, type FieldType } from '@/schema/field-defs';
+import type { FieldDef, FieldType } from '@/schema/field-defs';
 import type { AccentTone, LibraryBlueprint } from '@/schema/view-dsl';
 
 interface SchemaEditorModalProps {
@@ -46,6 +45,35 @@ const FIELD_TYPE_LABELS: Record<FieldType, string> = {
   formula: '计算公式',
 };
 
+const FIELD_TYPE_ICONS: Record<FieldType, React.ComponentProps<typeof Feather>['name']> = {
+  text: 'type',
+  number: 'hash',
+  currency: 'dollar-sign',
+  date: 'calendar',
+  select: 'disc',
+  multi_select: 'check-square',
+  rating: 'star',
+  checkbox: 'toggle-right',
+  image: 'image',
+  relation: 'link-2',
+  rollup: 'layers',
+  formula: 'sliders',
+};
+
+const COMMON_FIELD_TYPES: FieldType[] = [
+  'text',
+  'number',
+  'currency',
+  'date',
+  'select',
+  'multi_select',
+  'rating',
+  'checkbox',
+  'image',
+];
+
+const ADVANCED_FIELD_TYPES: FieldType[] = ['relation', 'rollup', 'formula'];
+
 const TONES: AccentTone[] = ['teal', 'amber', 'rose', 'blue', 'emerald', 'slate'];
 
 export function SchemaEditorModal({
@@ -60,6 +88,7 @@ export function SchemaEditorModal({
   const { repo, libraries } = useOmni();
   const insets = useSafeAreaInsets();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [openTypePickerKey, setOpenTypePickerKey] = useState<string | null>(null);
 
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
@@ -179,9 +208,16 @@ export function SchemaEditorModal({
     }
   } else if (!visible && prevSession.visible) {
     setPrevSession((s) => ({ ...s, visible: false }));
+    setOpenTypePickerKey(null);
   }
 
+  const toggleTypePicker = (rowKey: string) => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    setOpenTypePickerKey((prev) => (prev === rowKey ? null : rowKey));
+  };
+
   const addNewField = () => {
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     const idx = fields.length + 1;
     const suffix = Math.random().toString(36).slice(2, 6);
     setFields((prev) => [
@@ -201,7 +237,9 @@ export function SchemaEditorModal({
 
   const removeFieldAt = (index: number) => {
     if (fields.length <= 1) return;
+    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
     const removedKey = fields[index].key;
+    setOpenTypePickerKey((prev) => (prev === removedKey ? null : prev));
     setFields((prev) => prev.filter((_, i) => i !== index));
     setFooterMetricKeys((prev) => prev.filter((k) => k !== removedKey));
   };
@@ -355,26 +393,31 @@ export function SchemaEditorModal({
   );
 
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.backdrop}
-      >
-        <View style={styles.sheet}>
-          <View style={styles.header}>
-            <Text style={styles.headerTitle}>
-              {existingLibrary ? `管理记录本 · ${existingLibrary.name}` : '新建记录本'}
-            </Text>
-            <Pressable onPress={onClose} style={styles.closeBtn}>
-              <Feather name="x" size={20} color={Palette.inkSecondary} />
-            </Pressable>
-          </View>
-
-          <ScrollView
-            style={styles.scrollArea}
-            contentContainerStyle={styles.scrollContent}
-            keyboardShouldPersistTaps="handled"
+    <BottomSheetModal
+      visible={visible}
+      onClose={onClose}
+      maxHeight="92%"
+      maxWidth={720}
+      header={
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>
+            {existingLibrary ? `管理记录本 · ${existingLibrary.name}` : '新建记录本'}
+          </Text>
+          <Pressable
+            onPress={onClose}
+            hitSlop={8}
+            style={({ pressed }) => [styles.closeBtn, pressed && { opacity: 0.6 }]}
           >
+            <Feather name="x" size={20} color={Palette.inkSecondary} />
+          </Pressable>
+        </View>
+      }
+    >
+      <ScrollView
+        style={styles.scrollArea}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
             {errorMsg ? (
               <View style={styles.errorBanner}>
                 <Text style={styles.errorText}>{errorMsg}</Text>
@@ -525,152 +568,284 @@ export function SchemaEditorModal({
               </Pressable>
             </View>
 
-            {fields.map((field, index) => (
-              <View key={field.key || index} style={styles.fieldCard}>
-                <View style={styles.rowGap}>
-                  <TextInput
-                    value={field.label}
-                    onChangeText={(v) => updateFieldAt(index, { label: v })}
-                    placeholder="填写名称，如：书摘随感、页码"
-                    placeholderTextColor={Palette.inkMuted}
-                    style={[styles.smallInput, { flex: 1 }]}
-                  />
-                  {fields.length > 1 ? (
-                    <Pressable onPress={() => removeFieldAt(index)} style={styles.delIconBtn}>
-                      <Feather name="trash-2" size={15} color={Palette.danger} />
-                    </Pressable>
-                  ) : null}
-                </View>
+            {fields.map((field, index) => {
+              const rowKey = field.key || String(index);
+              const isPickerOpen = openTypePickerKey === rowKey;
+              const typeBadgeIcon =
+                field.type === 'text' && field.multiline
+                  ? 'align-left'
+                  : FIELD_TYPE_ICONS[field.type];
+              const typeBadgeLabel =
+                field.type === 'text' && field.multiline
+                  ? '长文本'
+                  : FIELD_TYPE_LABELS[field.type];
 
-                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  <View style={styles.typeChipsRow}>
-                    {FieldTypeEnum.options.map((t) => {
-                      const active = field.type === t;
-                      return (
-                        <Pressable
-                          key={t}
-                          onPress={() => updateFieldAt(index, { type: t })}
-                          style={[styles.typeChip, active && styles.typeChipActive]}
-                        >
-                          <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
-                            {FIELD_TYPE_LABELS[t]}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                </ScrollView>
-
-                {field.type === 'text' ? (
-                  <View style={styles.typeChipsRow}>
-                    <Pressable
-                      onPress={() => updateFieldAt(index, { multiline: !field.multiline })}
-                      style={[styles.typeChip, field.multiline && styles.typeChipActive]}
-                    >
-                      <Text
-                        style={[
-                          styles.typeChipText,
-                          field.multiline && styles.typeChipTextActive,
-                        ]}
-                      >
-                        {field.multiline ? '✓ 多行长文本（书摘/随感）' : '设为多行长文本'}
-                      </Text>
-                    </Pressable>
-                  </View>
-                ) : null}
-
-                {(field.type === 'select' || field.type === 'multi_select') && (
-                  <TextInput
-                    value={(field.options ?? []).map((o) => o.value).join(', ')}
-                    onChangeText={(txt) =>
-                      updateFieldAt(index, {
-                        options: txt
-                          .split(/[,，]/)
-                          .map((s) => s.trim())
-                          .filter(Boolean)
-                          .map((value) => ({ value })),
-                      })
-                    }
-                    placeholder="选项列表，用逗号分隔（如：待办, 进行中, 已完成）"
-                    placeholderTextColor={Palette.inkMuted}
-                    style={styles.smallInput}
-                  />
-                )}
-
-                {field.type === 'relation' && (
-                  <View style={styles.typeChipsRow}>
-                    <Text style={styles.subFieldHint}>指向目标库：</Text>
-                    {libraries.map((targetLib) => {
-                      const active = field.relationConfig?.targetLibrarySlug === targetLib.slug;
-                      return (
-                        <Pressable
-                          key={targetLib.slug}
-                          onPress={() =>
-                            updateFieldAt(index, {
-                              relationConfig: {
-                                targetLibrarySlug: targetLib.slug,
-                                allowMultiple: true,
-                              },
-                            })
-                          }
-                          style={[styles.typeChip, active && styles.typeChipActive]}
-                        >
-                          <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
-                            {targetLib.icon} {targetLib.name}
-                          </Text>
-                        </Pressable>
-                      );
-                    })}
-                  </View>
-                )}
-
-                {field.type === 'formula' && (
-                  <TextInput
-                    value={field.formulaExpr ?? ''}
-                    onChangeText={(v) => updateFieldAt(index, { formulaExpr: v })}
-                    placeholder="表达式，如: ROUND(price / MAX(1, DAYS_SINCE(buy_date)), 2)"
-                    placeholderTextColor={Palette.inkMuted}
-                    autoCapitalize="none"
-                    style={styles.smallInput}
-                  />
-                )}
-
-                {field.type === 'rollup' && (
+              return (
+                <View
+                  key={rowKey}
+                  style={[styles.fieldCard, isPickerOpen && styles.fieldCardActive]}
+                >
                   <View style={styles.rowGap}>
                     <TextInput
-                      value={field.rollupConfig?.relationFieldKey ?? ''}
-                      onChangeText={(v) =>
-                        updateFieldAt(index, {
-                          rollupConfig: {
-                            relationFieldKey: v,
-                            targetFieldKey: field.rollupConfig?.targetFieldKey ?? 'amount',
-                            fn: field.rollupConfig?.fn ?? 'SUM',
-                          },
-                        })
-                      }
-                      placeholder="关联key 或 reverse:库.字段"
-                      autoCapitalize="none"
-                      style={[styles.smallInput, { flex: 1 }]}
+                      value={field.label}
+                      onChangeText={(v) => updateFieldAt(index, { label: v })}
+                      placeholder="填写名称，如：书摘随感、页码"
+                      placeholderTextColor={Palette.inkMuted}
+                      style={[styles.smallInput, styles.fieldNameInput]}
                     />
-                    <TextInput
-                      value={field.rollupConfig?.targetFieldKey ?? ''}
-                      onChangeText={(v) =>
-                        updateFieldAt(index, {
-                          rollupConfig: {
-                            relationFieldKey: field.rollupConfig?.relationFieldKey ?? '',
-                            targetFieldKey: v,
-                            fn: field.rollupConfig?.fn ?? 'SUM',
-                          },
-                        })
-                      }
-                      placeholder="聚合目标字段"
-                      autoCapitalize="none"
-                      style={[styles.smallInput, { width: 105 }]}
-                    />
+
+                    <Pressable
+                      onPress={() => toggleTypePicker(rowKey)}
+                      style={({ pressed }) => [
+                        styles.typeSelectBtn,
+                        isPickerOpen && styles.typeSelectBtnOpen,
+                        pressed && { opacity: 0.78, transform: [{ scale: 0.97 }] },
+                      ]}
+                      accessibilityLabel={`选择${field.label || '记录项'}类型`}
+                    >
+                      <Feather
+                        name={typeBadgeIcon}
+                        size={13}
+                        color={isPickerOpen ? Palette.brand : Palette.inkSecondary}
+                      />
+                      <Text
+                        numberOfLines={1}
+                        style={[
+                          styles.typeSelectText,
+                          isPickerOpen && styles.typeSelectTextOpen,
+                        ]}
+                      >
+                        {typeBadgeLabel}
+                      </Text>
+                      <Feather
+                        name={isPickerOpen ? 'chevron-up' : 'chevron-down'}
+                        size={13}
+                        color={isPickerOpen ? Palette.brand : Palette.inkMuted}
+                      />
+                    </Pressable>
+
+                    {fields.length > 1 ? (
+                      <Pressable
+                        onPress={() => removeFieldAt(index)}
+                        hitSlop={6}
+                        style={({ pressed }) => [
+                          styles.delIconBtn,
+                          pressed && { opacity: 0.65 },
+                        ]}
+                        accessibilityLabel="删除记录项"
+                      >
+                        <Feather name="trash-2" size={15} color={Palette.danger} />
+                      </Pressable>
+                    ) : null}
                   </View>
-                )}
-              </View>
-            ))}
+
+                  {isPickerOpen ? (
+                    <View style={styles.typeDropdownPanel}>
+                      <Text style={styles.typeGroupLabel}>常用类型</Text>
+                      <View style={styles.typeGrid}>
+                        {COMMON_FIELD_TYPES.map((t) => {
+                          const active = field.type === t;
+                          return (
+                            <Pressable
+                              key={t}
+                              onPress={() => {
+                                LayoutAnimation.configureNext(
+                                  LayoutAnimation.Presets.easeInEaseOut
+                                );
+                                updateFieldAt(
+                                  index,
+                                  t === 'text' ? { type: t } : { type: t, multiline: false }
+                                );
+                                setOpenTypePickerKey(null);
+                              }}
+                              style={({ pressed }) => [
+                                styles.typeGridCell,
+                                active && styles.typeGridCellActive,
+                                pressed && { opacity: 0.75 },
+                              ]}
+                            >
+                              <Feather
+                                name={FIELD_TYPE_ICONS[t]}
+                                size={13}
+                                color={active ? Palette.brand : Palette.inkSecondary}
+                              />
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.typeGridCellText,
+                                  active && styles.typeGridCellTextActive,
+                                ]}
+                              >
+                                {FIELD_TYPE_LABELS[t]}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+
+                      {field.type === 'text' ? (
+                        <Pressable
+                          onPress={() => {
+                            updateFieldAt(index, { multiline: !field.multiline });
+                          }}
+                          style={({ pressed }) => [
+                            styles.multilineToggleRow,
+                            field.multiline && styles.multilineToggleRowActive,
+                            pressed && { opacity: 0.8 },
+                          ]}
+                        >
+                          <Feather
+                            name={field.multiline ? 'check-square' : 'square'}
+                            size={14}
+                            color={field.multiline ? Palette.brand : Palette.inkMuted}
+                          />
+                          <Text
+                            style={[
+                              styles.multilineToggleText,
+                              field.multiline && styles.multilineToggleTextActive,
+                            ]}
+                          >
+                            多行长文本（适合书摘、随感或长备注）
+                          </Text>
+                        </Pressable>
+                      ) : null}
+
+                      <Text style={[styles.typeGroupLabel, { marginTop: 4 }]}>
+                        关联与自动计算
+                      </Text>
+                      <View style={styles.typeGrid}>
+                        {ADVANCED_FIELD_TYPES.map((t) => {
+                          const active = field.type === t;
+                          return (
+                            <Pressable
+                              key={t}
+                              onPress={() => {
+                                LayoutAnimation.configureNext(
+                                  LayoutAnimation.Presets.easeInEaseOut
+                                );
+                                updateFieldAt(index, { type: t, multiline: false });
+                                setOpenTypePickerKey(null);
+                              }}
+                              style={({ pressed }) => [
+                                styles.typeGridCell,
+                                active && styles.typeGridCellActive,
+                                pressed && { opacity: 0.75 },
+                              ]}
+                            >
+                              <Feather
+                                name={FIELD_TYPE_ICONS[t]}
+                                size={13}
+                                color={active ? Palette.brand : Palette.inkSecondary}
+                              />
+                              <Text
+                                numberOfLines={1}
+                                style={[
+                                  styles.typeGridCellText,
+                                  active && styles.typeGridCellTextActive,
+                                ]}
+                              >
+                                {FIELD_TYPE_LABELS[t]}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </View>
+                    </View>
+                  ) : null}
+
+                  {(field.type === 'select' || field.type === 'multi_select') && (
+                    <TextInput
+                      value={(field.options ?? []).map((o) => o.value).join(', ')}
+                      onChangeText={(txt) =>
+                        updateFieldAt(index, {
+                          options: txt
+                            .split(/[,，]/)
+                            .map((s) => s.trim())
+                            .filter(Boolean)
+                            .map((value) => ({ value })),
+                        })
+                      }
+                      placeholder="选项列表，用逗号分隔（如：待办, 进行中, 已完成）"
+                      placeholderTextColor={Palette.inkMuted}
+                      style={styles.smallInput}
+                    />
+                  )}
+
+                  {field.type === 'relation' && (
+                    <View style={styles.typeChipsRow}>
+                      <Text style={styles.subFieldHint}>指向目标库：</Text>
+                      {libraries.map((targetLib) => {
+                        const active = field.relationConfig?.targetLibrarySlug === targetLib.slug;
+                        return (
+                          <Pressable
+                            key={targetLib.slug}
+                            onPress={() =>
+                              updateFieldAt(index, {
+                                relationConfig: {
+                                  targetLibrarySlug: targetLib.slug,
+                                  allowMultiple: true,
+                                },
+                              })
+                            }
+                            style={[styles.typeChip, active && styles.typeChipActive]}
+                          >
+                            <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
+                              {targetLib.icon} {targetLib.name}
+                            </Text>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                  )}
+
+                  {field.type === 'formula' && (
+                    <TextInput
+                      value={field.formulaExpr ?? ''}
+                      onChangeText={(v) => updateFieldAt(index, { formulaExpr: v })}
+                      placeholder="表达式，如: ROUND(price / MAX(1, DAYS_SINCE(buy_date)), 2)"
+                      placeholderTextColor={Palette.inkMuted}
+                      autoCapitalize="none"
+                      style={styles.smallInput}
+                    />
+                  )}
+
+                  {field.type === 'rollup' && (
+                    <View style={styles.rowGap}>
+                      <TextInput
+                        value={field.rollupConfig?.relationFieldKey ?? ''}
+                        onChangeText={(v) =>
+                          updateFieldAt(index, {
+                            rollupConfig: {
+                              relationFieldKey: v,
+                              targetFieldKey: field.rollupConfig?.targetFieldKey ?? 'amount',
+                              fn: field.rollupConfig?.fn ?? 'SUM',
+                            },
+                          })
+                        }
+                        placeholder="关联key 或 reverse:库.字段"
+                        autoCapitalize="none"
+                        style={[styles.smallInput, { flex: 1 }]}
+                      />
+                      <TextInput
+                        value={field.rollupConfig?.targetFieldKey ?? ''}
+                        onChangeText={(v) =>
+                          updateFieldAt(index, {
+                            rollupConfig: {
+                              relationFieldKey: field.rollupConfig?.relationFieldKey ?? '',
+                              targetFieldKey: v,
+                              fn: field.rollupConfig?.fn ?? 'SUM',
+                            },
+                          })
+                        }
+                        placeholder="聚合目标字段"
+                        autoCapitalize="none"
+                        style={[styles.smallInput, { width: 105 }]}
+                      />
+                    </View>
+                  )}
+                </View>
+              );
+            })}
 
             {/* 3. 列表卡片显示 */}
             <Text style={styles.sectionTitle}>3. 列表卡片显示</Text>
@@ -756,9 +931,7 @@ export function SchemaEditorModal({
               <Text style={styles.saveText}>保存</Text>
             </Pressable>
           </View>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
+    </BottomSheetModal>
   );
 }
 
@@ -811,26 +984,13 @@ function SlotPickerRow({
 }
 
 const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(20, 26, 25, 0.48)',
-    justifyContent: 'flex-end',
-  },
-  sheet: {
-    backgroundColor: Palette.bgSurface,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: '92%',
-    width: '100%',
-    maxWidth: 720,
-    alignSelf: 'center',
-  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingTop: 10,
+    paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: Palette.borderHairline,
   },
@@ -1013,13 +1173,119 @@ const styles = StyleSheet.create({
   fieldCard: {
     backgroundColor: Palette.bgCanvas,
     borderRadius: 14,
-    padding: 12,
+    padding: 10,
     borderWidth: 1,
     borderColor: Palette.borderHairline,
     gap: 8,
   },
+  fieldCardActive: {
+    borderColor: Palette.brand,
+  },
+  fieldNameInput: {
+    flex: 1,
+    minWidth: 0,
+    height: 38,
+    paddingVertical: 0,
+  },
+  typeSelectBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    height: 38,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    flexShrink: 0,
+  },
+  typeSelectBtnOpen: {
+    backgroundColor: Palette.brandSoft,
+    borderColor: Palette.brand,
+  },
+  typeSelectText: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: Palette.inkSecondary,
+    maxWidth: 68,
+  },
+  typeSelectTextOpen: {
+    color: Palette.brand,
+  },
+  typeDropdownPanel: {
+    backgroundColor: Palette.bgSurface,
+    borderRadius: 12,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    gap: 8,
+  },
+  typeGroupLabel: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.inkMuted,
+  },
+  typeGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  typeGridCell: {
+    width: '31.5%',
+    flexGrow: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    paddingVertical: 8,
+    paddingHorizontal: 6,
+    borderRadius: 9,
+    backgroundColor: Palette.bgCanvas,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+  },
+  typeGridCellActive: {
+    backgroundColor: Palette.brandSoft,
+    borderColor: Palette.brand,
+  },
+  typeGridCellText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  typeGridCellTextActive: {
+    color: Palette.brand,
+    fontWeight: '700',
+  },
+  multilineToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 7,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 9,
+    backgroundColor: Palette.bgCanvas,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+  },
+  multilineToggleRowActive: {
+    backgroundColor: Palette.brandSoft,
+    borderColor: Palette.brand,
+  },
+  multilineToggleText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: Palette.inkSecondary,
+  },
+  multilineToggleTextActive: {
+    color: Palette.brand,
+    fontWeight: '700',
+  },
   delIconBtn: {
-    padding: 6,
+    width: 34,
+    height: 38,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   typeChipsRow: {
     flexDirection: 'row',

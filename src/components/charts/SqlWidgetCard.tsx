@@ -1,5 +1,5 @@
 import Feather from '@expo/vector-icons/Feather';
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Svg, { Circle, G, Line, Path, Rect } from 'react-native-svg';
 import { ChartSeriesColors, Palette, ToneMap } from '@/constants/design-tokens';
@@ -18,6 +18,8 @@ interface SqlWidgetCardProps {
   onMoveUp?: () => void;
   onMoveDown?: () => void;
   compact?: boolean;
+  /** 处于后台不可见页面时暂停重算 SQL，避免切页/保存记录时掉帧 */
+  paused?: boolean;
 }
 
 function formatMetric(val: unknown, prefix = '', suffix = ''): string {
@@ -50,12 +52,18 @@ export function SqlWidgetCard({
   onMoveUp,
   onMoveDown,
   compact,
+  paused = false,
 }: SqlWidgetCardProps) {
   const { repo, revision } = useOmni();
   const tone = ToneMap[widget.accentTone ?? 'teal'] ?? ToneMap.teal;
 
-  const queryOutcome = (() => {
-    if (!repo || revision < 0) {
+  const [syncedRevision, setSyncedRevision] = useState(revision);
+  if (!paused && syncedRevision !== revision) {
+    setSyncedRevision(revision);
+  }
+
+  const queryOutcome = useMemo(() => {
+    if (!repo || syncedRevision < 0) {
       return { rows: [] as Array<Record<string, unknown>>, error: null as string | null };
     }
     try {
@@ -64,7 +72,7 @@ export function SqlWidgetCard({
     } catch (err) {
       return { rows: [], error: err instanceof Error ? err.message : String(err) };
     }
-  })();
+  }, [repo, syncedRevision, widget.readonlySql]);
 
   const { rows, error } = queryOutcome;
 

@@ -1,5 +1,4 @@
 import Feather from '@expo/vector-icons/Feather';
-import { useRouter } from 'expo-router';
 import React, { useMemo, useState } from 'react';
 import {
   Pressable,
@@ -14,9 +13,10 @@ import { TabPageHeader } from '@/components/layout/TabPageHeader';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord } from '@/db/repository';
+import { useSafeNavigation } from '@/utils/navigation';
 
 export default function HomeVaultScreen() {
-  const router = useRouter();
+  const nav = useSafeNavigation();
   const {
     repo,
     libraries,
@@ -63,8 +63,8 @@ export default function HomeVaultScreen() {
           <>
             {!hasApiKey ? (
               <Pressable
-                onPress={() => router.push('/(tabs)/settings')}
-                style={({ pressed }) => [styles.keyStatusPill, pressed && { opacity: 0.75 }]}
+                onPress={() => nav.navigate('/(tabs)/settings')}
+                style={({ pressed }) => [styles.keyStatusPill, pressed && { opacity: 0.75, transform: [{ scale: 0.96 }] }]}
               >
                 <View style={styles.statusDot} />
                 <Text style={styles.keyStatusText}>连接助手</Text>
@@ -73,7 +73,7 @@ export default function HomeVaultScreen() {
             <Pressable
               id="btn-new-library"
               onPress={() => setCreateModalOpen(true)}
-              style={({ pressed }) => [styles.newLibBtn, pressed && { opacity: 0.85 }]}
+              style={({ pressed }) => [styles.newLibBtn, pressed && { opacity: 0.85, transform: [{ scale: 0.96 }] }]}
             >
               <Feather name="plus" size={16} color={Palette.inkInverse} />
               <Text style={styles.newLibBtnText}>新建</Text>
@@ -124,10 +124,11 @@ export default function HomeVaultScreen() {
               searchHits.map((hit, idx) => (
                 <Pressable
                   key={hit.id}
-                  onPress={() => router.push(`/entry/${hit.id}`)}
-                  style={[
+                  onPress={() => nav.push(`/entry/${hit.id}`)}
+                  style={({ pressed }) => [
                     styles.searchHitRow,
                     idx === searchHits.length - 1 && { borderBottomWidth: 0 },
+                    pressed && { opacity: 0.68 },
                   ]}
                 >
                   <Text style={styles.searchHitTitle} numberOfLines={1}>
@@ -155,7 +156,7 @@ export default function HomeVaultScreen() {
             return (
               <Pressable
                 key={lib.id}
-                onPress={() => router.push(`/library/${lib.slug}`)}
+                onPress={() => nav.push(`/library/${lib.slug}`)}
                 onLongPress={() => setManagingLibrary(lib)}
                 style={({ pressed }) => [styles.libCard, pressed && styles.libCardPressed]}
               >
@@ -182,9 +183,13 @@ export default function HomeVaultScreen() {
                         key={child.id}
                         onPress={(e) => {
                           e.stopPropagation();
-                          router.push(`/library/${child.slug}`);
+                          nav.push(`/library/${child.slug}`);
                         }}
-                        style={[styles.subLibChip, { backgroundColor: tone.soft }]}
+                        style={({ pressed }) => [
+                          styles.subLibChip,
+                          { backgroundColor: tone.soft },
+                          pressed && { opacity: 0.72 },
+                        ]}
                       >
                         <Text style={[styles.subLibChipText, { color: tone.ink }]} numberOfLines={1}>
                           ↳ {child.icon} {child.name} · {child.entryCount}
@@ -235,7 +240,7 @@ export default function HomeVaultScreen() {
         }}
         onSaved={(newSlug) => {
           if (!managingLibrary) {
-            router.push(`/library/${newSlug}`);
+            nav.push(`/library/${newSlug}`);
           }
         }}
       />

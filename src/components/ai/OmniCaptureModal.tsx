@@ -6,8 +6,6 @@ import { useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -28,6 +26,8 @@ import {
 } from '@/ai/agents';
 import { transcribeAudioWithDeepSeek } from '@/ai/deepseek-client';
 import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
+import { BottomSheetModal } from '@/components/ui/BottomSheetModal';
+import { SlidingSegmentedBar } from '@/components/ui/SlidingSegmentedBar';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { ArchitectLibraryDiff, LibraryRecord } from '@/db/repository';
@@ -494,7 +494,9 @@ export function OmniCaptureModal() {
       setResult(null);
       closeOmniCapture();
       if (firstSlug) {
-        router.push(`/library/${firstSlug}`);
+        setTimeout(() => {
+          router.push(`/library/${firstSlug}`);
+        }, 210);
       }
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));
@@ -627,74 +629,72 @@ export function OmniCaptureModal() {
   };
 
   return (
-    <Modal
+    <BottomSheetModal
       visible={omniModalVisible}
-      animationType="slide"
-      transparent
-      onRequestClose={closeOmniCapture}
-    >
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.backdrop}
-      >
-        <View style={styles.sheet}>
-          <View style={styles.header}>
-            <View style={styles.headerTitleRow}>
-              <Feather name={headerConfig.icon} size={18} color={Palette.brand} />
-              <Text style={styles.headerTitle} numberOfLines={1}>
-                {headerConfig.title}
-              </Text>
-              <View style={styles.roleBadge}>
-                <Text style={styles.roleBadgeText}>{headerConfig.roleBadge}</Text>
-              </View>
+      onClose={closeOmniCapture}
+      maxHeight="90%"
+      maxWidth={680}
+      header={
+        <View style={styles.header}>
+          <View style={styles.headerTitleRow}>
+            <Feather name={headerConfig.icon} size={18} color={Palette.brand} />
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              {headerConfig.title}
+            </Text>
+            <View style={styles.roleBadge}>
+              <Text style={styles.roleBadgeText}>{headerConfig.roleBadge}</Text>
             </View>
-            <Pressable onPress={closeOmniCapture} style={styles.closeBtn}>
-              <Feather name="x" size={20} color={Palette.inkSecondary} />
-            </Pressable>
           </View>
-
-          <ScrollView
-            style={styles.body}
-            contentContainerStyle={styles.bodyContent}
-            keyboardShouldPersistTaps="handled"
+          <Pressable
+            onPress={closeOmniCapture}
+            hitSlop={8}
+            style={({ pressed }) => [styles.closeBtn, pressed && { opacity: 0.6 }]}
           >
-            {!hasApiKey ? (
-              <Pressable
-                onPress={() => {
-                  closeOmniCapture();
-                  router.push('/(tabs)/settings');
-                }}
-                style={styles.keyNotice}
-              >
-                <Feather name="key" size={15} color={Palette.warning} />
-                <Text style={styles.keyNoticeText}>
-                  还未填写 API Key，点这里去「设置」连接后即可使用 →
-                </Text>
-              </Pressable>
-            ) : null}
+            <Feather name="x" size={20} color={Palette.inkSecondary} />
+          </Pressable>
+        </View>
+      }
+    >
+      <ScrollView
+        style={styles.body}
+        contentContainerStyle={styles.bodyContent}
+        keyboardShouldPersistTaps="handled"
+      >
+        {!hasApiKey ? (
+          <Pressable
+            onPress={() => {
+              closeOmniCapture();
+              setTimeout(() => {
+                router.navigate('/(tabs)/settings');
+              }, 200);
+            }}
+            style={({ pressed }) => [styles.keyNotice, pressed && { opacity: 0.78 }]}
+          >
+            <Feather name="key" size={15} color={Palette.warning} />
+            <Text style={styles.keyNoticeText}>
+              还未填写 API Key，点这里去「设置」连接后即可使用 →
+            </Text>
+          </Pressable>
+        ) : null}
 
-            {/* 场景模式切换条（默认聚焦当前角色，随时可切换） */}
-            <View style={styles.modeBar}>
-              {modeOptions.map((opt) => {
-                const active = activeMode === opt.mode;
-                return (
-                  <Pressable
-                    key={opt.mode}
-                    onPress={() => setSelectedMode(opt.mode)}
-                    style={[styles.modePill, active && styles.modePillActive]}
-                  >
-                    <Feather
-                      name={opt.icon}
-                      size={12}
-                      color={active ? Palette.inkInverse : Palette.inkSecondary}
-                    />
-                    <Text style={[styles.modePillText, active && styles.modePillTextActive]}>
-                      {opt.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
+        {/* 场景模式切换条（带顺滑弹簧滑块，随时可切换） */}
+        <SlidingSegmentedBar
+          compact
+          items={modeOptions.map((opt) => ({
+            key: opt.mode,
+            label: opt.label,
+            icon: opt.icon,
+          }))}
+          activeIndex={Math.max(
+            0,
+            modeOptions.findIndex((opt) => opt.mode === activeMode)
+          )}
+          onSelect={(idx) => {
+            const picked = modeOptions[idx];
+            if (picked) setSelectedMode(picked.mode);
+          }}
+          style={styles.modeBarWrap}
+        />
 
             {omniEntryContext ? (
               <View style={styles.contextBanner}>
@@ -1080,33 +1080,18 @@ export function OmniCaptureModal() {
               </Pressable>
             )}
           </View>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
+    </BottomSheetModal>
   );
 }
 
 const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(20, 26, 25, 0.48)',
-    justifyContent: 'flex-end',
-  },
-  sheet: {
-    backgroundColor: Palette.bgSurface,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: '90%',
-    width: '100%',
-    maxWidth: 680,
-    alignSelf: 'center',
-  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingVertical: 15,
+    paddingTop: 10,
+    paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: Palette.borderHairline,
   },
@@ -1143,6 +1128,9 @@ const styles = StyleSheet.create({
   bodyContent: {
     paddingVertical: 14,
     gap: 12,
+  },
+  modeBarWrap: {
+    backgroundColor: Palette.bgCanvas,
   },
   modeBar: {
     flexDirection: 'row',

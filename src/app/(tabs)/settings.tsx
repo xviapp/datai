@@ -5,6 +5,7 @@ import * as Sharing from 'expo-sharing';
 import React, { useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  LayoutAnimation,
   Modal,
   Platform,
   Pressable,
@@ -271,7 +272,10 @@ export default function SettingsScreen() {
         <Text style={styles.groupHeading}>智能助手</Text>
         <View style={styles.groupCard}>
           <Pressable
-            onPress={() => setAiExpanded((v) => !v)}
+            onPress={() => {
+              LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+              setAiExpanded((v) => !v);
+            }}
             style={({ pressed }) => [styles.listRow, pressed && { opacity: 0.78 }]}
           >
             <View
@@ -372,7 +376,10 @@ export default function SettingsScreen() {
 
               {/* 低频接口地址收入高级选项 */}
               <Pressable
-                onPress={() => setShowAdvancedUrl((v) => !v)}
+                onPress={() => {
+                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                  setShowAdvancedUrl((v) => !v);
+                }}
                 style={styles.advancedToggle}
               >
                 <Text style={styles.advancedToggleText}>
@@ -452,8 +459,11 @@ export default function SettingsScreen() {
 
               {snapshots.length > 3 ? (
                 <Pressable
-                  onPress={() => setShowAllSnapshots((v) => !v)}
-                  style={styles.expandListBtn}
+                  onPress={() => {
+                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                    setShowAllSnapshots((v) => !v);
+                  }}
+                  style={({ pressed }) => [styles.expandListBtn, pressed && { opacity: 0.7 }]}
                 >
                   <Text style={styles.expandListText}>
                     {showAllSnapshots ? '收起部分记录' : `查看全部 (${snapshots.length})`}
@@ -504,6 +514,8 @@ export default function SettingsScreen() {
       <Modal
         visible={Boolean(pendingUndo)}
         transparent
+        statusBarTranslucent
+        navigationBarTranslucent
         animationType="fade"
         onRequestClose={() => setPendingUndo(null)}
       >

@@ -2,6 +2,7 @@ import Feather from '@expo/vector-icons/Feather';
 import { Image } from 'expo-image';
 import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { ContentTransitionView } from '@/components/ui/ContentTransitionView';
 import { HighlightTonePalette, Palette, ToneMap } from '@/constants/design-tokens';
 import type { HydratedEntry, LibraryRecord } from '@/db/repository';
 import { formatLocalDate } from '@/engine/date';
@@ -293,6 +294,7 @@ export function DynamicCalendarView({
   const fieldMap = useMemo(() => new Map(library.fields.map((f) => [f.key, f])), [library.fields]);
 
   const [monthOffset, setMonthOffset] = useState(0);
+  const [monthSlideDir, setMonthSlideDir] = useState<-1 | 0 | 1>(0);
   const [selectedDayStr, setSelectedDayStr] = useState<string | null>(null);
 
   const monthInfo = useMemo(() => {
@@ -343,11 +345,13 @@ export function DynamicCalendarView({
       <View style={styles.calCard}>
         <View style={styles.calHeader}>
           <Pressable
+            hitSlop={8}
             onPress={() => {
+              setMonthSlideDir(-1);
               setMonthOffset((m) => m - 1);
               setSelectedDayStr(null);
             }}
-            style={styles.calNavBtn}
+            style={({ pressed }) => [styles.calNavBtn, pressed && { opacity: 0.65, transform: [{ scale: 0.92 }] }]}
           >
             <Feather name="chevron-left" size={18} color={Palette.inkPrimary} />
           </Pressable>
@@ -355,11 +359,13 @@ export function DynamicCalendarView({
             {monthInfo.year} 年 {monthInfo.month} 月
           </Text>
           <Pressable
+            hitSlop={8}
             onPress={() => {
+              setMonthSlideDir(1);
               setMonthOffset((m) => m + 1);
               setSelectedDayStr(null);
             }}
-            style={styles.calNavBtn}
+            style={({ pressed }) => [styles.calNavBtn, pressed && { opacity: 0.65, transform: [{ scale: 0.92 }] }]}
           >
             <Feather name="chevron-right" size={18} color={Palette.inkPrimary} />
           </Pressable>
@@ -373,7 +379,11 @@ export function DynamicCalendarView({
           ))}
         </View>
 
-        <View style={styles.daysGrid}>
+        <ContentTransitionView
+          transitionKey={monthInfo.prefix}
+          slideDirection={monthSlideDir}
+          style={styles.daysGrid}
+        >
           {dayCells.map((dateStr, idx) => {
             if (!dateStr) {
               return <View key={`pad-${idx}`} style={styles.dayCell} />;
@@ -386,10 +396,11 @@ export function DynamicCalendarView({
               <Pressable
                 key={dateStr}
                 onPress={() => setSelectedDayStr(selected ? null : dateStr)}
-                style={[
+                style={({ pressed }) => [
                   styles.dayCell,
                   count > 0 && styles.dayCellHasData,
                   selected && styles.dayCellSelected,
+                  pressed && { opacity: 0.72, transform: [{ scale: 0.93 }] },
                 ]}
               >
                 <Text style={[styles.dayNum, selected && styles.dayNumSelected]}>{dayNum}</Text>
@@ -404,20 +415,25 @@ export function DynamicCalendarView({
               </Pressable>
             );
           })}
-        </View>
+        </ContentTransitionView>
       </View>
 
-      <Text style={styles.calSubheading}>
-        {selectedDayStr ? `${selectedDayStr} 当日记录 (${displayedEntries.length})` : `本月记录 (${displayedEntries.length})`}
-      </Text>
+      <ContentTransitionView
+        transitionKey={`${monthInfo.prefix}::${selectedDayStr ?? 'all'}`}
+        slideDirection={0}
+        style={styles.calWrap}
+      >
+        <Text style={styles.calSubheading}>
+          {selectedDayStr ? `${selectedDayStr} 当日记录 (${displayedEntries.length})` : `本月记录 (${displayedEntries.length})`}
+        </Text>
 
-      {displayedEntries.map((e) => (
-        <Pressable
-          key={e.id}
-          onPress={() => onSelectEntry(e.id)}
-          style={styles.calEntryRow}
-        >
-          <View style={styles.calEntryLeft}>
+        {displayedEntries.map((e) => (
+          <Pressable
+            key={e.id}
+            onPress={() => onSelectEntry(e.id)}
+            style={({ pressed }) => [styles.calEntryRow, pressed && styles.cardPressed]}
+          >
+            <View style={styles.calEntryLeft}>
             <Text style={styles.calEntryTitle} numberOfLines={1}>
               {e.titleSummary}
             </Text>
@@ -432,6 +448,7 @@ export function DynamicCalendarView({
           ) : null}
         </Pressable>
       ))}
+      </ContentTransitionView>
     </View>
   );
 }

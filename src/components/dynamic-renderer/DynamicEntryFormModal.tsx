@@ -3,8 +3,6 @@ import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import React, { useMemo, useState } from 'react';
 import {
-  KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -15,6 +13,7 @@ import {
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { BottomSheetModal } from '@/components/ui/BottomSheetModal';
 import { Palette } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord } from '@/db/repository';
@@ -152,22 +151,27 @@ export function DynamicEntryFormModal({
   };
 
   return (
-    <Modal visible={visible} animationType="slide" transparent onRequestClose={onClose}>
-      <KeyboardAvoidingView
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.backdrop}
-      >
-        <View style={styles.sheet}>
-          <View style={styles.header}>
-            <Text style={styles.headerTitle}>
-              {editingEntryId ? `编辑 · ${library.name}` : `记一条 · ${library.icon} ${library.name}`}
-            </Text>
-            <Pressable onPress={onClose} style={styles.closeBtn}>
-              <Feather name="x" size={20} color={Palette.inkSecondary} />
-            </Pressable>
-          </View>
-
-          <ScrollView
+    <BottomSheetModal
+      visible={visible}
+      onClose={onClose}
+      maxHeight="90%"
+      maxWidth={680}
+      header={
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>
+            {editingEntryId ? `编辑 · ${library.name}` : `记一条 · ${library.icon} ${library.name}`}
+          </Text>
+          <Pressable
+            onPress={onClose}
+            hitSlop={8}
+            style={({ pressed }) => [styles.closeBtn, pressed && { opacity: 0.6 }]}
+          >
+            <Feather name="x" size={20} color={Palette.inkSecondary} />
+          </Pressable>
+        </View>
+      }
+    >
+      <ScrollView
             style={styles.scrollArea}
             contentContainerStyle={styles.scrollContent}
             keyboardShouldPersistTaps="handled"
@@ -211,9 +215,7 @@ export function DynamicEntryFormModal({
               <Text style={styles.saveText}>{editingEntryId ? '保存修改' : '保存'}</Text>
             </Pressable>
           </View>
-        </View>
-      </KeyboardAvoidingView>
-    </Modal>
+    </BottomSheetModal>
   );
 }
 
@@ -457,26 +459,13 @@ function FieldInputBlock({
 }
 
 const styles = StyleSheet.create({
-  backdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(20, 26, 25, 0.45)',
-    justifyContent: 'flex-end',
-  },
-  sheet: {
-    backgroundColor: Palette.bgSurface,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    maxHeight: '90%',
-    width: '100%',
-    maxWidth: 680,
-    alignSelf: 'center',
-  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingTop: 10,
+    paddingBottom: 14,
     borderBottomWidth: 1,
     borderBottomColor: Palette.borderHairline,
   },

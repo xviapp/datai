@@ -1,6 +1,6 @@
 import Feather from '@expo/vector-icons/Feather';
-import { useRouter } from 'expo-router';
-import React, { type ComponentRef, useRef, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
+import React, { type ComponentRef, useCallback, useMemo, useRef, useState } from 'react';
 import {
   type LayoutChangeEvent,
   type NativeScrollEvent,
@@ -18,6 +18,7 @@ import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord, SavedDashboardWidget } from '@/db/repository';
 import { sqlReferencesLibraryView } from '@/db/types';
+import { useSafeNavigation } from '@/utils/navigation';
 
 type StatsTabItem =
   | {
@@ -37,19 +38,44 @@ type StatsTabItem =
     };
 
 export default function StatsScreen() {
-  const router = useRouter();
+  const nav = useSafeNavigation();
   const { width: screenWidth } = useWindowDimensions();
   const { repo, libraries, revision, openOmniCapture } = useOmni();
 
+  const [isFocused, setIsFocused] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [manageMode, setManageMode] = useState(false);
+  const [pagerWidth, setPagerWidth] = useState(screenWidth);
   const pagerRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const chipsScrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
   const chipLayoutsRef = useRef<Record<number, { x: number; width: number }>>({});
+  const programmaticScrollRef = useRef(false);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const allWidgets = !repo || revision < 0 ? [] : repo.listAllDashboardWidgets();
-  const overviewWidgets = allWidgets.filter((w) => w.pinnedOverview);
-  const unpinnedWidgets = allWidgets.filter((w) => !w.pinnedOverview);
+  useFocusEffect(
+    useCallback(() => {
+      setIsFocused(true);
+      return () => setIsFocused(false);
+    }, [])
+  );
+
+  const [syncedRevision, setSyncedRevision] = useState(revision);
+  if (isFocused && syncedRevision !== revision) {
+    setSyncedRevision(revision);
+  }
+
+  const allWidgets = useMemo(
+    () => (!repo || syncedRevision < 0 ? [] : repo.listAllDashboardWidgets()),
+    [repo, syncedRevision]
+  );
+  const overviewWidgets = useMemo(
+    () => allWidgets.filter((w) => w.pinnedOverview),
+    [allWidgets]
+  );
+  const unpinnedWidgets = useMemo(
+    () => allWidgets.filter((w) => !w.pinnedOverview),
+    [allWidgets]
+  );
 
   // 仅对「已设计统计图表」的记录本生成分组标签
   const libraryTabs: StatsTabItem[] = [];
@@ -89,22 +115,45 @@ export default function StatsScreen() {
       ? (ToneMap[currentTab.library.color] ?? ToneMap.teal)
       : ToneMap.teal;
 
+  const effectiveWidth = pagerWidth > 0 ? pagerWidth : screenWidth;
+
   const scrollChipIntoView = (idx: number) => {
     const layout = chipLayoutsRef.current[idx];
     if (!layout || !chipsScrollRef.current) return;
-    const targetX = Math.max(0, layout.x - screenWidth / 2 + layout.width / 2);
+    const targetX = Math.max(0, layout.x - effectiveWidth / 2 + layout.width / 2);
     chipsScrollRef.current.scrollTo({ x: targetX, animated: true });
   };
 
   const handleSelectTab = (idx: number) => {
+    programmaticScrollRef.current = true;
+    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    scrollTimerRef.current = setTimeout(() => {
+      programmaticScrollRef.current = false;
+    }, 380);
     setActiveIndex(idx);
-    pagerRef.current?.scrollTo({ x: idx * screenWidth, animated: true });
+    pagerRef.current?.scrollTo({ x: idx * effectiveWidth, animated: true });
     scrollChipIntoView(idx);
   };
 
-  const handlePagerMomentumEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+  const handlePagerScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    if (programmaticScrollRef.current) return;
     const offsetX = e.nativeEvent.contentOffset.x;
-    const nextIdx = Math.round(offsetX / Math.max(1, screenWidth));
+    const nextIdx = Math.round(offsetX / Math.max(1, effectiveWidth));
+    const clamped = Math.max(0, Math.min(tabs.length - 1, nextIdx));
+    if (clamped !== safeActiveIndex) {
+      setActiveIndex(clamped);
+      scrollChipIntoView(clamped);
+    }
+  };
+
+  const handlePagerMomentumEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    programmaticScrollRef.current = false;
+    if (scrollTimerRef.current) {
+      clearTimeout(scrollTimerRef.current);
+      scrollTimerRef.current = null;
+    }
+    const offsetX = e.nativeEvent.contentOffset.x;
+    const nextIdx = Math.round(offsetX / Math.max(1, effectiveWidth));
     const clamped = Math.max(0, Math.min(tabs.length - 1, nextIdx));
     if (clamped !== safeActiveIndex) {
       setActiveIndex(clamped);
@@ -218,20 +267,29 @@ export default function StatsScreen() {
         ref={pagerRef}
         horizontal
         pagingEnabled
+        nestedScrollEnabled
         scrollEnabled={tabs.length > 1}
         showsHorizontalScrollIndicator={false}
+        onLayout={(e) => {
+          const w = e.nativeEvent.layout.width;
+          if (w > 0 && Math.abs(w - pagerWidth) > 0.5) setPagerWidth(w);
+        }}
+        onScroll={handlePagerScroll}
         onMomentumScrollEnd={handlePagerMomentumEnd}
         scrollEventThrottle={16}
         style={styles.pager}
       >
-        {tabs.map((tab) => {
+        {tabs.map((tab, tabIdx) => {
+          const isNearby = Math.abs(tabIdx - safeActiveIndex) <= 1;
+          const isPaused = !isFocused || !isNearby;
           const kpis = tab.widgets.filter((w) => w.chartType === 'kpi_number');
           const charts = tab.widgets.filter((w) => w.chartType !== 'kpi_number');
 
           return (
             <ScrollView
               key={tab.id}
-              style={{ width: screenWidth }}
+              nestedScrollEnabled
+              style={{ width: effectiveWidth }}
               contentContainerStyle={[
                 styles.pageContent,
                 tabs.length <= 1 && styles.pageContentNoChips,
@@ -255,10 +313,11 @@ export default function StatsScreen() {
                     </Text>
                   </View>
                   <Pressable
-                    onPress={() => router.push(`/library/${tab.library.slug}`)}
-                    style={[
+                    onPress={() => nav.push(`/library/${tab.library.slug}`)}
+                    style={({ pressed }) => [
                       styles.openLibBtn,
                       { backgroundColor: (ToneMap[tab.library.color] ?? ToneMap.teal).soft },
+                      pressed && { opacity: 0.75, transform: [{ scale: 0.96 }] },
                     ]}
                   >
                     <Text
@@ -306,6 +365,7 @@ export default function StatsScreen() {
                           key={`${tab.id}_${w.id}`}
                           widget={w}
                           compact
+                          paused={isPaused}
                           manageMode={manageMode}
                           pinnedOverview={w.pinnedOverview}
                           onToggleOverview={handleToggleOverview}
@@ -325,6 +385,7 @@ export default function StatsScreen() {
                         <SqlWidgetCard
                           key={`${tab.id}_${w.id}`}
                           widget={w}
+                          paused={isPaused}
                           manageMode={manageMode}
                           pinnedOverview={w.pinnedOverview}
                           onToggleOverview={handleToggleOverview}

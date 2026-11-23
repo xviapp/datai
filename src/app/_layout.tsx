@@ -44,9 +44,13 @@ function AppShell() {
         screenOptions={{
           headerShown: false,
           contentStyle: { backgroundColor: Palette.bgCanvas },
+          animation: 'ios_from_right',
+          animationMatchesGesture: true,
+          gestureEnabled: true,
+          fullScreenGestureEnabled: true,
         }}
       >
-        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="(tabs)" options={{ animation: 'none' }} />
         <Stack.Screen name="library/[slug]" />
         <Stack.Screen name="entry/[id]" />
       </Stack>
