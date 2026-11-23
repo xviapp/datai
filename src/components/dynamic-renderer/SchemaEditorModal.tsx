@@ -1,19 +1,24 @@
 import Feather from '@expo/vector-icons/Feather';
-import React, { useState } from 'react';
+import React, { type ComponentRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  Animated,
   LayoutAnimation,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
   Pressable,
   ScrollView,
   StyleSheet,
   Switch,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { runArchitectAgent } from '@/ai/agents';
 import { BottomSheetModal } from '@/components/ui/BottomSheetModal';
+import { SlidingSegmentedBar } from '@/components/ui/SlidingSegmentedBar';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { useOmni } from '@/context/omni-context';
 import type { LibraryRecord, LibraryViewInput } from '@/db/repository';
@@ -113,11 +118,16 @@ export function SchemaEditorModal({
 }: SchemaEditorModalProps) {
   const { repo, libraries } = useOmni();
   const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [openTypePickerKey, setOpenTypePickerKey] = useState<string | null>(null);
   const [emojiPickerOpen, setEmojiPickerOpen] = useState(false);
-  const [hierarchyExpanded, setHierarchyExpanded] = useState(Boolean(defaultParentSlug));
-  const [cardDisplayExpanded, setCardDisplayExpanded] = useState(false);
+  const [activeTabIndex, setActiveTabIndex] = useState(existingLibrary ? 1 : 0);
+  const [pagerWidth, setPagerWidth] = useState(Math.min(screenWidth, 720));
+  const [pagerScrollX] = useState(() => new Animated.Value(0));
+  const pagerRef = useRef<ComponentRef<typeof Animated.ScrollView>>(null);
+  const programmaticScrollRef = useRef(false);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [slug, setSlug] = useState('');
   const [name, setName] = useState('');
@@ -157,6 +167,7 @@ export function SchemaEditorModal({
     setErrorMsg(null);
     setAiPrompt('');
     setConfirmDelete(false);
+    setActiveTabIndex(existingLibrary ? 1 : 0);
     if (existingLibrary) {
       setSlug(existingLibrary.slug);
       setName(existingLibrary.name);
@@ -253,9 +264,75 @@ export function SchemaEditorModal({
     setPrevSession((s) => ({ ...s, visible: false }));
     setOpenTypePickerKey(null);
     setEmojiPickerOpen(false);
-    setHierarchyExpanded(false);
-    setCardDisplayExpanded(false);
   }
+
+  const effectiveWidth = pagerWidth > 0 ? pagerWidth : Math.min(screenWidth, 720);
+  const sessionKey = `${visible ? 'open' : 'closed'}::${existingLibrary?.slug ?? 'new'}::${defaultParentSlug ?? ''}`;
+
+  // 打开弹窗或切换编辑目标时，平滑对齐默认 Tab（新建落「基础」，管理落「字段」）
+  useEffect(() => {
+    if (!visible) return;
+    const defaultIdx = existingLibrary ? 1 : 0;
+    const targetX = defaultIdx * effectiveWidth;
+    programmaticScrollRef.current = false;
+    pagerScrollX.setValue(targetX);
+    const frame = requestAnimationFrame(() => {
+      pagerRef.current?.scrollTo({ x: targetX, animated: false });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [visible, sessionKey, existingLibrary, effectiveWidth, pagerScrollX]);
+
+  useEffect(() => {
+    const id = pagerScrollX.addListener(({ value }) => {
+      if (programmaticScrollRef.current) return;
+      const nextIdx = Math.max(0, Math.min(2, Math.round(value / Math.max(1, effectiveWidth))));
+      setActiveTabIndex((prev) => (prev === nextIdx ? prev : nextIdx));
+    });
+    return () => {
+      pagerScrollX.removeListener(id);
+    };
+  }, [pagerScrollX, effectiveWidth]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    };
+  }, []);
+
+  const handleSelectEditorTab = useCallback(
+    (idx: number) => {
+      programmaticScrollRef.current = true;
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+      scrollTimerRef.current = setTimeout(() => {
+        programmaticScrollRef.current = false;
+      }, 380);
+      setActiveTabIndex(idx);
+      pagerRef.current?.scrollTo({ x: idx * effectiveWidth, animated: true });
+    },
+    [effectiveWidth]
+  );
+
+  const handlePagerMomentumEnd = useCallback(
+    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+      programmaticScrollRef.current = false;
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current);
+        scrollTimerRef.current = null;
+      }
+      const offsetX = e.nativeEvent.contentOffset.x;
+      const nextIdx = Math.max(0, Math.min(2, Math.round(offsetX / Math.max(1, effectiveWidth))));
+      setActiveTabIndex(nextIdx);
+    },
+    [effectiveWidth]
+  );
+
+  const onPagerScroll = useMemo(
+    () =>
+      Animated.event([{ nativeEvent: { contentOffset: { x: pagerScrollX } } }], {
+        useNativeDriver: true,
+      }),
+    [pagerScrollX]
+  );
 
   const toggleTypePicker = (rowKey: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -405,7 +482,8 @@ export function SchemaEditorModal({
         throw new Error('英文标识（slug）必须以小写字母开头，仅含字母、数字与下划线');
       }
       if (!name.trim()) {
-        throw new Error('请填写数据表名称');
+        handleSelectEditorTab(0);
+        throw new Error('请先在「基础」页填写记录本名称');
       }
 
       const validTitleKey = fields.some((f) => f.key === titleFieldKey)
@@ -499,6 +577,16 @@ export function SchemaEditorModal({
   const parentCandidates = libraries.filter(
     (l) => !l.parentLibrarySlug && l.slug !== slug
   );
+  const tone = ToneMap[color] ?? ToneMap.teal;
+
+  const editorTabs = useMemo(
+    () => [
+      { key: 'basic', label: '基础', icon: 'sliders' as const },
+      { key: 'fields', label: `字段 (${fields.length})`, icon: 'list' as const },
+      { key: 'views', label: `视图 (${viewDrafts.length})`, icon: 'layout' as const },
+    ],
+    [fields.length, viewDrafts.length]
+  );
 
   return (
     <BottomSheetModal
@@ -506,10 +594,15 @@ export function SchemaEditorModal({
       onClose={onClose}
       maxHeight="92%"
       maxWidth={720}
+      sheetStyle={styles.tallSheet}
       header={
         <View style={styles.header}>
-          <Text style={styles.headerTitle}>
-            {existingLibrary ? `管理记录本 · ${existingLibrary.name}` : '新建记录本'}
+          <Text style={styles.headerTitle} numberOfLines={1}>
+            {existingLibrary
+              ? `${icon || existingLibrary.icon} 管理 · ${name || existingLibrary.name}`
+              : name.trim()
+                ? `${icon || '📒'} ${name.trim()}`
+                : '新建记录本'}
           </Text>
           <Pressable
             onPress={onClose}
@@ -521,233 +614,278 @@ export function SchemaEditorModal({
         </View>
       }
     >
-      <ScrollView
-        style={styles.scrollArea}
-        contentContainerStyle={styles.scrollContent}
-        keyboardShouldPersistTaps="handled"
+      {/* 顶部 3 分段跟手滑块：基础 / 字段 / 视图 */}
+      <View style={styles.tabBarWrap}>
+        <SlidingSegmentedBar
+          compact
+          items={editorTabs}
+          activeIndex={activeTabIndex}
+          onSelect={handleSelectEditorTab}
+          activeColor={tone.solid}
+          scrollX={pagerScrollX}
+          pageWidth={effectiveWidth}
+        />
+        {errorMsg ? (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorText}>{errorMsg}</Text>
+          </View>
+        ) : null}
+      </View>
+
+      {/* 可左右滑动的 3 个独立页面 */}
+      <Animated.ScrollView
+        ref={pagerRef}
+        horizontal
+        pagingEnabled
+        nestedScrollEnabled
+        showsHorizontalScrollIndicator={false}
+        scrollEventThrottle={16}
+        onLayout={(e) => {
+          const w = e.nativeEvent.layout.width;
+          if (w > 0 && Math.abs(w - pagerWidth) > 0.5) {
+            setPagerWidth(w);
+          }
+        }}
+        onScroll={onPagerScroll}
+        onMomentumScrollEnd={handlePagerMomentumEnd}
+        style={styles.pager}
       >
-            {errorMsg ? (
-              <View style={styles.errorBanner}>
-                <Text style={styles.errorText}>{errorMsg}</Text>
-              </View>
-            ) : null}
-
-            {/* 一句话智能调整 */}
-            <View style={styles.aiBox}>
-              <View style={styles.aiTitleRow}>
-                <Feather name="message-circle" size={14} color={Palette.brand} />
-                <Text style={styles.aiBoxTitle}>一句话帮你调整</Text>
-              </View>
-              <View style={styles.aiInputRow}>
-                <TextInput
-                  value={aiPrompt}
-                  onChangeText={setAiPrompt}
-                  placeholder={
-                    existingLibrary
-                      ? '如：加一个报销状态选项，未报销时标黄提醒'
-                      : '如：做一个咖啡豆记录本，并配一个冲煮记录附属表'
-                  }
-                  placeholderTextColor={Palette.inkMuted}
-                  style={styles.aiInput}
-                />
-                <Pressable
-                  disabled={aiLoading || !aiPrompt.trim()}
-                  onPress={handleAiAssist}
-                  style={[
-                    styles.aiGoBtn,
-                    (aiLoading || !aiPrompt.trim()) && styles.btnDisabled,
-                  ]}
-                >
-                  {aiLoading ? (
-                    <ActivityIndicator size="small" color={Palette.inkInverse} />
-                  ) : (
-                    <Text style={styles.aiGoText}>生成</Text>
-                  )}
-                </Pressable>
-              </View>
+        {/* Tab 0：基础（AI 助手 + 名称/图标/配色 + 归属与首页显示 + 删除） */}
+        <ScrollView
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          style={{ width: effectiveWidth }}
+          contentContainerStyle={styles.scrollContent}
+        >
+          {/* 一句话智能调整 */}
+          <View style={styles.aiBox}>
+            <View style={styles.aiTitleRow}>
+              <Feather name="message-circle" size={14} color={Palette.brand} />
+              <Text style={styles.aiBoxTitle}>一句话帮你调整</Text>
             </View>
-
-            {/* 基础信息 */}
-            <Text style={styles.sectionTitle}>1. 名称与样式</Text>
-            <View style={styles.rowGap}>
-              <Pressable
-                onPress={() => {
-                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                  setEmojiPickerOpen((v) => !v);
-                }}
-                style={({ pressed }) => [
-                  styles.emojiTriggerBtn,
-                  emojiPickerOpen && styles.emojiTriggerBtnOpen,
-                  pressed && { opacity: 0.78 },
-                ]}
-                accessibilityLabel="选择记录本图标"
-              >
-                <Text style={styles.emojiTriggerText}>{icon || '📒'}</Text>
-              </Pressable>
+            <View style={styles.aiInputRow}>
               <TextInput
-                value={name}
-                onChangeText={setName}
-                placeholder="记录本名称（如 阅读记录）"
+                value={aiPrompt}
+                onChangeText={setAiPrompt}
+                placeholder={
+                  existingLibrary
+                    ? '如：加一个报销状态选项，未报销时标黄提醒'
+                    : '如：做一个咖啡豆记录本，并配一个冲煮记录附属表'
+                }
                 placeholderTextColor={Palette.inkMuted}
-                style={[styles.input, { flex: 1 }]}
+                style={styles.aiInput}
               />
+              <Pressable
+                disabled={aiLoading || !aiPrompt.trim()}
+                onPress={handleAiAssist}
+                style={[
+                  styles.aiGoBtn,
+                  (aiLoading || !aiPrompt.trim()) && styles.btnDisabled,
+                ]}
+              >
+                {aiLoading ? (
+                  <ActivityIndicator size="small" color={Palette.inkInverse} />
+                ) : (
+                  <Text style={styles.aiGoText}>生成</Text>
+                )}
+              </Pressable>
             </View>
+          </View>
 
-            {emojiPickerOpen ? (
-              <View style={styles.emojiPanel}>
-                <View style={styles.emojiGrid}>
-                  {CURATED_EMOJIS.map((em) => {
-                    const active = icon === em;
+          {/* 名称与样式 */}
+          <Text style={styles.sectionTitle}>名称与样式</Text>
+          <View style={styles.rowGap}>
+            <Pressable
+              onPress={() => {
+                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                setEmojiPickerOpen((v) => !v);
+              }}
+              style={({ pressed }) => [
+                styles.emojiTriggerBtn,
+                emojiPickerOpen && styles.emojiTriggerBtnOpen,
+                pressed && { opacity: 0.78 },
+              ]}
+              accessibilityLabel="选择记录本图标"
+            >
+              <Text style={styles.emojiTriggerText}>{icon || '📒'}</Text>
+            </Pressable>
+            <TextInput
+              value={name}
+              onChangeText={setName}
+              placeholder="记录本名称（如 阅读记录）"
+              placeholderTextColor={Palette.inkMuted}
+              style={[styles.input, { flex: 1 }]}
+            />
+          </View>
+
+          {emojiPickerOpen ? (
+            <View style={styles.emojiPanel}>
+              <View style={styles.emojiGrid}>
+                {CURATED_EMOJIS.map((em) => {
+                  const active = icon === em;
+                  return (
+                    <Pressable
+                      key={em}
+                      onPress={() => {
+                        LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                        setIcon(em);
+                        setEmojiPickerOpen(false);
+                      }}
+                      style={({ pressed }) => [
+                        styles.emojiCell,
+                        active && styles.emojiCellActive,
+                        pressed && { opacity: 0.7 },
+                      ]}
+                    >
+                      <Text style={styles.emojiCellText}>{em}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+              <View style={styles.customEmojiRow}>
+                <Text style={styles.subFieldHint}>自定义图标：</Text>
+                <TextInput
+                  value={icon}
+                  onChangeText={setIcon}
+                  maxLength={2}
+                  placeholder="输入 Emoji"
+                  placeholderTextColor={Palette.inkMuted}
+                  style={[styles.smallInput, { width: 96, textAlign: 'center' }]}
+                />
+              </View>
+            </View>
+          ) : null}
+
+          <View style={styles.tonesRow}>
+            {TONES.map((t) => {
+              const active = color === t;
+              return (
+                <Pressable
+                  key={t}
+                  onPress={() => setColor(t)}
+                  style={[
+                    styles.toneCircle,
+                    { backgroundColor: ToneMap[t].solid },
+                    active && styles.toneCircleActive,
+                  ]}
+                />
+              );
+            })}
+          </View>
+
+          {/* 归属与首页显示（在专属 Tab 中清爽展开） */}
+          {parentCandidates.length > 0 ? (
+            <View style={styles.hierarchyBox}>
+              <Text style={styles.sectionTitle}>归属与首页显示</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+                <View style={styles.typeChipsRow}>
+                  <Pressable
+                    onPress={() => handleSelectParent('')}
+                    style={[styles.typeChip, !parentLibrarySlug && styles.typeChipActive]}
+                  >
+                    <Text
+                      style={[
+                        styles.typeChipText,
+                        !parentLibrarySlug && styles.typeChipTextActive,
+                      ]}
+                    >
+                      独立主记录本
+                    </Text>
+                  </Pressable>
+                  {parentCandidates.map((cand) => {
+                    const active = parentLibrarySlug === cand.slug;
                     return (
                       <Pressable
-                        key={em}
-                        onPress={() => {
-                          LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                          setIcon(em);
-                          setEmojiPickerOpen(false);
-                        }}
-                        style={({ pressed }) => [
-                          styles.emojiCell,
-                          active && styles.emojiCellActive,
-                          pressed && { opacity: 0.7 },
-                        ]}
+                        key={cand.slug}
+                        onPress={() => handleSelectParent(cand.slug)}
+                        style={[styles.typeChip, active && styles.typeChipActive]}
                       >
-                        <Text style={styles.emojiCellText}>{em}</Text>
+                        <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
+                          附属：{cand.icon} {cand.name}
+                        </Text>
                       </Pressable>
                     );
                   })}
                 </View>
-                <View style={styles.customEmojiRow}>
-                  <Text style={styles.subFieldHint}>自定义图标：</Text>
-                  <TextInput
-                    value={icon}
-                    onChangeText={setIcon}
-                    maxLength={2}
-                    placeholder="输入 Emoji"
-                    placeholderTextColor={Palette.inkMuted}
-                    style={[styles.smallInput, { width: 96, textAlign: 'center' }]}
-                  />
+              </ScrollView>
+
+              <View style={styles.homeSwitchRow}>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <Text style={styles.homeSwitchTitle}>在首页独立显示卡片</Text>
+                  <Text style={styles.homeSwitchDesc}>
+                    {parentLibrarySlug
+                      ? '关闭后将收纳进主记录本内部切换栏与记录详情时间轴中'
+                      : '关闭后可从全局搜索查看，不在首页网格展示'}
+                  </Text>
                 </View>
+                <Switch
+                  value={showOnHome}
+                  onValueChange={setShowOnHome}
+                  trackColor={{ false: Palette.borderStrong, true: tone.solid }}
+                />
               </View>
-            ) : null}
 
-            <View style={styles.tonesRow}>
-              {TONES.map((t) => {
-                const active = color === t;
-                return (
-                  <Pressable
-                    key={t}
-                    onPress={() => setColor(t)}
-                    style={[
-                      styles.toneCircle,
-                      { backgroundColor: ToneMap[t].solid },
-                      active && styles.toneCircleActive,
-                    ]}
-                  />
-                );
-              })}
-            </View>
-
-            {parentCandidates.length > 0 ? (
-              <View style={styles.collapsibleCard}>
+              {existingLibrary && !parentLibrarySlug && onCreateSubLibrary ? (
                 <Pressable
-                  onPress={() => {
-                    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                    setHierarchyExpanded((v) => !v);
-                  }}
-                  style={({ pressed }) => [styles.collapsibleHeader, pressed && { opacity: 0.75 }]}
+                  onPress={() => onCreateSubLibrary(existingLibrary.slug)}
+                  style={styles.spawnSubBtn}
                 >
-                  <View style={{ flex: 1, gap: 2 }}>
-                    <Text style={styles.collapsibleTitle}>归属与首页显示</Text>
-                    <Text style={styles.collapsibleSub} numberOfLines={1}>
-                      {parentLibrarySlug
-                        ? `附属记录本（${parentCandidates.find((c) => c.slug === parentLibrarySlug)?.name ?? parentLibrarySlug}）`
-                        : '独立主记录本'}
-                      {showOnHome ? ' · 首页显示' : ' · 已收纳'}
-                    </Text>
-                  </View>
-                  <Feather
-                    name={hierarchyExpanded ? 'chevron-up' : 'chevron-down'}
-                    size={16}
-                    color={Palette.inkMuted}
-                  />
+                  <Feather name="corner-down-right" size={14} color={Palette.brand} />
+                  <Text style={styles.spawnSubText}>
+                    为「{existingLibrary.name}」新建附属子记录本（如阅读记录 / 跟进流水）
+                  </Text>
                 </Pressable>
-
-                {hierarchyExpanded ? (
-                  <View style={styles.collapsibleBody}>
-                    <Text style={styles.subFieldHint}>层级归属（可选）：</Text>
-                    <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                      <View style={styles.typeChipsRow}>
-                        <Pressable
-                          onPress={() => handleSelectParent('')}
-                          style={[styles.typeChip, !parentLibrarySlug && styles.typeChipActive]}
-                        >
-                          <Text
-                            style={[
-                              styles.typeChipText,
-                              !parentLibrarySlug && styles.typeChipTextActive,
-                            ]}
-                          >
-                            独立主记录本
-                          </Text>
-                        </Pressable>
-                        {parentCandidates.map((cand) => {
-                          const active = parentLibrarySlug === cand.slug;
-                          return (
-                            <Pressable
-                              key={cand.slug}
-                              onPress={() => handleSelectParent(cand.slug)}
-                              style={[styles.typeChip, active && styles.typeChipActive]}
-                            >
-                              <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
-                                附属：{cand.icon} {cand.name}
-                              </Text>
-                            </Pressable>
-                          );
-                        })}
-                      </View>
-                    </ScrollView>
-
-                    <View style={styles.homeSwitchRow}>
-                      <View style={{ flex: 1, gap: 2 }}>
-                        <Text style={styles.homeSwitchTitle}>在首页独立显示卡片</Text>
-                        <Text style={styles.homeSwitchDesc}>
-                          {parentLibrarySlug
-                            ? '关闭后将收纳进主记录本内部切换栏与记录详情时间轴中'
-                            : '关闭后可从全局搜索查看，不在首页网格展示'}
-                        </Text>
-                      </View>
-                      <Switch
-                        value={showOnHome}
-                        onValueChange={setShowOnHome}
-                        trackColor={{ false: Palette.borderStrong, true: Palette.brand }}
-                      />
-                    </View>
-
-                    {existingLibrary && !parentLibrarySlug && onCreateSubLibrary ? (
-                      <Pressable
-                        onPress={() => onCreateSubLibrary(existingLibrary.slug)}
-                        style={styles.spawnSubBtn}
-                      >
-                        <Feather name="corner-down-right" size={14} color={Palette.brand} />
-                        <Text style={styles.spawnSubText}>
-                          为「{existingLibrary.name}」新建附属子记录本（如阅读记录 / 跟进流水）
-                        </Text>
-                      </Pressable>
-                    ) : null}
-                  </View>
-                ) : null}
-              </View>
-            ) : null}
-
-            {/* 记录项列表 */}
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionTitle}>2. 记录项 ({fields.length})</Text>
-              <Pressable onPress={addNewField} style={styles.addFieldBtn}>
-                <Feather name="plus" size={14} color={Palette.brand} />
-                <Text style={styles.addFieldText}>添加一项</Text>
-              </Pressable>
+              ) : null}
             </View>
+          ) : null}
+
+          {/* 删除整个记录本 */}
+          {existingLibrary ? (
+            <View style={styles.dangerBox}>
+              <Text style={styles.dangerTitle}>删除记录本</Text>
+              <Text style={styles.dangerHint}>
+                将删除「{existingLibrary.name}」及里面的全部 {existingLibrary.entryCount} 条记录。删除前会自动留存一份备份，可在「设置 → 最近操作记录」里随时撤销。
+              </Text>
+              {confirmDelete ? (
+                <View style={styles.dangerActionsRow}>
+                  <Pressable
+                    onPress={() => setConfirmDelete(false)}
+                    style={styles.dangerCancelBtn}
+                  >
+                    <Text style={styles.dangerCancelText}>先不删</Text>
+                  </Pressable>
+                  <Pressable onPress={handleDeleteLibrary} style={styles.dangerConfirmBtn}>
+                    <Feather name="trash-2" size={14} color={Palette.inkInverse} />
+                    <Text style={styles.dangerConfirmText}>确认删除</Text>
+                  </Pressable>
+                </View>
+              ) : (
+                <Pressable
+                  onPress={() => setConfirmDelete(true)}
+                  style={styles.dangerTriggerBtn}
+                >
+                  <Feather name="trash-2" size={14} color={Palette.danger} />
+                  <Text style={styles.dangerTriggerText}>删除整个记录本</Text>
+                </Pressable>
+              )}
+            </View>
+          ) : null}
+        </ScrollView>
+
+        {/* Tab 1：数据（字段结构） */}
+        <ScrollView
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          style={{ width: effectiveWidth }}
+          contentContainerStyle={styles.scrollContent}
+        >
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>数据结构 · 共 {fields.length} 项</Text>
+            <Pressable onPress={addNewField} style={styles.addFieldBtn}>
+              <Feather name="plus" size={14} color={Palette.brand} />
+              <Text style={styles.addFieldText}>添加一项</Text>
+            </Pressable>
+          </View>
 
             {fields.map((field, index) => {
               const rowKey = field.key || String(index);
@@ -1258,193 +1396,157 @@ export function SchemaEditorModal({
               );
             })}
 
-            {/* 3. 视图管理（独立 View 表：按需开启画廊 / 日历 / 统计，支持改名与排序） */}
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionTitle}>3. 视图表现 ({viewDrafts.length})</Text>
-              <Text style={styles.viewSectionHint}>仅 1 个视图时自动隐藏切换栏</Text>
-            </View>
-            <View style={styles.viewsManagerCard}>
-              {viewDrafts.map((v, idx) => {
-                const meta = VIEW_TYPE_META[v.viewType];
-                return (
-                  <View key={v.id ?? `${v.viewType}_${idx}`} style={styles.viewManageRow}>
-                    <View style={styles.viewTypeTag}>
-                      <Feather name={meta.icon} size={13} color={Palette.brand} />
-                      <Text style={styles.viewTypeTagText}>{meta.label}</Text>
-                    </View>
-                    <TextInput
-                      value={v.name}
-                      onChangeText={(txt) => updateViewDraftName(idx, txt)}
-                      placeholder={meta.label}
-                      placeholderTextColor={Palette.inkMuted}
-                      style={[styles.smallInput, styles.viewNameInput]}
-                    />
+            {/* 结束 Tab 1（字段），进入 Tab 2（视图表现） */}
+        </ScrollView>
+
+        <ScrollView
+          nestedScrollEnabled
+          keyboardShouldPersistTaps="handled"
+          style={{ width: effectiveWidth }}
+          contentContainerStyle={styles.scrollContent}
+        >
+          {/* 视图表现（独立 View 表：按需开启画廊 / 日历 / 统计，支持改名与排序） */}
+          <View style={styles.sectionHeaderRow}>
+            <Text style={styles.sectionTitle}>已启用视图 ({viewDrafts.length})</Text>
+            <Text style={styles.viewSectionHint}>仅 1 个视图时自动隐藏切换栏</Text>
+          </View>
+          <View style={styles.viewsManagerCard}>
+            {viewDrafts.map((v, idx) => {
+              const meta = VIEW_TYPE_META[v.viewType];
+              return (
+                <View key={v.id ?? `${v.viewType}_${idx}`} style={styles.viewManageRow}>
+                  <View style={styles.viewTypeTag}>
+                    <Feather name={meta.icon} size={13} color={Palette.brand} />
+                    <Text style={styles.viewTypeTagText}>{meta.label}</Text>
+                  </View>
+                  <TextInput
+                    value={v.name}
+                    onChangeText={(txt) => updateViewDraftName(idx, txt)}
+                    placeholder={meta.label}
+                    placeholderTextColor={Palette.inkMuted}
+                    style={[styles.smallInput, styles.viewNameInput]}
+                  />
+                  <Pressable
+                    disabled={idx === 0}
+                    onPress={() => moveViewDraft(idx, -1)}
+                    hitSlop={4}
+                    style={[styles.viewMiniBtn, idx === 0 && styles.metaChipDisabled]}
+                  >
+                    <Feather name="arrow-up" size={13} color={Palette.inkSecondary} />
+                  </Pressable>
+                  <Pressable
+                    disabled={idx === viewDrafts.length - 1}
+                    onPress={() => moveViewDraft(idx, 1)}
+                    hitSlop={4}
+                    style={[
+                      styles.viewMiniBtn,
+                      idx === viewDrafts.length - 1 && styles.metaChipDisabled,
+                    ]}
+                  >
+                    <Feather name="arrow-down" size={13} color={Palette.inkSecondary} />
+                  </Pressable>
+                  {viewDrafts.length > 1 ? (
                     <Pressable
-                      disabled={idx === 0}
-                      onPress={() => moveViewDraft(idx, -1)}
+                      onPress={() => removeViewDraft(idx)}
                       hitSlop={4}
-                      style={[styles.viewMiniBtn, idx === 0 && styles.metaChipDisabled]}
+                      style={styles.viewMiniBtn}
+                      accessibilityLabel="移除该视图"
                     >
-                      <Feather name="arrow-up" size={13} color={Palette.inkSecondary} />
+                      <Feather name="x" size={14} color={Palette.danger} />
                     </Pressable>
+                  ) : null}
+                </View>
+              );
+            })}
+
+            {ALL_VIEW_TYPES.some((vt) => !viewDrafts.some((d) => d.viewType === vt)) ? (
+              <View style={styles.addViewRow}>
+                <Text style={styles.subFieldHint}>按需添加：</Text>
+                {ALL_VIEW_TYPES.filter((vt) => !viewDrafts.some((d) => d.viewType === vt)).map(
+                  (vt) => (
                     <Pressable
-                      disabled={idx === viewDrafts.length - 1}
-                      onPress={() => moveViewDraft(idx, 1)}
-                      hitSlop={4}
-                      style={[
-                        styles.viewMiniBtn,
-                        idx === viewDrafts.length - 1 && styles.metaChipDisabled,
+                      key={vt}
+                      onPress={() => addViewDraft(vt)}
+                      style={({ pressed }) => [
+                        styles.addViewChip,
+                        pressed && { opacity: 0.72 },
                       ]}
                     >
-                      <Feather name="arrow-down" size={13} color={Palette.inkSecondary} />
+                      <Feather name="plus" size={12} color={Palette.brand} />
+                      <Feather name={VIEW_TYPE_META[vt].icon} size={12} color={Palette.brand} />
+                      <Text style={styles.addViewChipText}>{VIEW_TYPE_META[vt].label}</Text>
                     </Pressable>
-                    {viewDrafts.length > 1 ? (
-                      <Pressable
-                        onPress={() => removeViewDraft(idx)}
-                        hitSlop={4}
-                        style={styles.viewMiniBtn}
-                        accessibilityLabel="移除该视图"
-                      >
-                        <Feather name="x" size={14} color={Palette.danger} />
-                      </Pressable>
-                    ) : null}
-                  </View>
-                );
-              })}
-
-              {ALL_VIEW_TYPES.some((vt) => !viewDrafts.some((d) => d.viewType === vt)) ? (
-                <View style={styles.addViewRow}>
-                  <Text style={styles.subFieldHint}>按需添加：</Text>
-                  {ALL_VIEW_TYPES.filter((vt) => !viewDrafts.some((d) => d.viewType === vt)).map(
-                    (vt) => (
-                      <Pressable
-                        key={vt}
-                        onPress={() => addViewDraft(vt)}
-                        style={({ pressed }) => [
-                          styles.addViewChip,
-                          pressed && { opacity: 0.72 },
-                        ]}
-                      >
-                        <Feather name="plus" size={12} color={Palette.brand} />
-                        <Feather name={VIEW_TYPE_META[vt].icon} size={12} color={Palette.brand} />
-                        <Text style={styles.addViewChipText}>{VIEW_TYPE_META[vt].label}</Text>
-                      </Pressable>
-                    )
-                  )}
-                </View>
-              ) : null}
-            </View>
-
-            {/* 4. 列表卡片显示（默认折叠，按需微调） */}
-            <View style={styles.collapsibleCard}>
-              <Pressable
-                onPress={() => {
-                  LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                  setCardDisplayExpanded((v) => !v);
-                }}
-                style={({ pressed }) => [styles.collapsibleHeader, pressed && { opacity: 0.75 }]}
-              >
-                <View style={{ flex: 1, gap: 2 }}>
-                  <Text style={styles.collapsibleTitle}>列表卡片显示字段</Text>
-                  <Text style={styles.collapsibleSub} numberOfLines={1}>
-                    主标题：{fields.find((f) => f.key === titleFieldKey)?.label ?? '自动'}
-                    {footerMetricKeys.length > 0 ? ` · ${footerMetricKeys.length} 项重点数值` : ''}
-                  </Text>
-                </View>
-                <Feather
-                  name={cardDisplayExpanded ? 'chevron-up' : 'chevron-down'}
-                  size={16}
-                  color={Palette.inkMuted}
-                />
-              </Pressable>
-
-              {cardDisplayExpanded ? (
-                <View style={styles.collapsibleBody}>
-                  <SlotPickerRow
-                    label="主标题"
-                    fields={fields}
-                    selectedKey={titleFieldKey}
-                    onSelect={setTitleFieldKey}
-                  />
-                  <SlotPickerRow
-                    label="副标题"
-                    fields={fields}
-                    selectedKey={subtitleFieldKey}
-                    allowEmpty
-                    onSelect={setSubtitleFieldKey}
-                  />
-                  <SlotPickerRow
-                    label="右上角标签"
-                    fields={fields}
-                    selectedKey={rightBadgeFieldKey}
-                    allowEmpty
-                    onSelect={setRightBadgeFieldKey}
-                  />
-
-                  <View style={styles.slotBlock}>
-                    <Text style={styles.subFieldHint}>底部重点数值（最多选 4 项）：</Text>
-                    <View style={styles.typeChipsRow}>
-                      {fields.map((f) => {
-                        const active = footerMetricKeys.includes(f.key);
-                        return (
-                          <Pressable
-                            key={f.key}
-                            onPress={() => toggleFooterMetric(f.key)}
-                            style={[styles.typeChip, active && styles.typeChipActive]}
-                          >
-                            <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
-                              {f.label}
-                            </Text>
-                          </Pressable>
-                        );
-                      })}
-                    </View>
-                  </View>
-                </View>
-              ) : null}
-            </View>
-
-            {/* 4. 删除整个记录本 */}
-            {existingLibrary ? (
-              <View style={styles.dangerBox}>
-                <Text style={styles.dangerTitle}>删除记录本</Text>
-                <Text style={styles.dangerHint}>
-                  将删除「{existingLibrary.name}」及里面的全部 {existingLibrary.entryCount} 条记录。删除前会自动留存一份备份，可在「设置 → 最近操作记录」里随时撤销。
-                </Text>
-                {confirmDelete ? (
-                  <View style={styles.dangerActionsRow}>
-                    <Pressable
-                      onPress={() => setConfirmDelete(false)}
-                      style={styles.dangerCancelBtn}
-                    >
-                      <Text style={styles.dangerCancelText}>先不删</Text>
-                    </Pressable>
-                    <Pressable onPress={handleDeleteLibrary} style={styles.dangerConfirmBtn}>
-                      <Feather name="trash-2" size={14} color={Palette.inkInverse} />
-                      <Text style={styles.dangerConfirmText}>确认删除</Text>
-                    </Pressable>
-                  </View>
-                ) : (
-                  <Pressable
-                    onPress={() => setConfirmDelete(true)}
-                    style={styles.dangerTriggerBtn}
-                  >
-                    <Feather name="trash-2" size={14} color={Palette.danger} />
-                    <Text style={styles.dangerTriggerText}>删除整个记录本</Text>
-                  </Pressable>
+                  )
                 )}
               </View>
             ) : null}
-          </ScrollView>
-
-          <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
-            <Pressable onPress={onClose} style={styles.cancelBtn}>
-              <Text style={styles.cancelText}>取消</Text>
-            </Pressable>
-            <Pressable onPress={handleManualSave} style={styles.saveBtn}>
-              <Text style={styles.saveText}>保存</Text>
-            </Pressable>
           </View>
+
+          {/* 列表卡片显示字段（在视图专属 Tab 中直接清爽展开） */}
+          <Text style={styles.sectionTitle}>列表卡片显示字段</Text>
+          <View style={styles.cardDisplayBox}>
+            <SlotPickerRow
+              label="主标题"
+              fields={fields}
+              selectedKey={titleFieldKey}
+              onSelect={setTitleFieldKey}
+            />
+            <SlotPickerRow
+              label="副标题"
+              fields={fields}
+              selectedKey={subtitleFieldKey}
+              allowEmpty
+              onSelect={setSubtitleFieldKey}
+            />
+            <SlotPickerRow
+              label="右上角标签"
+              fields={fields}
+              selectedKey={rightBadgeFieldKey}
+              allowEmpty
+              onSelect={setRightBadgeFieldKey}
+            />
+
+            <View style={styles.slotBlock}>
+              <Text style={styles.subFieldHint}>底部重点数值（最多选 4 项）：</Text>
+              <View style={styles.typeChipsRow}>
+                {fields.map((f) => {
+                  const active = footerMetricKeys.includes(f.key);
+                  return (
+                    <Pressable
+                      key={f.key}
+                      onPress={() => toggleFooterMetric(f.key)}
+                      style={[styles.typeChip, active && styles.typeChipActive]}
+                    >
+                      <Text style={[styles.typeChipText, active && styles.typeChipTextActive]}>
+                        {f.label}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+            </View>
+          </View>
+        </ScrollView>
+      </Animated.ScrollView>
+
+      <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+        <Pressable
+          onPress={onClose}
+          style={({ pressed }) => [styles.cancelBtn, pressed && { opacity: 0.78 }]}
+        >
+          <Text style={styles.cancelText}>取消</Text>
+        </Pressable>
+        <Pressable
+          onPress={handleManualSave}
+          style={({ pressed }) => [
+            styles.saveBtn,
+            { backgroundColor: tone.solid },
+            pressed && { opacity: 0.85, transform: [{ scale: 0.985 }] },
+          ]}
+        >
+          <Text style={styles.saveText}>保存</Text>
+        </Pressable>
+      </View>
     </BottomSheetModal>
   );
 }
@@ -1516,12 +1618,33 @@ const styles = StyleSheet.create({
   closeBtn: {
     padding: 4,
   },
-  scrollArea: {
-    paddingHorizontal: 20,
+  tallSheet: {
+    height: '88%',
+  },
+  tabBarWrap: {
+    paddingHorizontal: 18,
+    paddingTop: 10,
+    paddingBottom: 6,
+    gap: 8,
+    borderBottomWidth: 1,
+    borderBottomColor: Palette.borderHairline,
+    backgroundColor: Palette.bgSurface,
+  },
+  pager: {
+    flex: 1,
+  },
+  cardDisplayBox: {
+    backgroundColor: Palette.bgCanvas,
+    borderRadius: 14,
+    padding: 13,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    gap: 12,
   },
   scrollContent: {
-    paddingVertical: 16,
-    gap: 14,
+    paddingHorizontal: 18,
+    paddingVertical: 14,
+    gap: 12,
   },
   errorBanner: {
     backgroundColor: Palette.dangerSoft,
