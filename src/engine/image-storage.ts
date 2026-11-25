@@ -1,5 +1,6 @@
 import { Directory, File, Paths } from 'expo-file-system';
 import { ImageManipulator, SaveFormat } from 'expo-image-manipulator';
+import * as ImagePicker from 'expo-image-picker';
 import { Platform } from 'react-native';
 import { createId } from './id';
 
@@ -163,4 +164,58 @@ export async function compressImageForAiVision(asset: PickedImageAsset): Promise
   }
 
   return asset.uri;
+}
+
+/**
+ * 统一封装相册选图 / 相机拍照（自动处理相机权限与 Web base64 标志）
+ */
+export async function pickImageAsset(
+  fromCamera: boolean,
+  cameraDeniedMessage = '需要相机权限才能直接拍照'
+): Promise<PickedImageAsset | null> {
+  if (fromCamera) {
+    const perm = await ImagePicker.requestCameraPermissionsAsync();
+    if (!perm.granted) {
+      throw new Error(cameraDeniedMessage);
+    }
+  }
+  const launcher = fromCamera
+    ? ImagePicker.launchCameraAsync
+    : ImagePicker.launchImageLibraryAsync;
+  const res = await launcher({
+    mediaTypes: ['images'],
+    quality: 0.85,
+    base64: Platform.OS === 'web',
+  });
+  if (res.canceled || !res.assets[0]) {
+    return null;
+  }
+  return res.assets[0];
+}
+
+/**
+ * 清理本地文档目录中不再被任何条目或快照引用的孤儿图片文件（仅原生端生效）
+ */
+export function cleanupOrphanedImages(referencedRelativePaths: Set<string>): number {
+  if (Platform.OS === 'web') return 0;
+  try {
+    const imagesDir = new Directory(Paths.document, IMAGES_SUBDIR);
+    if (!imagesDir.exists) return 0;
+    let deletedCount = 0;
+    for (const item of imagesDir.list()) {
+      if (!(item instanceof File)) continue;
+      const relPath = `${IMAGES_SUBDIR}/${item.name}`;
+      if (!referencedRelativePaths.has(relPath)) {
+        try {
+          item.delete();
+          deletedCount += 1;
+        } catch {
+          // 单个文件删除失败不影响后续清理
+        }
+      }
+    }
+    return deletedCount;
+  } catch {
+    return 0;
+  }
 }

@@ -13,7 +13,7 @@ import Svg, {
   Text as SvgText,
 } from 'react-native-svg';
 import { ChartSeriesColors, Palette, ToneMap } from '@/constants/design-tokens';
-import { useOmni } from '@/context/omni-context';
+import { useRepository } from '@/context/omni-context';
 import type { DashboardWidget } from '@/schema/view-dsl';
 
 interface SqlWidgetCardProps {
@@ -64,7 +64,7 @@ export function SqlWidgetCard({
   compact,
   paused = false,
 }: SqlWidgetCardProps) {
-  const { repo, revision } = useOmni();
+  const { repo, revision } = useRepository();
   const tone = ToneMap[widget.accentTone ?? 'teal'] ?? ToneMap.teal;
 
   const [syncedRevision, setSyncedRevision] = useState(revision);

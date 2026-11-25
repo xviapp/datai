@@ -1,13 +1,7 @@
+import { formatLocalDateOffset } from '@/engine/date';
 import type { DashboardWidget, LibraryBlueprint } from '@/schema/view-dsl';
 
-function offsetDateStr(daysOffset: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + daysOffset);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
+const offsetDateStr = (daysOffset: number): string => formatLocalDateOffset(daysOffset);
 
 function makePosterSvgDataUri(title: string, subtitle: string, bgStart: string, bgEnd: string): string {
   const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="360" height="480" viewBox="0 0 360 480">

@@ -1,13 +1,8 @@
 import Feather from '@expo/vector-icons/Feather';
-import * as DocumentPicker from 'expo-document-picker';
-import { File, Paths } from 'expo-file-system';
-import * as Sharing from 'expo-sharing';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   LayoutAnimation,
-  Modal,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -20,17 +15,22 @@ import { callDeepSeekChat } from '@/ai/deepseek-client';
 import {
   getAiPreferences,
   getDeepSeekApiKey,
-  getLastBackupAt,
   saveAiPreferences,
   saveDeepSeekApiKey,
-  saveLastBackupAt,
   type ReasoningEffort,
 } from '@/ai/settings-store';
 import { TabPageHeader } from '@/components/layout/TabPageHeader';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Palette } from '@/constants/design-tokens';
-import { useOmni } from '@/context/omni-context';
-import type { FullBackupBundle, SnapshotUndoImpact } from '@/db/repository';
-import { formatLocalDate } from '@/engine/date';
+import { useRepository } from '@/context/omni-context';
+import type { SnapshotUndoImpact } from '@/db/models';
+import {
+  exportBackupBundleToDevice,
+  getLastBackupAt,
+  pickBackupBundleFromDevice,
+  saveLastBackupAt,
+} from '@/engine/backup-io';
+import { cleanupOrphanedImages } from '@/engine/image-storage';
 
 const EFFORT_LABELS: Record<ReasoningEffort, string> = {
   low: '快速',
@@ -39,7 +39,7 @@ const EFFORT_LABELS: Record<ReasoningEffort, string> = {
 };
 
 export default function SettingsScreen() {
-  const { repo, libraries, revision, hasApiKey, refreshApiKeyState } = useOmni();
+  const { repo, libraries, revision, hasApiKey, refreshApiKeyState } = useRepository();
 
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
@@ -73,14 +73,22 @@ export default function SettingsScreen() {
       setEnableWebEnrich(prefs.enableWebEnrich);
       setLastBackupAt(backupTs);
       setNowTs(Date.now());
-      // 尚未配置 Key 时自动展开，已配置则默认保持收起清爽状态
       setAiExpanded(!k);
     })();
   }, []);
 
-  const snapshots = !repo || revision < 0 ? [] : repo.listSnapshots();
-  const widgetCount = !repo || revision < 0 ? 0 : repo.listAllDashboardWidgets().length;
-  const totalEntryCount = libraries.reduce((sum, l) => sum + l.entryCount, 0);
+  const snapshots = useMemo(
+    () => (!repo || revision < 0 ? [] : repo.listSnapshots()),
+    [repo, revision]
+  );
+  const widgetCount = useMemo(
+    () => (!repo || revision < 0 ? 0 : repo.listAllDashboardWidgets().length),
+    [repo, revision]
+  );
+  const totalEntryCount = useMemo(
+    () => libraries.reduce((sum, l) => sum + l.entryCount, 0),
+    [libraries]
+  );
   const visibleSnapshots = showAllSnapshots ? snapshots : snapshots.slice(0, 3);
 
   const handleSaveConfig = async () => {
@@ -156,34 +164,11 @@ export default function SettingsScreen() {
     if (!repo) return;
     try {
       const bundle = repo.exportBackupBundle();
-      const jsonStr = JSON.stringify(bundle, null, 2);
-      const filename = `folio_backup_${formatLocalDate()}.json`;
-
-      const nowTs = Date.now();
-      if (Platform.OS === 'web') {
-        const blob = new Blob([jsonStr], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(url);
-        await saveLastBackupAt(nowTs);
-        setLastBackupAt(nowTs);
-        setNowTs(nowTs);
-        setFeedback({ type: 'ok', text: `已下载备份文件 ${filename}` });
-        return;
-      }
-
-      const outFile = new File(Paths.cache, filename);
-      outFile.write(jsonStr);
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(outFile.uri, { mimeType: 'application/json' });
-      }
-      await saveLastBackupAt(nowTs);
-      setLastBackupAt(nowTs);
-      setNowTs(nowTs);
-      setFeedback({ type: 'ok', text: '已打开系统分享导出备份' });
+      const result = await exportBackupBundleToDevice(bundle);
+      await saveLastBackupAt(result.exportedAt);
+      setLastBackupAt(result.exportedAt);
+      setNowTs(result.exportedAt);
+      setFeedback({ type: 'ok', text: result.message });
     } catch (err) {
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : String(err) });
     }
@@ -192,23 +177,10 @@ export default function SettingsScreen() {
   const handleImportJson = async () => {
     if (!repo) return;
     try {
-      const res = await DocumentPicker.getDocumentAsync({
-        type: 'application/json',
-        copyToCacheDirectory: true,
-      });
-      if (res.canceled || !res.assets[0]) return;
-      const asset = res.assets[0];
-      let content = '';
-      if (Platform.OS === 'web' && asset.file) {
-        content = await asset.file.text();
-      } else {
-        content = await new File(asset.uri).text();
-      }
-      const parsed = JSON.parse(content) as FullBackupBundle;
-      if (!Array.isArray(parsed.libraries) || !Array.isArray(parsed.entries)) {
-        throw new Error('备份文件格式不正确');
-      }
+      const parsed = await pickBackupBundleFromDevice();
+      if (!parsed) return;
       repo.importBackupBundle(parsed);
+      cleanupOrphanedImages(repo.collectReferencedImagePaths());
       setFeedback({
         type: 'ok',
         text: `已恢复 ${parsed.libraries.length} 个记录本、${parsed.entries.length} 条记录`,
@@ -217,6 +189,18 @@ export default function SettingsScreen() {
       setFeedback({ type: 'err', text: err instanceof Error ? err.message : String(err) });
     }
   };
+
+  const backupAgeDays = lastBackupAt
+    ? Math.max(0, Math.floor((nowTs - lastBackupAt) / 86_400_000))
+    : null;
+  const needsBackupHint =
+    totalEntryCount > 0 && (backupAgeDays === null || backupAgeDays >= 14);
+  const backupStatusLabel =
+    backupAgeDays === null
+      ? '尚未备份'
+      : backupAgeDays === 0
+        ? '今天已备份'
+        : `${backupAgeDays}天前`;
 
   return (
     <View style={styles.safeArea}>
@@ -284,7 +268,7 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* 2. 智能助手连接（默认折叠态，点击展开） */}
+        {/* 2. 智能助手连接 */}
         <Text style={styles.groupHeading}>智能助手</Text>
         <View style={styles.groupCard}>
           <Pressable
@@ -390,7 +374,6 @@ export default function SettingsScreen() {
                 />
               </View>
 
-              {/* 低频接口地址收入高级选项 */}
               <Pressable
                 onPress={() => {
                   LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
@@ -440,7 +423,7 @@ export default function SettingsScreen() {
           ) : null}
         </View>
 
-        {/* 3. 最近操作记录（默认最多 3 条） */}
+        {/* 3. 最近操作记录 */}
         <Text style={styles.groupHeading}>最近操作记录</Text>
         <View style={styles.groupCard}>
           {snapshots.length === 0 ? (
@@ -451,10 +434,7 @@ export default function SettingsScreen() {
           ) : (
             <>
               {visibleSnapshots.map((snap, idx) => (
-                <View
-                  key={snap.id}
-                  style={[styles.snapRow, idx === 0 && { borderTopWidth: 0 }]}
-                >
+                <View key={snap.id} style={[styles.snapRow, idx === 0 && { borderTopWidth: 0 }]}>
                   <View style={{ flex: 1, gap: 2 }}>
                     <Text style={styles.snapTitle} numberOfLines={1}>
                       {snap.actionSummary}
@@ -490,63 +470,47 @@ export default function SettingsScreen() {
           )}
         </View>
 
-        {/* 4. 数据与备份（原生列表项） */}
+        {/* 4. 数据与备份 */}
         <Text style={styles.groupHeading}>数据与备份</Text>
         <View style={styles.groupCard}>
-          {(() => {
-            const backupAgeDays = lastBackupAt
-              ? Math.max(0, Math.floor((nowTs - lastBackupAt) / 86400000))
-              : null;
-            const needsBackupHint =
-              totalEntryCount > 0 && (backupAgeDays === null || backupAgeDays >= 14);
-            const backupStatusLabel =
-              backupAgeDays === null
-                ? '尚未备份'
-                : backupAgeDays === 0
-                  ? '今天已备份'
-                  : `${backupAgeDays}天前`;
-
-            return (
-              <Pressable
-                onPress={handleExportJson}
-                style={({ pressed }) => [styles.listRow, pressed && { opacity: 0.78 }]}
-              >
-                <View style={[styles.rowIconWrap, { backgroundColor: Palette.brandSoft }]}>
-                  <Feather name="download" size={16} color={Palette.brand} />
-                </View>
-                <View style={{ flex: 1, gap: 2 }}>
-                  <View style={styles.titleWithDot}>
-                    <Text style={styles.rowTitle}>导出完整备份</Text>
-                    <View
-                      style={[
-                        styles.statusPill,
-                        {
-                          backgroundColor: needsBackupHint
-                            ? Palette.warningSoft
-                            : Palette.successSoft,
-                        },
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.statusPillText,
-                          { color: needsBackupHint ? Palette.warning : Palette.success },
-                        ]}
-                      >
-                        {backupStatusLabel}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={styles.rowSub}>
-                    {needsBackupHint
-                      ? '建议定期导出 JSON 备份，防止更换设备或卸载丢数据'
-                      : '将所有记录本、内容和统计打包留存'}
+          <Pressable
+            onPress={handleExportJson}
+            style={({ pressed }) => [styles.listRow, pressed && { opacity: 0.78 }]}
+          >
+            <View style={[styles.rowIconWrap, { backgroundColor: Palette.brandSoft }]}>
+              <Feather name="download" size={16} color={Palette.brand} />
+            </View>
+            <View style={{ flex: 1, gap: 2 }}>
+              <View style={styles.titleWithDot}>
+                <Text style={styles.rowTitle}>导出完整备份</Text>
+                <View
+                  style={[
+                    styles.statusPill,
+                    {
+                      backgroundColor: needsBackupHint
+                        ? Palette.warningSoft
+                        : Palette.successSoft,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.statusPillText,
+                      { color: needsBackupHint ? Palette.warning : Palette.success },
+                    ]}
+                  >
+                    {backupStatusLabel}
                   </Text>
                 </View>
-                <Feather name="chevron-right" size={18} color={Palette.inkMuted} />
-              </Pressable>
-            );
-          })()}
+              </View>
+              <Text style={styles.rowSub}>
+                {needsBackupHint
+                  ? '建议定期导出 JSON 备份，防止更换设备或卸载丢数据'
+                  : '将所有记录本、内容和统计打包留存'}
+              </Text>
+            </View>
+            <Feather name="chevron-right" size={18} color={Palette.inkMuted} />
+          </Pressable>
 
           <View style={styles.rowDivider} />
 
@@ -568,41 +532,16 @@ export default function SettingsScreen() {
         <Text style={styles.versionFoot}>拾录 Folio v1.0 · 纯本地离线记录本</Text>
       </ScrollView>
 
-      <Modal
+      <ConfirmDialog
         visible={Boolean(pendingUndo)}
-        transparent
-        statusBarTranslucent
-        navigationBarTranslucent
-        animationType="fade"
-        onRequestClose={() => setPendingUndo(null)}
-      >
-        <View style={styles.confirmBackdrop}>
-          <View style={styles.confirmDialog}>
-            <Text style={styles.confirmTitle}>确认撤销此操作？</Text>
-            {pendingUndo ? (
-              <>
-                <Text style={styles.confirmSummary}>{pendingUndo.impact.summary}</Text>
-                <Text
-                  style={[
-                    styles.confirmWarning,
-                    pendingUndo.impact.isFullRestore && { color: Palette.danger },
-                  ]}
-                >
-                  {pendingUndo.impact.warningText}
-                </Text>
-              </>
-            ) : null}
-            <View style={styles.confirmBtns}>
-              <Pressable onPress={() => setPendingUndo(null)} style={styles.confirmCancelBtn}>
-                <Text style={styles.confirmCancelText}>取消</Text>
-              </Pressable>
-              <Pressable onPress={handleConfirmUndo} style={styles.confirmOkBtn}>
-                <Text style={styles.confirmOkText}>确认撤销</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+        title="确认撤销此操作？"
+        summary={pendingUndo?.impact.summary}
+        description={pendingUndo?.impact.warningText}
+        descriptionTone={pendingUndo?.impact.isFullRestore ? 'danger' : 'warning'}
+        confirmLabel="确认撤销"
+        onCancel={() => setPendingUndo(null)}
+        onConfirm={handleConfirmUndo}
+      />
     </View>
   );
 }
@@ -904,64 +843,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: Palette.inkMuted,
     marginTop: 8,
-  },
-  confirmBackdrop: {
-    flex: 1,
-    backgroundColor: 'rgba(20, 26, 25, 0.45)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
-  confirmDialog: {
-    width: '100%',
-    maxWidth: 360,
-    backgroundColor: Palette.bgSurface,
-    borderRadius: 20,
-    padding: 20,
-    gap: 10,
-  },
-  confirmTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: Palette.inkPrimary,
-  },
-  confirmSummary: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: Palette.inkSecondary,
-  },
-  confirmWarning: {
-    fontSize: 13,
-    lineHeight: 19,
-    color: Palette.warning,
-  },
-  confirmBtns: {
-    flexDirection: 'row',
-    gap: 10,
-    marginTop: 6,
-  },
-  confirmCancelBtn: {
-    flex: 1,
-    paddingVertical: 11,
-    borderRadius: 12,
-    backgroundColor: Palette.bgSubtle,
-    alignItems: 'center',
-  },
-  confirmCancelText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: Palette.inkSecondary,
-  },
-  confirmOkBtn: {
-    flex: 1,
-    paddingVertical: 11,
-    borderRadius: 12,
-    backgroundColor: Palette.danger,
-    alignItems: 'center',
-  },
-  confirmOkText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: Palette.inkInverse,
   },
 });

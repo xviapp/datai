@@ -1,6 +1,5 @@
 import Feather from '@expo/vector-icons/Feather';
 import { Image } from 'expo-image';
-import * as ImagePicker from 'expo-image-picker';
 import React, { useMemo, useState } from 'react';
 import {
   Platform,
@@ -16,11 +15,15 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { BottomSheetModal } from '@/components/ui/BottomSheetModal';
 import { InlineDatePicker } from '@/components/ui/InlineDatePicker';
 import { Palette, ToneMap } from '@/constants/design-tokens';
-import { useOmni } from '@/context/omni-context';
-import type { LibraryRecord } from '@/db/repository';
-import { formatLocalDateOffset } from '@/engine/date';
+import { useRepository } from '@/context/omni-context';
+import type { LibraryRecord } from '@/db/models';
+import { formatLocalDate } from '@/engine/date';
 import { evaluateFormula } from '@/engine/formula';
-import { resolveImageUri, savePickedImageToStorage } from '@/engine/image-storage';
+import {
+  pickImageAsset,
+  resolveImageUri,
+  savePickedImageToStorage,
+} from '@/engine/image-storage';
 import type { FieldDef } from '@/schema/field-defs';
 
 export interface LockedRelationContext {
@@ -40,10 +43,6 @@ interface DynamicEntryFormModalProps {
   onSaved?: (entryId: string) => void;
 }
 
-function quickDateStr(offsetDays: number): string {
-  return formatLocalDateOffset(offsetDays);
-}
-
 function buildInitialFormValues(
   library: LibraryRecord,
   initialData?: Record<string, unknown>,
@@ -56,7 +55,7 @@ function buildInitialFormValues(
     } else if (initialData && initialData[f.key] !== undefined) {
       defaults[f.key] = initialData[f.key];
     } else if (f.type === 'date') {
-      defaults[f.key] = quickDateStr(0);
+      defaults[f.key] = formatLocalDate();
     } else if (f.type === 'checkbox') {
       defaults[f.key] = false;
     } else if (f.type === 'multi_select' || f.type === 'relation') {
@@ -79,40 +78,58 @@ export function DynamicEntryFormModal({
   onClose,
   onSaved,
 }: DynamicEntryFormModalProps) {
-  const { repo } = useOmni();
+  const sessionKey = `${library.slug}::${editingEntryId ?? 'new'}::${lockedRelation?.targetEntryId ?? ''}`;
+
+  return (
+    <BottomSheetModal
+      visible={visible}
+      onClose={onClose}
+      maxHeight="90%"
+      maxWidth={680}
+      header={
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>
+            {editingEntryId ? `编辑 · ${library.name}` : `记一条 · ${library.icon} ${library.name}`}
+          </Text>
+          <Pressable
+            onPress={onClose}
+            hitSlop={8}
+            style={({ pressed }) => [styles.closeBtn, pressed && { opacity: 0.6 }]}
+          >
+            <Feather name="x" size={20} color={Palette.inkSecondary} />
+          </Pressable>
+        </View>
+      }
+    >
+      {visible ? (
+        <DynamicEntryFormBody
+          key={sessionKey}
+          library={library}
+          initialData={initialData}
+          editingEntryId={editingEntryId}
+          lockedRelation={lockedRelation}
+          onClose={onClose}
+          onSaved={onSaved}
+        />
+      ) : null}
+    </BottomSheetModal>
+  );
+}
+
+function DynamicEntryFormBody({
+  library,
+  initialData,
+  editingEntryId,
+  lockedRelation,
+  onClose,
+  onSaved,
+}: Omit<DynamicEntryFormModalProps, 'visible'>) {
+  const { repo } = useRepository();
   const insets = useSafeAreaInsets();
   const [formValues, setFormValues] = useState<Record<string, unknown>>(() =>
     buildInitialFormValues(library, initialData, lockedRelation)
   );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [prevSession, setPrevSession] = useState({
-    visible: false,
-    librarySlug: library.slug,
-    editingEntryId,
-    initialData,
-    lockedTargetId: lockedRelation?.targetEntryId,
-  });
-
-  if (
-    visible &&
-    (!prevSession.visible ||
-      prevSession.librarySlug !== library.slug ||
-      prevSession.editingEntryId !== editingEntryId ||
-      prevSession.initialData !== initialData ||
-      prevSession.lockedTargetId !== lockedRelation?.targetEntryId)
-  ) {
-    setPrevSession({
-      visible: true,
-      librarySlug: library.slug,
-      editingEntryId,
-      initialData,
-      lockedTargetId: lockedRelation?.targetEntryId,
-    });
-    setFormValues(buildInitialFormValues(library, initialData, lockedRelation));
-    setErrorMsg(null);
-  } else if (!visible && prevSession.visible) {
-    setPrevSession((s) => ({ ...s, visible: false }));
-  }
 
   const tone = ToneMap[library.color] ?? ToneMap.teal;
 
@@ -123,23 +140,9 @@ export function DynamicEntryFormModal({
   const pickImageForField = async (fieldKey: string, fromCamera = false) => {
     try {
       setErrorMsg(null);
-      if (fromCamera) {
-        const perm = await ImagePicker.requestCameraPermissionsAsync();
-        if (!perm.granted) {
-          setErrorMsg('需要相机权限才能直接拍照');
-          return;
-        }
-      }
-      const fn = fromCamera
-        ? ImagePicker.launchCameraAsync
-        : ImagePicker.launchImageLibraryAsync;
-      const res = await fn({
-        mediaTypes: ['images'],
-        quality: 0.85,
-        base64: Platform.OS === 'web',
-      });
-      if (!res.canceled && res.assets[0]) {
-        const storedPath = await savePickedImageToStorage(res.assets[0]);
+      const asset = await pickImageAsset(fromCamera, '需要相机权限才能直接拍照');
+      if (asset) {
+        const storedPath = await savePickedImageToStorage(asset);
         setFieldVal(fieldKey, storedPath);
       }
     } catch (err) {
@@ -165,84 +168,66 @@ export function DynamicEntryFormModal({
   };
 
   return (
-    <BottomSheetModal
-      visible={visible}
-      onClose={onClose}
-      maxHeight="90%"
-      maxWidth={680}
-      header={
-        <View style={styles.header}>
-          <Text style={styles.headerTitle}>
-            {editingEntryId ? `编辑 · ${library.name}` : `记一条 · ${library.icon} ${library.name}`}
-          </Text>
-          <Pressable
-            onPress={onClose}
-            hitSlop={8}
-            style={({ pressed }) => [styles.closeBtn, pressed && { opacity: 0.6 }]}
-          >
-            <Feather name="x" size={20} color={Palette.inkSecondary} />
-          </Pressable>
-        </View>
-      }
-    >
+    <>
       <ScrollView
-            style={styles.scrollArea}
-            contentContainerStyle={styles.scrollContent}
-            keyboardShouldPersistTaps="handled"
-          >
-            {errorMsg ? (
-              <View style={styles.errorBanner}>
-                <Text style={styles.errorText}>{errorMsg}</Text>
-              </View>
-            ) : null}
-
-            {lockedRelation ? (
-              <View style={styles.lockedRelBanner}>
-                <Feather name="link-2" size={14} color={Palette.brand} />
-                <Text style={styles.lockedRelText} numberOfLines={1}>
-                  归属记录：{lockedRelation.targetLibraryIcon ? `${lockedRelation.targetLibraryIcon} ` : ''}
-                  {lockedRelation.targetTitle}
-                </Text>
-              </View>
-            ) : null}
-
-            {library.fields
-              .filter((field) => !lockedRelation || field.key !== lockedRelation.fieldKey)
-              .map((field) => (
-                <FieldInputBlock
-                  key={field.key}
-                  field={field}
-                  value={formValues[field.key]}
-                  allValues={formValues}
-                  accentColor={tone.solid}
-                  accentSoft={tone.soft}
-                  accentInk={tone.ink}
-                  onChange={(v) => setFieldVal(field.key, v)}
-                  onPickImage={(fromCamera) => pickImageForField(field.key, fromCamera)}
-                />
-              ))}
-          </ScrollView>
-
-          <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
-            <Pressable
-              onPress={onClose}
-              style={({ pressed }) => [styles.cancelBtn, pressed && { opacity: 0.78 }]}
-            >
-              <Text style={styles.cancelText}>取消</Text>
-            </Pressable>
-            <Pressable
-              onPress={handleSave}
-              style={({ pressed }) => [
-                styles.saveBtn,
-                { backgroundColor: tone.solid },
-                pressed && { opacity: 0.85, transform: [{ scale: 0.985 }] },
-              ]}
-            >
-              <Feather name="check" size={16} color={Palette.inkInverse} />
-              <Text style={styles.saveText}>{editingEntryId ? '保存修改' : '保存'}</Text>
-            </Pressable>
+        style={styles.scrollArea}
+        contentContainerStyle={styles.scrollContent}
+        keyboardShouldPersistTaps="handled"
+      >
+        {errorMsg ? (
+          <View style={styles.errorBanner}>
+            <Text style={styles.errorText}>{errorMsg}</Text>
           </View>
-    </BottomSheetModal>
+        ) : null}
+
+        {lockedRelation ? (
+          <View style={styles.lockedRelBanner}>
+            <Feather name="link-2" size={14} color={Palette.brand} />
+            <Text style={styles.lockedRelText} numberOfLines={1}>
+              归属记录：
+              {lockedRelation.targetLibraryIcon ? `${lockedRelation.targetLibraryIcon} ` : ''}
+              {lockedRelation.targetTitle}
+            </Text>
+          </View>
+        ) : null}
+
+        {library.fields
+          .filter((field) => !lockedRelation || field.key !== lockedRelation.fieldKey)
+          .map((field) => (
+            <FieldInputBlock
+              key={field.key}
+              field={field}
+              value={formValues[field.key]}
+              allValues={formValues}
+              accentColor={tone.solid}
+              accentSoft={tone.soft}
+              accentInk={tone.ink}
+              onChange={(v) => setFieldVal(field.key, v)}
+              onPickImage={(fromCamera) => pickImageForField(field.key, fromCamera)}
+            />
+          ))}
+      </ScrollView>
+
+      <View style={[styles.footer, { paddingBottom: Math.max(insets.bottom, 14) }]}>
+        <Pressable
+          onPress={onClose}
+          style={({ pressed }) => [styles.cancelBtn, pressed && { opacity: 0.78 }]}
+        >
+          <Text style={styles.cancelText}>取消</Text>
+        </Pressable>
+        <Pressable
+          onPress={handleSave}
+          style={({ pressed }) => [
+            styles.saveBtn,
+            { backgroundColor: tone.solid },
+            pressed && { opacity: 0.85, transform: [{ scale: 0.985 }] },
+          ]}
+        >
+          <Feather name="check" size={16} color={Palette.inkInverse} />
+          <Text style={styles.saveText}>{editingEntryId ? '保存修改' : '保存'}</Text>
+        </Pressable>
+      </View>
+    </>
   );
 }
 
@@ -265,7 +250,7 @@ function FieldInputBlock({
   onChange: (val: unknown) => void;
   onPickImage: (fromCamera: boolean) => void;
 }) {
-  const { repo } = useOmni();
+  const { repo } = useRepository();
   const [relSearch, setRelSearch] = useState('');
 
   const relationCandidates = useMemo(() => {
@@ -685,10 +670,6 @@ const styles = StyleSheet.create({
     borderColor: Palette.borderStrong,
     backgroundColor: Palette.bgCanvas,
     maxWidth: '100%',
-  },
-  relOptionPillActive: {
-    backgroundColor: Palette.brand,
-    borderColor: Palette.brand,
   },
   optText: {
     fontSize: 13,

@@ -46,8 +46,10 @@
     "build:android:debug": "sh scripts/build-android.sh --init-script ../scripts/bundle-android-debug.gradle :app:assembleDebug",
     "ios": "expo run:ios",
     "web": "expo start --web",
+    "test": "npm run test:unit && npm run test:engine",
+    "test:unit": "tsx --test tests/*.test.ts",
     "test:engine": "tsx ./scripts/verify-engine.ts",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
     "lint": "expo lint"
   },
   "private": true

@@ -1,18 +1,15 @@
 import Feather from '@expo/vector-icons/Feather';
 import { useLocalSearchParams } from 'expo-router';
-import React, { type ComponentRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   Animated,
   FlatList,
   LayoutAnimation,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   TextInput,
-  useWindowDimensions,
   View,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -20,40 +17,44 @@ import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
 import { DynamicEntryFormModal } from '@/components/dynamic-renderer/DynamicEntryFormModal';
 import {
   DynamicCalendarView,
-  DynamicCardListView,
+  DynamicCardEmptyState,
+  DynamicEntryCard,
   DynamicGalleryView,
 } from '@/components/dynamic-renderer/DynamicViews';
 import { SchemaEditorModal } from '@/components/dynamic-renderer/SchemaEditorModal';
 import { ContentTransitionView } from '@/components/ui/ContentTransitionView';
+import { FloatingAssistantButton } from '@/components/ui/FloatingAssistantButton';
 import {
   type SegmentedTabOption,
   SlidingSegmentedBar,
 } from '@/components/ui/SlidingSegmentedBar';
 import { Palette, ToneMap } from '@/constants/design-tokens';
-import { useOmni } from '@/context/omni-context';
-import type { HydratedEntry, LibraryViewRecord } from '@/db/repository';
-import type { LibraryViewType } from '@/schema/view-dsl';
+import { VIEW_TYPE_META } from '@/constants/schema-meta';
+import { useOmniModalActions, useRepository } from '@/context/omni-context';
+import type { HydratedEntry, LibraryViewRecord } from '@/db/models';
+import { useSwipeablePager } from '@/hooks/useSwipeablePager';
+import type {
+  CalendarViewConfig,
+  CardViewConfig,
+  GalleryViewConfig,
+} from '@/schema/view-dsl';
 import { useSafeNavigation } from '@/utils/navigation';
 
 type SortMode = 'updated' | 'date_desc' | 'metric_desc' | 'title_asc';
 
-const VIEW_TYPE_ICONS: Record<LibraryViewType, React.ComponentProps<typeof Feather>['name']> = {
-  card: 'list',
-  gallery: 'grid',
-  calendar: 'calendar',
-  stats: 'pie-chart',
-};
+function CardSeparator() {
+  return <View style={{ height: 10 }} />;
+}
 
 export default function LibraryWorkspaceScreen() {
   const { slug } = useLocalSearchParams<{ slug: string }>();
   const nav = useSafeNavigation();
   const insets = useSafeAreaInsets();
-  const { width: screenWidth } = useWindowDimensions();
-  const { repo, revision, openOmniCapture } = useOmni();
+  const { repo, revision } = useRepository();
+  const { openOmniCapture } = useOmniModalActions();
 
   const slugStr = slug ? String(slug) : '';
   const [activeTabIndex, setActiveTabIndex] = useState(0);
-  const [pagerWidth, setPagerWidth] = useState(screenWidth);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [selectedFilterVal, setSelectedFilterVal] = useState<string>('');
@@ -62,35 +63,46 @@ export default function LibraryWorkspaceScreen() {
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [createSubForParent, setCreateSubForParent] = useState<string | null>(null);
 
-  const [pagerScrollX] = useState(() => new Animated.Value(0));
-  const pagerRef = useRef<ComponentRef<typeof Animated.ScrollView>>(null);
-  const programmaticScrollRef = useRef(false);
-  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const effectiveWidth = pagerWidth > 0 ? pagerWidth : screenWidth;
-
   const library = useMemo(
     () => (!repo || revision < 0 || !slugStr ? null : repo.getLibraryBySlug(slugStr)),
     [repo, revision, slugStr]
   );
 
-  // 直接由独立 library_views 表驱动本记录本按需展现的视图列表
-  const activeViews: LibraryViewRecord[] = useMemo(
-    () => library?.viewList ?? [],
+  const fieldMap = useMemo(
+    () => new Map((library?.fields ?? []).map((f) => [f.key, f])),
     [library]
   );
+
+  // 直接由独立 library_views 表驱动本记录本按需展现的视图列表
+  const activeViews: LibraryViewRecord[] = useMemo(() => library?.viewList ?? [], [library]);
 
   const safeTabIndex = Math.min(activeTabIndex, Math.max(0, activeViews.length - 1));
   const currentView = activeViews[safeTabIndex];
   const hasMultipleViews = activeViews.length > 1;
   const statsViewIdx = activeViews.findIndex((v) => v.viewType === 'stats');
 
+  const {
+    pagerRef,
+    pagerScrollX,
+    effectiveWidth,
+    selectPage,
+    jumpToPage,
+    handlePagerLayout,
+    handlePagerMomentumEnd,
+    onPagerScroll,
+  } = useSwipeablePager({
+    pageCount: activeViews.length,
+    activeIndex: safeTabIndex,
+    onIndexChange: setActiveTabIndex,
+    enabled: hasMultipleViews,
+  });
+
   const segmentedItems: SegmentedTabOption[] = useMemo(
     () =>
       activeViews.map((v) => ({
         key: v.id,
         label: v.name,
-        icon: VIEW_TYPE_ICONS[v.viewType] ?? 'list',
+        icon: VIEW_TYPE_META[v.viewType]?.icon ?? 'list',
       })),
     [activeViews]
   );
@@ -199,66 +211,13 @@ export default function LibraryWorkspaceScreen() {
     [rootParent, childLibraries]
   );
 
-  // 仅当该记录本配置了统计视图且当前处于或邻近统计页时才按需查询图表
-  const shouldLoadStats =
-    statsViewIdx >= 0 && Math.abs(safeTabIndex - statsViewIdx) <= 1;
+  const shouldLoadStats = statsViewIdx >= 0 && Math.abs(safeTabIndex - statsViewIdx) <= 1;
   const designedStatsWidgets = useMemo(
     () =>
       !repo || revision < 0 || !library || !shouldLoadStats
         ? []
         : repo.listWidgetsForLibrary(library.slug),
     [repo, revision, library, shouldLoadStats]
-  );
-
-  useEffect(() => {
-    if (!hasMultipleViews) return;
-    const listenerId = pagerScrollX.addListener(({ value }) => {
-      if (programmaticScrollRef.current) return;
-      const nextIdx = Math.max(
-        0,
-        Math.min(activeViews.length - 1, Math.round(value / Math.max(1, effectiveWidth)))
-      );
-      setActiveTabIndex((prev) => (prev === nextIdx ? prev : nextIdx));
-    });
-    return () => {
-      pagerScrollX.removeListener(listenerId);
-    };
-  }, [hasMultipleViews, pagerScrollX, activeViews.length, effectiveWidth]);
-
-  useEffect(() => {
-    return () => {
-      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
-    };
-  }, []);
-
-  const handleSelectViewTab = useCallback(
-    (idx: number) => {
-      programmaticScrollRef.current = true;
-      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
-      scrollTimerRef.current = setTimeout(() => {
-        programmaticScrollRef.current = false;
-      }, 380);
-      setActiveTabIndex(idx);
-      pagerRef.current?.scrollTo({ x: idx * effectiveWidth, animated: true });
-    },
-    [effectiveWidth]
-  );
-
-  const handlePagerMomentumEnd = useCallback(
-    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-      programmaticScrollRef.current = false;
-      if (scrollTimerRef.current) {
-        clearTimeout(scrollTimerRef.current);
-        scrollTimerRef.current = null;
-      }
-      const offsetX = e.nativeEvent.contentOffset.x;
-      const nextIdx = Math.max(
-        0,
-        Math.min(activeViews.length - 1, Math.round(offsetX / Math.max(1, effectiveWidth)))
-      );
-      setActiveTabIndex(nextIdx);
-    },
-    [activeViews.length, effectiveWidth]
   );
 
   const handleSwitchFamilyLibrary = useCallback(
@@ -268,12 +227,10 @@ export default function LibraryWorkspaceScreen() {
       setSelectedFilterVal('');
       setSortMode('updated');
       setActiveTabIndex(0);
-      programmaticScrollRef.current = false;
-      pagerScrollX.setValue(0);
-      pagerRef.current?.scrollTo({ x: 0, animated: false });
+      jumpToPage(0);
       nav.setParams({ slug: targetSlug });
     },
-    [nav, pagerScrollX]
+    [nav, jumpToPage]
   );
 
   const toggleSearch = () => {
@@ -289,14 +246,6 @@ export default function LibraryWorkspaceScreen() {
     const next = availableSortModes[(idx + 1) % availableSortModes.length];
     if (next) setSortMode(next.id);
   };
-
-  const onPagerScroll = useMemo(
-    () =>
-      Animated.event([{ nativeEvent: { contentOffset: { x: pagerScrollX } } }], {
-        useNativeDriver: true,
-      }),
-    [pagerScrollX]
-  );
 
   if (!library) {
     return (
@@ -413,6 +362,7 @@ export default function LibraryWorkspaceScreen() {
     const pageStyle = fullWidth ? { width: fullWidth } : styles.singlePage;
 
     if (view.viewType === 'card') {
+      const cardCfg = view.config as Partial<CardViewConfig>;
       return (
         <FlatList<HydratedEntry>
           key={view.id}
@@ -425,18 +375,16 @@ export default function LibraryWorkspaceScreen() {
           windowSize={7}
           style={pageStyle}
           contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
+          ItemSeparatorComponent={CardSeparator}
           ListHeaderComponent={renderFilterSortBar}
-          ListEmptyComponent={
-            <DynamicCardListView
-              library={library}
-              entries={[]}
-              onSelectEntry={(id) => nav.push(`/entry/${id}`)}
-            />
-          }
+          ListHeaderComponentStyle={showFilterSortBar ? { marginBottom: 8 } : undefined}
+          ListEmptyComponent={DynamicCardEmptyState}
           renderItem={({ item }) => (
-            <DynamicCardListView
+            <DynamicEntryCard
               library={library}
-              entries={[item]}
+              entry={item}
+              fieldMap={fieldMap}
+              cardConfig={cardCfg}
               onSelectEntry={(id) => nav.push(`/entry/${id}`)}
               onSelectEntryRelations={(id) =>
                 nav.push({ pathname: '/entry/[id]', params: { id, tab: 'relations' } })
@@ -448,6 +396,7 @@ export default function LibraryWorkspaceScreen() {
     }
 
     if (view.viewType === 'gallery') {
+      const galleryCfg = view.config as Partial<GalleryViewConfig>;
       return (
         <ScrollView
           key={view.id}
@@ -460,6 +409,7 @@ export default function LibraryWorkspaceScreen() {
           <DynamicGalleryView
             library={library}
             entries={entries}
+            galleryConfig={galleryCfg}
             onSelectEntry={(id) => nav.push(`/entry/${id}`)}
           />
         </ScrollView>
@@ -467,6 +417,7 @@ export default function LibraryWorkspaceScreen() {
     }
 
     if (view.viewType === 'calendar') {
+      const calendarCfg = view.config as Partial<CalendarViewConfig>;
       return (
         <ScrollView
           key={view.id}
@@ -478,6 +429,7 @@ export default function LibraryWorkspaceScreen() {
           <DynamicCalendarView
             library={library}
             entries={entries}
+            calendarConfig={calendarCfg}
             onSelectEntry={(id) => nav.push(`/entry/${id}`)}
           />
         </ScrollView>
@@ -550,7 +502,6 @@ export default function LibraryWorkspaceScreen() {
 
   return (
     <View style={styles.safeArea}>
-      {/* 顶部导航与操作栏（静态 insets.top，消除 Android 进栈顶栏跳动） */}
       <View style={[styles.topNavOuter, { paddingTop: insets.top }]}>
         <View style={styles.topNav}>
           <Pressable
@@ -637,7 +588,6 @@ export default function LibraryWorkspaceScreen() {
         ) : null}
       </View>
 
-      {/* 按需显示顶部吸顶区：有主从库或多视图时才渲染，单视图记录本零多余占位 */}
       {familyLibraries.length > 1 || hasMultipleViews ? (
         <View style={styles.stickyControls}>
           {familyLibraries.length > 1 ? (
@@ -694,7 +644,7 @@ export default function LibraryWorkspaceScreen() {
             <SlidingSegmentedBar
               items={segmentedItems}
               activeIndex={safeTabIndex}
-              onSelect={handleSelectViewTab}
+              onSelect={selectPage}
               activeColor={tone.solid}
               scrollX={pagerScrollX}
               pageWidth={effectiveWidth}
@@ -703,7 +653,6 @@ export default function LibraryWorkspaceScreen() {
         </View>
       ) : null}
 
-      {/* 内容区：单视图直接呈现；多视图支持跟手左右滑动 Pager */}
       <ContentTransitionView transitionKey={library.slug} style={styles.pagerWrap}>
         {hasMultipleViews ? (
           <Animated.ScrollView
@@ -713,12 +662,7 @@ export default function LibraryWorkspaceScreen() {
             nestedScrollEnabled
             showsHorizontalScrollIndicator={false}
             scrollEventThrottle={16}
-            onLayout={(e) => {
-              const w = e.nativeEvent.layout.width;
-              if (w > 0 && Math.abs(w - pagerWidth) > 0.5) {
-                setPagerWidth(w);
-              }
-            }}
+            onLayout={handlePagerLayout}
             onScroll={onPagerScroll}
             onMomentumScrollEnd={handlePagerMomentumEnd}
             style={styles.pager}
@@ -730,27 +674,19 @@ export default function LibraryWorkspaceScreen() {
         ) : null}
       </ContentTransitionView>
 
-      {/* 右下角场景化助手按钮 */}
-      <Pressable
+      <FloatingAssistantButton
         accessibilityLabel={isCurrentStats ? '针对本库问数据或定制图表' : '本库随手说与智能助手'}
+        icon={isCurrentStats ? 'bar-chart-2' : 'message-circle'}
+        iconSize={isCurrentStats ? 23 : 24}
+        backgroundColor={tone.solid}
+        bottomOffset={Math.max(insets.bottom, 16) + 8}
         onPress={() =>
           openOmniCapture(library.slug, 'text', undefined, isCurrentStats ? 'stats' : 'library')
         }
         onLongPress={() =>
           openOmniCapture(library.slug, 'voice', undefined, isCurrentStats ? 'stats' : 'library')
         }
-        style={({ pressed }) => [
-          styles.fabBtn,
-          { bottom: Math.max(insets.bottom, 16) + 8, backgroundColor: tone.solid },
-          pressed && { opacity: 0.9, transform: [{ scale: 0.94 }] },
-        ]}
-      >
-        <Feather
-          name={isCurrentStats ? 'bar-chart-2' : 'message-circle'}
-          size={isCurrentStats ? 23 : 24}
-          color={Palette.inkInverse}
-        />
-      </Pressable>
+      />
 
       <DynamicEntryFormModal
         visible={entryModalOpen}
@@ -848,13 +784,12 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     paddingHorizontal: 16,
     paddingTop: 8,
-    gap: 10,
   },
   filterSortRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 2,
+    marginBottom: 4,
   },
   filterChipsScroll: {
     flexDirection: 'row',
@@ -972,20 +907,6 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: Palette.inkSecondary,
-  },
-  fabBtn: {
-    position: 'absolute',
-    right: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.22,
-    shadowRadius: 14,
-    elevation: 8,
   },
   searchBox: {
     flexDirection: 'row',

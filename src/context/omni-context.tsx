@@ -2,11 +2,12 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useS
 import type { AssistantScene, CaptureEntryContext } from '@/ai/agents';
 import { getDeepSeekApiKey } from '@/ai/settings-store';
 import { getPlatformSqlDriver } from '@/db/driver';
-import { OmniRepository, type LibraryRecord } from '@/db/repository';
+import type { LibraryRecord } from '@/db/models';
+import { OmniRepository } from '@/db/repository';
 
 export type OmniLaunchAction = 'text' | 'voice' | 'camera';
 
-interface OmniContextValue {
+export interface RepositoryContextValue {
   ready: boolean;
   error: string | null;
   persistWarning: string | null;
@@ -16,12 +17,17 @@ interface OmniContextValue {
   revision: number;
   hasApiKey: boolean;
   refreshApiKeyState: () => Promise<void>;
+}
+
+export interface OmniModalStateValue {
   omniModalVisible: boolean;
   omniScene: AssistantScene;
   omniTargetSlug?: string;
   omniEntryContext?: CaptureEntryContext;
-  clearOmniEntryContext: () => void;
   omniInitialAction: OmniLaunchAction;
+}
+
+export interface OmniModalActionsValue {
   openOmniCapture: (
     targetSlug?: string,
     initialAction?: OmniLaunchAction,
@@ -29,9 +35,10 @@ interface OmniContextValue {
     scene?: AssistantScene
   ) => void;
   closeOmniCapture: () => void;
+  clearOmniEntryContext: () => void;
 }
 
-const OmniContext = createContext<OmniContextValue>({
+const RepositoryContext = createContext<RepositoryContextValue>({
   ready: false,
   error: null,
   persistWarning: null,
@@ -41,16 +48,26 @@ const OmniContext = createContext<OmniContextValue>({
   revision: 0,
   hasApiKey: false,
   refreshApiKeyState: async () => {},
+});
+
+const OmniModalStateContext = createContext<OmniModalStateValue>({
   omniModalVisible: false,
   omniScene: 'home',
   omniTargetSlug: undefined,
   omniEntryContext: undefined,
-  clearOmniEntryContext: () => {},
   omniInitialAction: 'text',
-  openOmniCapture: () => {},
-  closeOmniCapture: () => {},
 });
 
+const OmniModalActionsContext = createContext<OmniModalActionsValue>({
+  openOmniCapture: () => {},
+  closeOmniCapture: () => {},
+  clearOmniEntryContext: () => {},
+});
+
+/**
+ * 拆分数据层（RepositoryContext）与全局助手弹窗态（OmniModalState / OmniModalActions）：
+ * 打开/关闭随手说弹窗不会触发底层业务页面与图表卡片整树重渲染。
+ */
 export function OmniProvider({ children }: { children: React.ReactNode }) {
   const [repo, setRepo] = useState<OmniRepository | null>(null);
   const [libraries, setLibraries] = useState<LibraryRecord[]>([]);
@@ -59,13 +76,14 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
   const [persistWarning, setPersistWarning] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   const [hasApiKey, setHasApiKey] = useState(false);
-  const [omniModalVisible, setOmniModalVisible] = useState(false);
-  const [omniScene, setOmniScene] = useState<AssistantScene>('home');
-  const [omniTargetSlug, setOmniTargetSlug] = useState<string | undefined>(undefined);
-  const [omniEntryContext, setOmniEntryContext] = useState<CaptureEntryContext | undefined>(
-    undefined
-  );
-  const [omniInitialAction, setOmniInitialAction] = useState<OmniLaunchAction>('text');
+
+  const [modalState, setModalState] = useState<OmniModalStateValue>({
+    omniModalVisible: false,
+    omniScene: 'home',
+    omniTargetSlug: undefined,
+    omniEntryContext: undefined,
+    omniInitialAction: 'text',
+  });
 
   const refreshApiKeyState = useCallback(async () => {
     const key = await getDeepSeekApiKey();
@@ -117,27 +135,40 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
     ) => {
       const resolvedScene: AssistantScene =
         scene ?? (entryContext ? 'entry' : targetSlug ? 'library' : 'home');
-      setOmniScene(resolvedScene);
-      setOmniTargetSlug(targetSlug);
-      setOmniEntryContext(entryContext);
-      setOmniInitialAction(initialAction);
-      setOmniModalVisible(true);
+      setModalState({
+        omniModalVisible: true,
+        omniScene: resolvedScene,
+        omniTargetSlug: targetSlug,
+        omniEntryContext: entryContext,
+        omniInitialAction: initialAction,
+      });
     },
     []
   );
 
   const clearOmniEntryContext = useCallback(() => {
-    setOmniEntryContext(undefined);
-    setOmniScene((prev) => (prev === 'entry' ? (omniTargetSlug ? 'library' : 'home') : prev));
-  }, [omniTargetSlug]);
-
-  const closeOmniCapture = useCallback(() => {
-    setOmniModalVisible(false);
-    setOmniEntryContext(undefined);
-    setOmniInitialAction('text');
+    setModalState((prev) => ({
+      ...prev,
+      omniEntryContext: undefined,
+      omniScene:
+        prev.omniScene === 'entry'
+          ? prev.omniTargetSlug
+            ? 'library'
+            : 'home'
+          : prev.omniScene,
+    }));
   }, []);
 
-  const value = useMemo<OmniContextValue>(
+  const closeOmniCapture = useCallback(() => {
+    setModalState((prev) => ({
+      ...prev,
+      omniModalVisible: false,
+      omniEntryContext: undefined,
+      omniInitialAction: 'text',
+    }));
+  }, []);
+
+  const repoValue = useMemo<RepositoryContextValue>(
     () => ({
       ready,
       error,
@@ -148,14 +179,6 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
       revision,
       hasApiKey,
       refreshApiKeyState,
-      omniModalVisible,
-      omniScene,
-      omniTargetSlug,
-      omniEntryContext,
-      clearOmniEntryContext,
-      omniInitialAction,
-      openOmniCapture,
-      closeOmniCapture,
     }),
     [
       ready,
@@ -167,20 +190,51 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
       revision,
       hasApiKey,
       refreshApiKeyState,
-      omniModalVisible,
-      omniScene,
-      omniTargetSlug,
-      omniEntryContext,
-      clearOmniEntryContext,
-      omniInitialAction,
-      openOmniCapture,
-      closeOmniCapture,
     ]
   );
 
-  return <OmniContext.Provider value={value}>{children}</OmniContext.Provider>;
+  const modalActions = useMemo<OmniModalActionsValue>(
+    () => ({
+      openOmniCapture,
+      closeOmniCapture,
+      clearOmniEntryContext,
+    }),
+    [openOmniCapture, closeOmniCapture, clearOmniEntryContext]
+  );
+
+  return (
+    <RepositoryContext.Provider value={repoValue}>
+      <OmniModalActionsContext.Provider value={modalActions}>
+        <OmniModalStateContext.Provider value={modalState}>
+          {children}
+        </OmniModalStateContext.Provider>
+      </OmniModalActionsContext.Provider>
+    </RepositoryContext.Provider>
+  );
 }
 
+export function useRepository(): RepositoryContextValue {
+  return useContext(RepositoryContext);
+}
+
+export function useOmniModalState(): OmniModalStateValue {
+  return useContext(OmniModalStateContext);
+}
+
+export function useOmniModalActions(): OmniModalActionsValue {
+  return useContext(OmniModalActionsContext);
+}
+
+/**
+ * 兼容旧版聚合 Hook（新代码建议优先按需使用 useRepository / useOmniModalActions / useOmniModalState）
+ */
 export function useOmni() {
-  return useContext(OmniContext);
+  const repoCtx = useRepository();
+  const modalState = useOmniModalState();
+  const modalActions = useOmniModalActions();
+  return {
+    ...repoCtx,
+    ...modalState,
+    ...modalActions,
+  };
 }

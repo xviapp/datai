@@ -4,10 +4,15 @@ import React, { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { ContentTransitionView } from '@/components/ui/ContentTransitionView';
 import { HighlightTonePalette, Palette, ToneMap } from '@/constants/design-tokens';
-import type { HydratedEntry, LibraryRecord } from '@/db/repository';
-import { formatLocalDate } from '@/engine/date';
+import type { HydratedEntry, LibraryRecord } from '@/db/models';
+import { buildMonthCalendarCells, formatLocalDate } from '@/engine/date';
 import { resolveImageUri } from '@/engine/image-storage';
 import type { FieldDef } from '@/schema/field-defs';
+import type {
+  CalendarViewConfig,
+  CardViewConfig,
+  GalleryViewConfig,
+} from '@/schema/view-dsl';
 
 export function formatFieldDisplay(field: FieldDef | undefined, val: unknown): string {
   if (val === undefined || val === null || val === '') return '—';
@@ -16,7 +21,9 @@ export function formatFieldDisplay(field: FieldDef | undefined, val: unknown): s
   switch (field.type) {
     case 'currency': {
       const n = Number(val);
-      return Number.isFinite(n) ? `¥${n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}` : String(val);
+      return Number.isFinite(n)
+        ? `¥${n.toLocaleString('zh-CN', { maximumFractionDigits: 2 })}`
+        : String(val);
     }
     case 'number':
     case 'rollup':
@@ -40,165 +47,252 @@ export function formatFieldDisplay(field: FieldDef | undefined, val: unknown): s
   }
 }
 
+export function resolveCardConfig(
+  library: LibraryRecord,
+  override?: Partial<CardViewConfig>
+): CardViewConfig {
+  const base = library.views.card;
+  if (!override) return base;
+  return {
+    ...base,
+    ...override,
+    titleFieldKey: override.titleFieldKey || base.titleFieldKey,
+    footerMetricKeys: override.footerMetricKeys ?? base.footerMetricKeys,
+    highlightRules: override.highlightRules ?? base.highlightRules,
+  };
+}
+
+export interface DynamicEntryCardProps {
+  library: LibraryRecord;
+  entry: HydratedEntry;
+  fieldMap: Map<string, FieldDef>;
+  cardConfig?: Partial<CardViewConfig>;
+  onSelectEntry: (entryId: string) => void;
+  onSelectEntryRelations?: (entryId: string) => void;
+  /** 是否显示正向/反向关联条（默认 true；反链卡片等嵌入场景可关闭） */
+  showRelationsStrip?: boolean;
+  /** 嵌入卡片模式（如详情页反链列表使用浅底紧凑样式） */
+  embedded?: boolean;
+}
+
+/**
+ * 独立单条记录卡片：供 FlatList 直接复用，避免逐行重建列表容器与 fieldMap
+ */
+export function DynamicEntryCard({
+  library,
+  entry,
+  fieldMap,
+  cardConfig,
+  onSelectEntry,
+  onSelectEntryRelations,
+  showRelationsStrip = true,
+  embedded = false,
+}: DynamicEntryCardProps) {
+  const cardCfg = resolveCardConfig(library, cardConfig);
+  const libTone = ToneMap[library.color] ?? ToneMap.teal;
+  const hl = entry.highlight ? HighlightTonePalette[entry.highlight.tone] : null;
+
+  const titleField = fieldMap.get(cardCfg.titleFieldKey);
+  const rawTitleFull = titleField?.multiline
+    ? String(entry.computedData[cardCfg.titleFieldKey] ?? '').trim()
+    : '';
+  const subtitleField = cardCfg.subtitleFieldKey
+    ? fieldMap.get(cardCfg.subtitleFieldKey)
+    : undefined;
+  const subtitleRaw = cardCfg.subtitleFieldKey
+    ? entry.computedData[cardCfg.subtitleFieldKey]
+    : undefined;
+  const badgeField = cardCfg.rightBadgeFieldKey
+    ? fieldMap.get(cardCfg.rightBadgeFieldKey)
+    : undefined;
+  const badgeVal = cardCfg.rightBadgeFieldKey
+    ? entry.computedData[cardCfg.rightBadgeFieldKey]
+    : undefined;
+  const coverUri = cardCfg.coverImageFieldKey
+    ? resolveImageUri(entry.computedData[cardCfg.coverImageFieldKey])
+    : '';
+
+  const matchedOptColor = badgeField?.options?.find((o) => o.value === String(badgeVal))?.color;
+  const allForwardRefs = showRelationsStrip ? Object.values(entry.forwardLinks).flat() : [];
+
+  const visibleMetrics: Array<{ key: string; field: FieldDef; value: unknown }> = [];
+  for (const mKey of cardCfg.footerMetricKeys) {
+    const mf = fieldMap.get(mKey);
+    if (!mf) continue;
+    const raw = entry.computedData[mKey];
+    if (embedded && (raw === undefined || raw === null || raw === '')) continue;
+    visibleMetrics.push({ key: mKey, field: mf, value: raw });
+  }
+
+  return (
+    <Pressable
+      onPress={() => onSelectEntry(entry.id)}
+      style={({ pressed }) => [
+        styles.card,
+        embedded && styles.cardEmbedded,
+        hl && { backgroundColor: hl.bg },
+        pressed && styles.cardPressed,
+      ]}
+    >
+      <View style={styles.cardMainRow}>
+        {coverUri ? (
+          <Image
+            source={{ uri: coverUri }}
+            style={embedded ? styles.cardThumbCompact : styles.cardThumb}
+            contentFit="cover"
+          />
+        ) : null}
+
+        <View style={styles.cardBody}>
+          <View style={styles.cardTopRow}>
+            <Text
+              style={[styles.cardTitle, embedded && styles.cardTitleEmbedded]}
+              numberOfLines={titleField?.multiline || embedded ? 2 : 1}
+            >
+              {rawTitleFull || entry.titleSummary}
+            </Text>
+
+            <View style={styles.badgesGroup}>
+              {entry.highlight?.badgeText && hl ? (
+                <View style={[styles.badgePill, { backgroundColor: hl.pillBg }]}>
+                  <Text style={[styles.badgeText, { color: hl.pillInk }]}>
+                    {entry.highlight.badgeText}
+                  </Text>
+                </View>
+              ) : null}
+
+              {badgeVal !== undefined && badgeVal !== '' ? (
+                <View
+                  style={[
+                    styles.badgePill,
+                    {
+                      backgroundColor: matchedOptColor ? `${matchedOptColor}18` : libTone.soft,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.badgeText,
+                      { color: matchedOptColor || libTone.ink },
+                    ]}
+                  >
+                    {formatFieldDisplay(badgeField, badgeVal)}
+                  </Text>
+                </View>
+              ) : null}
+            </View>
+          </View>
+
+          {subtitleRaw !== undefined && subtitleRaw !== '' ? (
+            <Text
+              style={[styles.cardSubtitle, embedded && styles.cardSubtitleEmbedded]}
+              numberOfLines={subtitleField?.multiline ? 2 : 1}
+            >
+              {formatFieldDisplay(subtitleField, subtitleRaw)}
+            </Text>
+          ) : null}
+
+          {showRelationsStrip && (allForwardRefs.length > 0 || entry.backlinks.length > 0) ? (
+            <View style={styles.relationsStrip}>
+              {allForwardRefs.slice(0, 2).map((ref) => (
+                <View key={`${ref.fieldKey}-${ref.id}`} style={styles.relChip}>
+                  <Feather name="link-2" size={11} color={Palette.brand} />
+                  <Text style={styles.relChipText} numberOfLines={1}>
+                    {ref.libraryIcon} {ref.title}
+                  </Text>
+                </View>
+              ))}
+              {entry.backlinks.length > 0 ? (
+                <Pressable
+                  hitSlop={6}
+                  onPress={(e) => {
+                    e.stopPropagation();
+                    if (onSelectEntryRelations) {
+                      onSelectEntryRelations(entry.id);
+                    } else {
+                      onSelectEntry(entry.id);
+                    }
+                  }}
+                  style={({ pressed }) => [styles.backlinkChip, pressed && { opacity: 0.72 }]}
+                >
+                  <Feather name="corner-down-right" size={11} color={Palette.inkSecondary} />
+                  <Text style={styles.backlinkChipText}>关联 {entry.backlinks.length} 条</Text>
+                  <Feather name="chevron-right" size={11} color={Palette.inkMuted} />
+                </Pressable>
+              ) : null}
+            </View>
+          ) : null}
+
+          {visibleMetrics.length > 0 ? (
+            embedded ? (
+              <View style={styles.embeddedMetricsRow}>
+                {visibleMetrics.map((m) => (
+                  <View key={m.key} style={styles.embeddedMetricChip}>
+                    <Text style={styles.embeddedMetricText}>
+                      {m.field.label} {formatFieldDisplay(m.field, m.value)}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            ) : (
+              <View style={styles.metricsFooter}>
+                {visibleMetrics.map((m) => (
+                  <View key={m.key} style={styles.metricCell}>
+                    <Text style={styles.metricLabel}>{m.field.label}</Text>
+                    <Text style={styles.metricValue} numberOfLines={1}>
+                      {formatFieldDisplay(m.field, m.value)}
+                    </Text>
+                  </View>
+                ))}
+              </View>
+            )
+          ) : null}
+        </View>
+      </View>
+    </Pressable>
+  );
+}
+
+export function DynamicCardEmptyState() {
+  return (
+    <View style={styles.emptyBox}>
+      <Text style={styles.emptyDesc}>点右上角「记一条」或右下角「随手说」添加记录</Text>
+    </View>
+  );
+}
+
 export function DynamicCardListView({
   library,
   entries,
+  cardConfig,
   onSelectEntry,
   onSelectEntryRelations,
 }: {
   library: LibraryRecord;
   entries: HydratedEntry[];
+  cardConfig?: Partial<CardViewConfig>;
   onSelectEntry: (entryId: string) => void;
   onSelectEntryRelations?: (entryId: string) => void;
 }) {
-  const cardCfg = library.views.card;
   const fieldMap = useMemo(() => new Map(library.fields.map((f) => [f.key, f])), [library.fields]);
-  const libTone = ToneMap[library.color] ?? ToneMap.teal;
 
   if (entries.length === 0) {
-    return (
-      <View style={styles.emptyBox}>
-        <Text style={styles.emptyDesc}>点右上角「记一条」或右下角「随手说」添加记录</Text>
-      </View>
-    );
+    return <DynamicCardEmptyState />;
   }
 
   return (
     <View style={styles.listCol}>
-      {entries.map((entry) => {
-        const hl = entry.highlight ? HighlightTonePalette[entry.highlight.tone] : null;
-        const titleField = fieldMap.get(cardCfg.titleFieldKey);
-        const rawTitleFull = titleField?.multiline
-          ? String(entry.computedData[cardCfg.titleFieldKey] ?? '').trim()
-          : '';
-        const subtitleField = cardCfg.subtitleFieldKey ? fieldMap.get(cardCfg.subtitleFieldKey) : undefined;
-        const subtitleRaw = cardCfg.subtitleFieldKey ? entry.computedData[cardCfg.subtitleFieldKey] : undefined;
-        const badgeField = cardCfg.rightBadgeFieldKey ? fieldMap.get(cardCfg.rightBadgeFieldKey) : undefined;
-        const badgeVal = cardCfg.rightBadgeFieldKey ? entry.computedData[cardCfg.rightBadgeFieldKey] : undefined;
-        const coverUri = cardCfg.coverImageFieldKey
-          ? resolveImageUri(entry.computedData[cardCfg.coverImageFieldKey])
-          : '';
-
-        const matchedOptColor = badgeField?.options?.find((o) => o.value === String(badgeVal))?.color;
-
-        const allForwardRefs = Object.values(entry.forwardLinks).flat();
-
-        return (
-          <Pressable
-            key={entry.id}
-            onPress={() => onSelectEntry(entry.id)}
-            style={({ pressed }) => [
-              styles.card,
-              hl && { backgroundColor: hl.bg },
-              pressed && styles.cardPressed,
-            ]}
-          >
-            <View style={styles.cardMainRow}>
-              {coverUri ? (
-                <Image source={{ uri: coverUri }} style={styles.cardThumb} contentFit="cover" />
-              ) : null}
-
-              <View style={styles.cardBody}>
-                <View style={styles.cardTopRow}>
-                  <Text style={styles.cardTitle} numberOfLines={titleField?.multiline ? 2 : 1}>
-                    {rawTitleFull || entry.titleSummary}
-                  </Text>
-
-                  <View style={styles.badgesGroup}>
-                    {entry.highlight?.badgeText && hl ? (
-                      <View style={[styles.badgePill, { backgroundColor: hl.pillBg }]}>
-                        <Text style={[styles.badgeText, { color: hl.pillInk }]}>
-                          {entry.highlight.badgeText}
-                        </Text>
-                      </View>
-                    ) : null}
-
-                    {badgeVal !== undefined && badgeVal !== '' ? (
-                      <View
-                        style={[
-                          styles.badgePill,
-                          {
-                            backgroundColor: matchedOptColor ? `${matchedOptColor}18` : libTone.soft,
-                          },
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.badgeText,
-                            { color: matchedOptColor || libTone.ink },
-                          ]}
-                        >
-                          {formatFieldDisplay(badgeField, badgeVal)}
-                        </Text>
-                      </View>
-                    ) : null}
-                  </View>
-                </View>
-
-                {subtitleRaw !== undefined && subtitleRaw !== '' ? (
-                  <Text
-                    style={styles.cardSubtitle}
-                    numberOfLines={subtitleField?.multiline ? 2 : 1}
-                  >
-                    {formatFieldDisplay(subtitleField, subtitleRaw)}
-                  </Text>
-                ) : null}
-
-                {(allForwardRefs.length > 0 || entry.backlinks.length > 0) && (
-                  <View style={styles.relationsStrip}>
-                    {allForwardRefs.slice(0, 2).map((ref) => (
-                      <View key={`${ref.fieldKey}-${ref.id}`} style={styles.relChip}>
-                        <Feather name="link-2" size={11} color={Palette.brand} />
-                        <Text style={styles.relChipText} numberOfLines={1}>
-                          {ref.libraryIcon} {ref.title}
-                        </Text>
-                      </View>
-                    ))}
-                    {entry.backlinks.length > 0 ? (
-                      <Pressable
-                        hitSlop={6}
-                        onPress={(e) => {
-                          e.stopPropagation();
-                          if (onSelectEntryRelations) {
-                            onSelectEntryRelations(entry.id);
-                          } else {
-                            onSelectEntry(entry.id);
-                          }
-                        }}
-                        style={({ pressed }) => [
-                          styles.backlinkChip,
-                          pressed && { opacity: 0.72 },
-                        ]}
-                      >
-                        <Feather name="corner-down-right" size={11} color={Palette.inkSecondary} />
-                        <Text style={styles.backlinkChipText}>关联 {entry.backlinks.length} 条</Text>
-                        <Feather name="chevron-right" size={11} color={Palette.inkMuted} />
-                      </Pressable>
-                    ) : null}
-                  </View>
-                )}
-
-                {cardCfg.footerMetricKeys.length > 0 ? (
-                  <View style={styles.metricsFooter}>
-                    {cardCfg.footerMetricKeys.map((mKey) => {
-                      const mf = fieldMap.get(mKey);
-                      if (!mf) return null;
-                      return (
-                        <View key={mKey} style={styles.metricCell}>
-                          <Text style={styles.metricLabel}>{mf.label}</Text>
-                          <Text style={styles.metricValue} numberOfLines={1}>
-                            {formatFieldDisplay(mf, entry.computedData[mKey])}
-                          </Text>
-                        </View>
-                      );
-                    })}
-                  </View>
-                ) : null}
-              </View>
-            </View>
-          </Pressable>
-        );
-      })}
+      {entries.map((entry) => (
+        <DynamicEntryCard
+          key={entry.id}
+          library={library}
+          entry={entry}
+          fieldMap={fieldMap}
+          cardConfig={cardConfig}
+          onSelectEntry={onSelectEntry}
+          onSelectEntryRelations={onSelectEntryRelations}
+        />
+      ))}
     </View>
   );
 }
@@ -206,22 +300,24 @@ export function DynamicCardListView({
 export function DynamicGalleryView({
   library,
   entries,
+  galleryConfig,
   onSelectEntry,
 }: {
   library: LibraryRecord;
   entries: HydratedEntry[];
+  galleryConfig?: Partial<GalleryViewConfig>;
   onSelectEntry: (entryId: string) => void;
 }) {
   const fieldMap = useMemo(() => new Map(library.fields.map((f) => [f.key, f])), [library.fields]);
-  const galleryCfg = library.views.gallery;
+  const galleryCfg = { ...library.views.gallery, ...galleryConfig };
   const coverKey =
-    galleryCfg?.coverImageFieldKey ||
+    galleryCfg.coverImageFieldKey ||
     library.views.card.coverImageFieldKey ||
     library.fields.find((f) => f.type === 'image')?.key;
-  const subKey = galleryCfg?.subtitleFieldKey || library.views.card.subtitleFieldKey;
+  const subKey = galleryCfg.subtitleFieldKey || library.views.card.subtitleFieldKey;
   const ratingKey =
-    galleryCfg?.ratingFieldKey || library.fields.find((f) => f.type === 'rating')?.key;
-  const badgeKey = galleryCfg?.badgeFieldKey || library.views.card.rightBadgeFieldKey;
+    galleryCfg.ratingFieldKey || library.fields.find((f) => f.type === 'rating')?.key;
+  const badgeKey = galleryCfg.badgeFieldKey || library.views.card.rightBadgeFieldKey;
 
   if (entries.length === 0) {
     return (
@@ -235,7 +331,9 @@ export function DynamicGalleryView({
     <View style={styles.galleryGrid}>
       {entries.map((entry) => {
         const coverUri = coverKey ? resolveImageUri(entry.computedData[coverKey]) : '';
-        const subtitle = subKey ? formatFieldDisplay(fieldMap.get(subKey), entry.computedData[subKey]) : '';
+        const subtitle = subKey
+          ? formatFieldDisplay(fieldMap.get(subKey), entry.computedData[subKey])
+          : '';
         const rating = ratingKey
           ? formatFieldDisplay(fieldMap.get(ratingKey), entry.computedData[ratingKey])
           : '';
@@ -281,33 +379,35 @@ export function DynamicGalleryView({
 export function DynamicCalendarView({
   library,
   entries,
+  calendarConfig,
   onSelectEntry,
 }: {
   library: LibraryRecord;
   entries: HydratedEntry[];
+  calendarConfig?: Partial<CalendarViewConfig>;
   onSelectEntry: (entryId: string) => void;
 }) {
-  const calCfg = library.views.calendar;
+  const calCfg = { ...library.views.calendar, ...calendarConfig };
   const dateKey =
-    calCfg?.dateFieldKey || library.fields.find((f) => f.type === 'date')?.key || '';
-  const metricKey = calCfg?.metricFieldKey || library.views.card.footerMetricKeys[0];
+    calCfg.dateFieldKey || library.fields.find((f) => f.type === 'date')?.key || '';
+  const metricKey = calCfg.metricFieldKey || library.views.card.footerMetricKeys[0];
   const fieldMap = useMemo(() => new Map(library.fields.map((f) => [f.key, f])), [library.fields]);
 
   const [monthOffset, setMonthOffset] = useState(0);
   const [monthSlideDir, setMonthSlideDir] = useState<-1 | 0 | 1>(0);
   const [selectedDayStr, setSelectedDayStr] = useState<string | null>(null);
   const todayStr = formatLocalDate();
-  const canJumpToday = monthOffset !== 0 || (selectedDayStr !== null && selectedDayStr !== todayStr);
+  const canJumpToday =
+    monthOffset !== 0 || (selectedDayStr !== null && selectedDayStr !== todayStr);
 
   const monthInfo = useMemo(() => {
     const base = new Date();
     const target = new Date(base.getFullYear(), base.getMonth() + monthOffset, 1);
     const year = target.getFullYear();
-    const month = target.getMonth();
-    const firstWeekday = target.getDay();
-    const daysInMonth = new Date(year, month + 1, 0).getDate();
-    const prefix = `${year}-${String(month + 1).padStart(2, '0')}`;
-    return { year, month: month + 1, firstWeekday, daysInMonth, prefix };
+    const monthIndex0 = target.getMonth();
+    const prefix = `${year}-${String(monthIndex0 + 1).padStart(2, '0')}`;
+    const dayCells = buildMonthCalendarCells(year, monthIndex0);
+    return { year, month: monthIndex0 + 1, prefix, dayCells };
   }, [monthOffset]);
 
   const entriesByDate = useMemo(() => {
@@ -323,12 +423,6 @@ export function DynamicCalendarView({
     }
     return map;
   }, [entries, dateKey]);
-
-  const dayCells: Array<string | null> = [];
-  for (let i = 0; i < monthInfo.firstWeekday; i++) dayCells.push(null);
-  for (let d = 1; d <= monthInfo.daysInMonth; d++) {
-    dayCells.push(`${monthInfo.prefix}-${String(d).padStart(2, '0')}`);
-  }
 
   const displayedEntries = useMemo(() => {
     if (selectedDayStr) {
@@ -353,7 +447,10 @@ export function DynamicCalendarView({
               setMonthOffset((m) => m - 1);
               setSelectedDayStr(null);
             }}
-            style={({ pressed }) => [styles.calNavBtn, pressed && { opacity: 0.65, transform: [{ scale: 0.92 }] }]}
+            style={({ pressed }) => [
+              styles.calNavBtn,
+              pressed && { opacity: 0.65, transform: [{ scale: 0.92 }] },
+            ]}
           >
             <Feather name="chevron-left" size={18} color={Palette.inkPrimary} />
           </Pressable>
@@ -382,7 +479,10 @@ export function DynamicCalendarView({
               setMonthOffset((m) => m + 1);
               setSelectedDayStr(null);
             }}
-            style={({ pressed }) => [styles.calNavBtn, pressed && { opacity: 0.65, transform: [{ scale: 0.92 }] }]}
+            style={({ pressed }) => [
+              styles.calNavBtn,
+              pressed && { opacity: 0.65, transform: [{ scale: 0.92 }] },
+            ]}
           >
             <Feather name="chevron-right" size={18} color={Palette.inkPrimary} />
           </Pressable>
@@ -401,7 +501,7 @@ export function DynamicCalendarView({
           slideDirection={monthSlideDir}
           style={styles.daysGrid}
         >
-          {dayCells.map((dateStr, idx) => {
+          {monthInfo.dayCells.map((dateStr, idx) => {
             if (!dateStr) {
               return <View key={`pad-${idx}`} style={styles.dayCell} />;
             }
@@ -451,7 +551,9 @@ export function DynamicCalendarView({
         style={styles.calWrap}
       >
         <Text style={styles.calSubheading}>
-          {selectedDayStr ? `${selectedDayStr} 当日记录 (${displayedEntries.length})` : `本月记录 (${displayedEntries.length})`}
+          {selectedDayStr
+            ? `${selectedDayStr} 当日记录 (${displayedEntries.length})`
+            : `本月记录 (${displayedEntries.length})`}
         </Text>
 
         {displayedEntries.map((e) => (
@@ -461,20 +563,20 @@ export function DynamicCalendarView({
             style={({ pressed }) => [styles.calEntryRow, pressed && styles.cardPressed]}
           >
             <View style={styles.calEntryLeft}>
-            <Text style={styles.calEntryTitle} numberOfLines={1}>
-              {e.titleSummary}
-            </Text>
-            <Text style={styles.calEntryDate}>
-              {dateKey ? String(e.computedData[dateKey] ?? '—') : ''}
-            </Text>
-          </View>
-          {metricKey ? (
-            <Text style={styles.calEntryMetric}>
-              {formatFieldDisplay(fieldMap.get(metricKey), e.computedData[metricKey])}
-            </Text>
-          ) : null}
-        </Pressable>
-      ))}
+              <Text style={styles.calEntryTitle} numberOfLines={1}>
+                {e.titleSummary}
+              </Text>
+              <Text style={styles.calEntryDate}>
+                {dateKey ? String(e.computedData[dateKey] ?? '—') : ''}
+              </Text>
+            </View>
+            {metricKey ? (
+              <Text style={styles.calEntryMetric}>
+                {formatFieldDisplay(fieldMap.get(metricKey), e.computedData[metricKey])}
+              </Text>
+            ) : null}
+          </Pressable>
+        ))}
       </ContentTransitionView>
     </View>
   );
@@ -491,6 +593,11 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Palette.borderHairline,
   },
+  cardEmbedded: {
+    backgroundColor: Palette.bgCanvas,
+    borderRadius: 14,
+    padding: 13,
+  },
   cardPressed: {
     opacity: 0.86,
   },
@@ -502,6 +609,12 @@ const styles = StyleSheet.create({
     width: 60,
     height: 76,
     borderRadius: 10,
+    backgroundColor: Palette.bgSubtle,
+  },
+  cardThumbCompact: {
+    width: 52,
+    height: 66,
+    borderRadius: 9,
     backgroundColor: Palette.bgSubtle,
   },
   cardBody: {
@@ -520,6 +633,10 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: Palette.inkPrimary,
   },
+  cardTitleEmbedded: {
+    fontSize: 14,
+    lineHeight: 20,
+  },
   badgesGroup: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -537,6 +654,9 @@ const styles = StyleSheet.create({
   cardSubtitle: {
     fontSize: 13,
     color: Palette.inkSecondary,
+  },
+  cardSubtitleEmbedded: {
+    fontSize: 12,
   },
   relationsStrip: {
     flexDirection: 'row',
@@ -594,6 +714,24 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: Palette.inkPrimary,
   },
+  embeddedMetricsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  embeddedMetricChip: {
+    backgroundColor: Palette.bgSurface,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 7,
+  },
+  embeddedMetricText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: Palette.inkSecondary,
+  },
   emptyBox: {
     backgroundColor: Palette.bgSurface,
     borderRadius: 16,
@@ -602,11 +740,6 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: Palette.borderHairline,
     gap: 6,
-  },
-  emptyTitle: {
-    fontSize: 15,
-    fontWeight: '700',
-    color: Palette.inkPrimary,
   },
   emptyDesc: {
     fontSize: 13,

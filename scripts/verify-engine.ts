@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { buildDatabaseCatalogPrompt } from '../src/ai/prompts';
+import {
+  getAnalystJsonSchema,
+  getArchitectJsonSchema,
+  getOmniCaptureJsonSchema,
+  type ArchitectPlan,
+} from '../src/ai/schemas';
 import { LATEST_SCHEMA_VERSION, MAX_AI_SNAPSHOTS } from '../src/db/migrations';
 import { OmniRepository } from '../src/db/repository';
 import {
@@ -9,12 +16,6 @@ import {
   type SyncSqlDriver,
 } from '../src/db/types';
 import { formatLocalDate, formatLocalDateOffset } from '../src/engine/date';
-import {
-  getAnalystJsonSchema,
-  getArchitectJsonSchema,
-  getOmniCaptureJsonSchema,
-  type ArchitectPlan,
-} from '../src/schema/view-dsl';
 
 function createNodeSqliteDriver(): SyncSqlDriver {
   const db = new DatabaseSync(':memory:');
@@ -392,7 +393,7 @@ function runTests() {
   assert.equal(readingLogsLib!.showOnHome, false);
   assert.equal(repo.listChildLibraries('books').length, 1);
 
-  const catalogPrompt = repo.getAiCatalogPrompt(true);
+  const catalogPrompt = buildDatabaseCatalogPrompt(repo.getLibraryCatalogItems(true));
   assert.ok(
     catalogPrompt.includes('附属子库 -> 归属主库 `books`'),
     'AI catalog must expose parent-child sub-library relationship'
@@ -598,6 +599,58 @@ function runTests() {
   );
 
   console.log('   ✓ v4 library_views CRUD, AI view design/undo, library_relations table & v2 backup verified');
+
+  console.log('13. Testing single-tx upsertLibrary+views, getEntryTitleMap, listLatestEntryByLibrary & image ref tracking...');
+  let notifyCount = 0;
+  const unsubNotify = repo.subscribe(() => {
+    notifyCount += 1;
+  });
+  const booksCurrent = repo.getLibraryBySlug('books')!;
+  repo.upsertLibrary(
+    {
+      slug: booksCurrent.slug,
+      name: booksCurrent.name,
+      description: booksCurrent.description,
+      icon: booksCurrent.icon,
+      color: booksCurrent.color,
+      fields: booksCurrent.fields,
+      views: booksCurrent.views,
+    },
+    [
+      { name: '书单列表', viewType: 'card', config: booksCurrent.views.card as unknown as Record<string, unknown> },
+      { name: '封面墙', viewType: 'gallery', config: (booksCurrent.views.gallery ?? { titleFieldKey: 'book_title' }) as unknown as Record<string, unknown> },
+    ]
+  );
+  unsubNotify();
+  assert.equal(notifyCount, 1, 'Single-tx upsertLibrary with viewInputs must trigger notify exactly once');
+  assert.deepEqual(
+    repo.listLibraryViews('books').map((v) => `${v.name}:${v.viewType}`),
+    ['书单列表:card', '封面墙:gallery']
+  );
+
+  const titleMap = repo.getEntryTitleMap([sony.id, lizhi!.id, 'nonexistent_id']);
+  assert.equal(titleMap.size, 2);
+  assert.equal(titleMap.get(lizhi!.id), '长安的荔枝');
+
+  const latestMap = repo.listLatestEntryByLibrary();
+  assert.ok(latestMap.size >= 6, 'Window-function listLatestEntryByLibrary should return latest per populated library');
+  assert.ok(latestMap.get(booksCurrent.id)?.title, 'Latest book entry title must be present');
+
+  const imgEntryId = repo.createEntry('media_vault', {
+    work_title: '图片引用追踪测试',
+    media_type: '电影',
+    cover_image: 'images/img_01TESTREFACTIVE.jpg',
+  });
+  assert.ok(
+    repo.collectReferencedImagePaths().has('images/img_01TESTREFACTIVE.jpg'),
+    'Active entry image path must be detected as referenced'
+  );
+  repo.deleteEntry(imgEntryId);
+  assert.ok(
+    repo.collectReferencedImagePaths().has('images/img_01TESTREFACTIVE.jpg'),
+    'Image path inside undoable snapshot must remain protected from orphan GC'
+  );
+  console.log('   ✓ Single-tx upsertLibrary, getEntryTitleMap, window query & image ref tracking verified');
 
   console.log('\nALL CORE ENGINE TESTS PASSED!');
 }

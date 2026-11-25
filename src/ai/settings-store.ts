@@ -1,9 +1,7 @@
-import * as SecureStore from 'expo-secure-store';
-import { Platform } from 'react-native';
+import { getLocalKvItem, setLocalKvItem } from '@/engine/kv-store';
 
 const KEY_API_TOKEN = 'deepseek_api_key_v1';
 const KEY_PREFS = 'deepseek_prefs_v1';
-const KEY_LAST_BACKUP_AT = 'folio_last_backup_at_v1';
 
 export type ReasoningEffort = 'low' | 'high' | 'max';
 
@@ -21,44 +19,18 @@ const DEFAULT_PREFS: AiPreferences = {
   enableWebEnrich: true,
 };
 
-async function getRawItem(key: string): Promise<string | null> {
-  if (Platform.OS === 'web') {
-    try {
-      return typeof window !== 'undefined' ? window.localStorage.getItem(key) : null;
-    } catch {
-      return null;
-    }
-  }
-  return SecureStore.getItemAsync(key);
-}
-
-async function setRawItem(key: string, value: string): Promise<void> {
-  if (Platform.OS === 'web') {
-    if (typeof window !== 'undefined') {
-      if (value) window.localStorage.setItem(key, value);
-      else window.localStorage.removeItem(key);
-    }
-    return;
-  }
-  if (value) {
-    await SecureStore.setItemAsync(key, value);
-  } else {
-    await SecureStore.deleteItemAsync(key);
-  }
-}
-
 export async function getDeepSeekApiKey(): Promise<string> {
-  const val = await getRawItem(KEY_API_TOKEN);
+  const val = await getLocalKvItem(KEY_API_TOKEN);
   return val?.trim() ?? '';
 }
 
 export async function saveDeepSeekApiKey(apiKey: string): Promise<void> {
-  await setRawItem(KEY_API_TOKEN, apiKey.trim());
+  await setLocalKvItem(KEY_API_TOKEN, apiKey.trim());
 }
 
 export async function getAiPreferences(): Promise<AiPreferences> {
   try {
-    const raw = await getRawItem(KEY_PREFS);
+    const raw = await getLocalKvItem(KEY_PREFS);
     if (!raw) return DEFAULT_PREFS;
     return { ...DEFAULT_PREFS, ...JSON.parse(raw) };
   } catch {
@@ -68,21 +40,6 @@ export async function getAiPreferences(): Promise<AiPreferences> {
 
 export async function saveAiPreferences(prefs: Partial<AiPreferences>): Promise<AiPreferences> {
   const merged = { ...(await getAiPreferences()), ...prefs };
-  await setRawItem(KEY_PREFS, JSON.stringify(merged));
+  await setLocalKvItem(KEY_PREFS, JSON.stringify(merged));
   return merged;
-}
-
-export async function getLastBackupAt(): Promise<number | null> {
-  try {
-    const raw = await getRawItem(KEY_LAST_BACKUP_AT);
-    if (!raw) return null;
-    const n = Number(raw);
-    return Number.isFinite(n) && n > 0 ? n : null;
-  } catch {
-    return null;
-  }
-}
-
-export async function saveLastBackupAt(timestamp = Date.now()): Promise<void> {
-  await setRawItem(KEY_LAST_BACKUP_AT, String(timestamp));
 }

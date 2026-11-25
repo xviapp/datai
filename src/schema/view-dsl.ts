@@ -31,7 +31,6 @@ export const CardViewConfigSchema = z.object({
   coverImageFieldKey: z.string().optional(),
   rightBadgeFieldKey: z.string().optional(),
   footerMetricKeys: z.array(z.string()).max(4).default([]),
-  groupByFieldKey: z.string().optional(),
   sortFieldKey: z.string().optional(),
   sortDir: z.enum(['asc', 'desc']).default('desc'),
   highlightRules: z.array(HighlightRuleSchema).default([]),
@@ -84,6 +83,17 @@ export type DashboardWidget = z.infer<typeof DashboardWidgetSchema>;
 export const LibraryViewTypeEnum = z.enum(['card', 'gallery', 'calendar', 'stats']);
 export type LibraryViewType = z.infer<typeof LibraryViewTypeEnum>;
 
+export const DEFAULT_VIEW_LABELS: Record<LibraryViewType, string> = {
+  card: '列表',
+  gallery: '画廊',
+  calendar: '日历',
+  stats: '统计',
+};
+
+export function getDefaultViewLabel(viewType: LibraryViewType): string {
+  return DEFAULT_VIEW_LABELS[viewType] ?? '列表';
+}
+
 export const LibraryViewBlueprintSchema = z.object({
   name: z.string().min(1).describe('视图显示名称，如 列表 / 封面墙 / 消费日历 / 数据统计'),
   viewType: LibraryViewTypeEnum.describe(
@@ -113,7 +123,9 @@ export const LibraryBlueprintSchema = z.object({
     .string()
     .regex(/^[a-z][a-z0-9_]*$/)
     .optional()
-    .describe('可选：若为附属子记录本（如阅读记录归属书籍），填主记录本的英文 slug；独立主记录本省略此字段'),
+    .describe(
+      '可选：若为附属子记录本（如阅读记录归属书籍），填主记录本的英文 slug；独立主记录本省略此字段'
+    ),
   showOnHome: z
     .boolean()
     .optional()
@@ -130,56 +142,3 @@ export const LibraryBlueprintSchema = z.object({
 });
 
 export type LibraryBlueprint = z.infer<typeof LibraryBlueprintSchema>;
-
-/**
- * AI 建筑师（Architect Agent）一次性创建或增量演进多表 + 看板的结构化协议
- */
-export const ArchitectPlanSchema = z.object({
-  summary: z.string().describe('向用户简要说明本次新建或修改了哪些表、字段、关联与视图'),
-  libraries: z.array(LibraryBlueprintSchema),
-  dashboardWidgets: z.array(DashboardWidgetSchema).default([]),
-});
-
-export type ArchitectPlan = z.infer<typeof ArchitectPlanSchema>;
-
-/**
- * AI 全局万能快记（Omni-Capture Agent）跨库草稿输出协议
- */
-export const DraftEntryItemSchema = z.object({
-  librarySlug: z.string(),
-  reason: z.string().describe('为什么归入该库或关联该记录的简短说明'),
-  data: z.record(z.string(), z.unknown()).describe('按该库 field.key 填充的键值对象；relation 字段填匹配到的已有记录 ID 数组或 "@prev:0" 引用同批次第一条草稿'),
-});
-
-export const OmniCaptureResultSchema = z.object({
-  assistantNote: z.string().describe('给用户的友好解析反馈'),
-  drafts: z.array(DraftEntryItemSchema).min(1),
-});
-
-export type DraftEntryItem = z.infer<typeof DraftEntryItemSchema>;
-export type OmniCaptureResult = z.infer<typeof OmniCaptureResultSchema>;
-
-/**
- * AI 数据分析师（Analyst Agent）输出协议
- */
-export const AnalystAnswerSchema = z.object({
-  markdownInsight: z.string().describe('基于真实 SQL 执行结果的精炼分析结论（支持简洁文字与重点数字）'),
-  suggestedWidget: DashboardWidgetSchema.optional().describe('如果问题适合可视化，附带一个可直接钉到看板的图表组件配置'),
-});
-
-export type AnalystAnswer = z.infer<typeof AnalystAnswerSchema>;
-
-/**
- * 使用 Zod v4 原生 z.toJSONSchema 导出供 DeepSeek V4.1 使用的 JSON Schema
- */
-export function getArchitectJsonSchema() {
-  return z.toJSONSchema(ArchitectPlanSchema);
-}
-
-export function getOmniCaptureJsonSchema() {
-  return z.toJSONSchema(OmniCaptureResultSchema);
-}
-
-export function getAnalystJsonSchema() {
-  return z.toJSONSchema(AnalystAnswerSchema);
-}

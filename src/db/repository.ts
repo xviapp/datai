@@ -1,277 +1,85 @@
-import { evaluateFormula, evaluateHighlightRules, type EvaluatedHighlight } from '@/engine/formula';
-import { createId } from '@/engine/id';
-import { buildEntryPayloadValidator, type FieldDef, type FieldType } from '@/schema/field-defs';
+import type { ArchitectPlan, DraftEntryItem } from '@/ai/schemas';
 import {
-  type AccentTone,
-  type ArchitectPlan,
-  type CalendarViewConfig,
-  type CardViewConfig,
+  getDefaultViewLabel,
   type DashboardWidget,
-  type DraftEntryItem,
-  type GalleryViewConfig,
   type LibraryBlueprint,
-  type LibraryLayoutBundle,
   type LibraryViewType,
 } from '@/schema/view-dsl';
-import { MAX_AI_SNAPSHOTS, runCoreMigrations } from './migrations';
+import { runCoreMigrations } from './migrations';
+import type {
+  AiSnapshotItem,
+  ArchitectLibraryDiff,
+  BacklinkGroupSection,
+  ChildLibrarySection,
+  EntrySearchHit,
+  FullBackupBundle,
+  HydratedEntry,
+  LibraryCatalogItem,
+  LibraryRecord,
+  LibraryRelationRecord,
+  LibraryViewInput,
+  LibraryViewRecord,
+  SavedDashboardWidget,
+  SnapshotUndoImpact,
+} from './models';
 import { buildDefaultSeedBundle } from './seed-templates';
-import {
-  escapeLikePattern,
-  sqlReferencesLibraryView,
-  type SyncSqlDriver,
-} from './types';
-import {
-  buildDatabaseCatalogPrompt,
-  compileLibrarySqlView,
-  dropLibrarySqlView,
-  type LibraryCatalogItem,
-} from './view-compiler';
+import { exportBackupBundleFromDriver, importBackupBundleInternal } from './stores/backup';
+import { EntriesStore } from './stores/entries-store';
+import { LibrariesStore } from './stores/libraries-store';
+import { SnapshotsStore } from './stores/snapshots-store';
+import { WidgetsStore } from './stores/widgets-store';
+import { sqlReferencesLibraryView, type SyncSqlDriver } from './types';
+import { dropLibrarySqlView } from './view-compiler';
 
-export interface LibraryViewRecord {
-  id: string;
-  libraryId: string;
-  name: string;
-  viewType: LibraryViewType;
-  config: Record<string, unknown>;
-  sortOrder: number;
-  isDefault: boolean;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface LibraryViewInput {
-  id?: string;
-  name: string;
-  viewType: LibraryViewType;
-  config?: Record<string, unknown>;
-}
-
-export interface LibraryRelationRecord {
-  id: string;
-  sourceLibraryId: string;
-  sourceLibrarySlug: string;
-  sourceLibraryName: string;
-  sourceLibraryIcon: string;
-  targetLibraryId: string;
-  targetLibrarySlug: string;
-  targetLibraryName: string;
-  targetLibraryIcon: string;
-  fieldKey: string;
-  relationKind: 'parent_child' | 'reference';
-  allowMultiple: boolean;
-  createdAt: number;
-}
-
-export interface LibraryRecord {
-  id: string;
-  slug: string;
-  name: string;
-  description: string;
-  icon: string;
-  color: AccentTone;
-  parentLibrarySlug: string | null;
-  showOnHome: boolean;
-  fields: FieldDef[];
-  /** 由独立 library_views 表驱动的按需视图列表（有序） */
-  viewList: LibraryViewRecord[];
-  /** 兼容视图配置汇总（由 library_views 聚合生成） */
-  views: LibraryLayoutBundle;
-  entryCount: number;
-  updatedAt: number;
-}
-
-export interface ChildLibrarySection {
-  childLibrary: LibraryRecord;
-  relationFieldKey: string;
-  entries: HydratedEntry[];
-}
-
-export interface BacklinkGroupSection {
-  sourceLibrary: LibraryRecord;
-  relationFieldKey: string;
-  relationFieldLabel: string;
-  entries: HydratedEntry[];
-}
-
-export interface LinkedEntryRef {
-  id: string;
-  title: string;
-  libraryId: string;
-  librarySlug: string;
-  libraryName: string;
-  libraryIcon: string;
-  fieldKey: string;
-}
-
-export interface HydratedEntry {
-  id: string;
-  libraryId: string;
-  librarySlug: string;
-  titleSummary: string;
-  rawData: Record<string, unknown>;
-  /** 合并了 Rollup 聚合值与 Formula 计算值之后的完整字段字典 */
-  computedData: Record<string, unknown>;
-  /** 正向关联解析出的记录标签映射：fieldKey -> LinkedEntryRef[] */
-  forwardLinks: Record<string, LinkedEntryRef[]>;
-  /** 反向引用该记录的所有其它库条目（双向反链 Backlinks） */
-  backlinks: LinkedEntryRef[];
-  highlight: EvaluatedHighlight | null;
-  createdAt: number;
-  updatedAt: number;
-}
-
-export interface EntrySearchHit {
-  id: string;
-  title: string;
-  libraryId: string;
-  librarySlug: string;
-  libraryName: string;
-  libraryIcon: string;
-  updatedAt: number;
-}
-
-export interface AiSnapshotItem {
-  id: string;
-  actionSummary: string;
-  undone: boolean;
-  createdAt: number;
-}
-
-export interface SnapshotUndoImpact {
-  summary: string;
-  isFullRestore: boolean;
-  affectedEntriesCount: number;
-  warningText: string;
-}
-
-export interface SavedDashboardWidget extends DashboardWidget {
-  librarySlug: string | null;
-  pinnedOverview: boolean;
-  sortOrder: number;
-}
-
-export interface FullBackupBundle {
-  version: 1 | 2;
-  exportedAt: string;
-  libraries: Array<Record<string, unknown>>;
-  libraryViews?: Array<Record<string, unknown>>;
-  libraryRelations?: Array<Record<string, unknown>>;
-  entries: Array<Record<string, unknown>>;
-  relations: Array<Record<string, unknown>>;
-  widgets: Array<Record<string, unknown>>;
-}
-
-export interface ArchitectFieldTypeChange {
-  key: string;
-  label: string;
-  fromType: FieldType;
-  toType: FieldType;
-}
-
-export interface ArchitectLibraryDiff {
-  slug: string;
-  name: string;
-  entryCount: number;
-  removedFields: Array<{ key: string; label: string; type: FieldType }>;
-  typeChangedFields: ArchitectFieldTypeChange[];
-  newlyRequiredFields: Array<{ key: string; label: string }>;
-  hasDestructiveChanges: boolean;
-}
-
-type SnapshotPayload =
-  | {
-      kind: 'entries_created';
-      entryIds: string[];
-    }
-  | {
-      kind: 'entry_deleted';
-      entry: Record<string, unknown>;
-      relations: Array<Record<string, unknown>>;
-      detachedSources?: Array<{ id: string; prevDataJson: string }>;
-    }
-  | {
-      kind: 'library_deleted';
-      library: Record<string, unknown>;
-      libraryViews?: Array<Record<string, unknown>>;
-      entries: Array<Record<string, unknown>>;
-      relations: Array<Record<string, unknown>>;
-      widgets: Array<Record<string, unknown>>;
-      detachedChildLibraries?: Array<{
-        id: string;
-        parent_slug: string | null;
-        show_on_home: number;
-      }>;
-    }
-  | {
-      kind: 'architect_plan';
-      createdLibrarySlugs: string[];
-      previousLibraries: Array<Record<string, unknown>>;
-      previousLibraryViews?: Array<Record<string, unknown>>;
-      createdWidgetIds: string[];
-    }
-  | FullBackupBundle;
-
-interface RawEntryRow {
-  id: string;
-  library_id: string;
-  title_summary: string;
-  data_json: string;
-  created_at: number;
-  updated_at: number;
-}
-
-interface ForwardRelRow {
-  source_entry_id: string;
-  field_key: string;
-  target_id: string;
-  target_title: string;
-  target_lib_id: string;
-  target_data_json: string;
-}
-
-interface BackRelRow {
-  target_entry_id: string;
-  field_key: string;
-  source_id: string;
-  source_title: string;
-  source_lib_id: string;
-  source_data_json: string;
-}
-
-const SEARCHABLE_FIELD_TYPES = new Set<FieldType>([
-  'text',
-  'select',
-  'multi_select',
-  'date',
-  'number',
-  'currency',
-]);
-
-const RELATION_QUERY_CHUNK_SIZE = 400;
-
-function isCompatibleFieldTypeChange(fromType: FieldType, toType: FieldType): boolean {
-  if (fromType === toType) return true;
-  const numericTypes = new Set<FieldType>(['number', 'currency', 'rating']);
-  if (numericTypes.has(fromType) && numericTypes.has(toType)) return true;
-  const stringTypes = new Set<FieldType>(['text', 'select', 'date']);
-  if (stringTypes.has(fromType) && stringTypes.has(toType)) return true;
-  return false;
-}
+// 保持类型再导出以兼容现有引用
+export type {
+  AiSnapshotItem,
+  ArchitectFieldTypeChange,
+  ArchitectLibraryDiff,
+  BacklinkGroupSection,
+  ChildLibrarySection,
+  EntrySearchHit,
+  FullBackupBundle,
+  HydratedEntry,
+  LibraryCatalogItem,
+  LibraryRecord,
+  LibraryRelationRecord,
+  LibraryViewInput,
+  LibraryViewRecord,
+  LinkedEntryRef,
+  SavedDashboardWidget,
+  SnapshotUndoImpact,
+} from './models';
 
 type ChangeListener = () => void;
 
+/**
+ * 本地单机数据库仓储门面（Facade）：
+ * 统一协调事务边界、变更订阅通知与底层领域 Store（库/视图、条目/水合、统计图表、快照撤销与离线备份）。
+ */
 export class OmniRepository {
   private driver: SyncSqlDriver;
   private listeners = new Set<ChangeListener>();
-  private librariesCache: LibraryRecord[] | null = null;
-  private librariesByIdCache: Map<string, LibraryRecord> | null = null;
-  private librariesBySlugCache: Map<string, LibraryRecord> | null = null;
+  private librariesStore: LibrariesStore;
+  private entriesStore: EntriesStore;
+  private widgetsStore: WidgetsStore;
+  private snapshotsStore: SnapshotsStore;
 
   constructor(driver: SyncSqlDriver) {
     this.driver = driver;
+    this.librariesStore = new LibrariesStore(driver);
+    this.entriesStore = new EntriesStore(driver, this.librariesStore);
+    this.widgetsStore = new WidgetsStore(driver, this.librariesStore);
+    this.snapshotsStore = new SnapshotsStore(
+      driver,
+      this.librariesStore,
+      this.entriesStore,
+      this.widgetsStore
+    );
+
     runCoreMigrations(this.driver);
     this.driver.withTransactionSync(() => {
-      this.ensureViewsCompiled();
+      this.librariesStore.ensureViewsCompiled();
     });
   }
 
@@ -282,190 +90,17 @@ export class OmniRepository {
     };
   }
 
-  private invalidateLibrariesCache(): void {
-    this.librariesCache = null;
-    this.librariesByIdCache = null;
-    this.librariesBySlugCache = null;
-  }
-
   private notify(): void {
-    this.invalidateLibrariesCache();
+    this.librariesStore.invalidateCache();
     for (const fn of this.listeners) {
       fn();
     }
   }
 
-  private ensureLibrariesCache(): {
-    list: LibraryRecord[];
-    byId: Map<string, LibraryRecord>;
-    bySlug: Map<string, LibraryRecord>;
-  } {
-    if (this.librariesCache && this.librariesByIdCache && this.librariesBySlugCache) {
-      return {
-        list: this.librariesCache,
-        byId: this.librariesByIdCache,
-        bySlug: this.librariesBySlugCache,
-      };
-    }
-
-    const rows = this.driver.getAllSync<{
-      id: string;
-      slug: string;
-      name: string;
-      description: string;
-      icon: string;
-      color: AccentTone;
-      parent_slug: string | null;
-      show_on_home: number;
-      fields_json: string;
-      views_json: string;
-      updated_at: number;
-      entry_count: number;
-    }>(`
-      SELECT
-        l.*,
-        (SELECT COUNT(*) FROM entries e WHERE e.library_id = l.id) AS entry_count
-      FROM libraries l
-      ORDER BY l.sort_order ASC, l.created_at ASC
-    `);
-
-    const viewRows = this.driver.getAllSync<{
-      id: string;
-      library_id: string;
-      name: string;
-      view_type: LibraryViewType;
-      config_json: string;
-      sort_order: number;
-      is_default: number;
-      created_at: number;
-      updated_at: number;
-    }>(`
-      SELECT id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at
-      FROM library_views
-      ORDER BY sort_order ASC, created_at ASC
-    `);
-
-    const viewsByLibId = new Map<string, LibraryViewRecord[]>();
-    for (const vr of viewRows) {
-      let cfg: Record<string, unknown> = {};
-      try {
-        cfg = JSON.parse(vr.config_json) as Record<string, unknown>;
-      } catch {
-        cfg = {};
-      }
-      const listForLib = viewsByLibId.get(vr.library_id) ?? [];
-      listForLib.push({
-        id: vr.id,
-        libraryId: vr.library_id,
-        name: vr.name,
-        viewType: vr.view_type,
-        config: cfg,
-        sortOrder: vr.sort_order,
-        isDefault: vr.is_default !== 0,
-        createdAt: vr.created_at,
-        updatedAt: vr.updated_at,
-      });
-      viewsByLibId.set(vr.library_id, listForLib);
-    }
-
-    const list: LibraryRecord[] = rows.map((r) => {
-      const fields = JSON.parse(r.fields_json) as FieldDef[];
-      const legacyBundle = JSON.parse(r.views_json) as LibraryLayoutBundle;
-      const rawViewList = viewsByLibId.get(r.id) ?? [];
-      const viewList: LibraryViewRecord[] =
-        rawViewList.length > 0
-          ? rawViewList
-          : [
-              {
-                id: `vw_${r.id}_card`,
-                libraryId: r.id,
-                name: '列表',
-                viewType: 'card',
-                config: (legacyBundle.card ?? {}) as unknown as Record<string, unknown>,
-                sortOrder: 0,
-                isDefault: true,
-                createdAt: r.updated_at,
-                updatedAt: r.updated_at,
-              },
-            ];
-
-      const cardRow = viewList.find((v) => v.viewType === 'card');
-      const galleryRow = viewList.find((v) => v.viewType === 'gallery');
-      const calendarRow = viewList.find((v) => v.viewType === 'calendar');
-
-      const mergedViews: LibraryLayoutBundle = {
-        card: {
-          ...legacyBundle.card,
-          ...(cardRow?.config as Partial<CardViewConfig> | undefined),
-        },
-        gallery: galleryRow
-          ? ({
-              ...(legacyBundle.gallery ?? {
-                titleFieldKey: legacyBundle.card.titleFieldKey || fields[0]?.key || '',
-              }),
-              ...(galleryRow.config as Partial<GalleryViewConfig>),
-            } as GalleryViewConfig)
-          : undefined,
-        calendar: calendarRow
-          ? ({
-              ...(legacyBundle.calendar ?? {
-                dateFieldKey: fields.find((f) => f.type === 'date')?.key || '',
-                titleFieldKey: legacyBundle.card.titleFieldKey || fields[0]?.key || '',
-              }),
-              ...(calendarRow.config as Partial<CalendarViewConfig>),
-            } as CalendarViewConfig)
-          : undefined,
-      };
-
-      return {
-        id: r.id,
-        slug: r.slug,
-        name: r.name,
-        description: r.description,
-        icon: r.icon,
-        color: r.color,
-        parentLibrarySlug: r.parent_slug || null,
-        showOnHome: r.show_on_home !== 0,
-        fields,
-        viewList,
-        views: mergedViews,
-        entryCount: Number(r.entry_count ?? 0),
-        updatedAt: r.updated_at,
-      };
-    });
-
-    const byId = new Map<string, LibraryRecord>();
-    const bySlug = new Map<string, LibraryRecord>();
-    for (const lib of list) {
-      byId.set(lib.id, lib);
-      bySlug.set(lib.slug, lib);
-    }
-
-    this.librariesCache = list;
-    this.librariesByIdCache = byId;
-    this.librariesBySlugCache = bySlug;
-
-    return { list, byId, bySlug };
-  }
-
-  private ensureViewsCompiled(): void {
-    const rows = this.driver.getAllSync<{
-      id: string;
-      slug: string;
-      fields_json: string;
-    }>('SELECT id, slug, fields_json FROM libraries');
-    for (const r of rows) {
-      try {
-        const fields = JSON.parse(r.fields_json) as FieldDef[];
-        compileLibrarySqlView(this.driver, r.id, r.slug, fields);
-      } catch {
-        // ignore corrupted custom view
-      }
-    }
-  }
-
   seedIfEmpty(): void {
-    const existing = this.driver.getFirstSync<{ cnt: number }>('SELECT COUNT(*) AS cnt FROM libraries');
+    const existing = this.driver.getFirstSync<{ cnt: number }>(
+      'SELECT COUNT(*) AS cnt FROM libraries'
+    );
     if (existing && existing.cnt > 0) {
       return;
     }
@@ -475,8 +110,12 @@ export class OmniRepository {
       const refToEntryId = new Map<string, string>();
 
       for (let idx = 0; idx < seed.libraries.length; idx++) {
-        this.upsertLibraryInternal(seed.libraries[idx], idx);
+        this.librariesStore.upsertLibraryInternal(seed.libraries[idx], {
+          sortOrder: idx,
+          skipRelationSync: true,
+        });
       }
+      this.librariesStore.syncAllLibraryRelations();
 
       // 先插入被引用库，再插入引用库，按顺序解析 @ref:xxx
       for (const lib of seed.libraries) {
@@ -488,13 +127,13 @@ export class OmniRepository {
               resolvedData[k] = v
                 .map((token) =>
                   typeof token === 'string' && token.startsWith('@ref:')
-                    ? refToEntryId.get(token.slice(5)) ?? ''
+                    ? (refToEntryId.get(token.slice(5)) ?? '')
                     : String(token)
                 )
                 .filter(Boolean);
             }
           }
-          const createdId = this.createEntryInternal(
+          const createdId = this.entriesStore.createEntryInternal(
             lib.slug,
             resolvedData,
             Date.now() - (items.length - idx) * 60_000
@@ -506,468 +145,49 @@ export class OmniRepository {
       }
 
       seed.widgets.forEach((w, idx) => {
-        this.saveDashboardWidgetInternal(w, null, idx);
+        this.widgetsStore.saveDashboardWidgetInternal(w, null, idx);
       });
     });
 
     this.notify();
   }
 
+  // ==================== 库、视图与表间关系 ====================
+
   listLibraries(): LibraryRecord[] {
-    return this.ensureLibrariesCache().list;
+    return this.librariesStore.listLibraries();
+  }
+
+  getLibraryBySlug(slug: string): LibraryRecord | null {
+    return this.librariesStore.getLibraryBySlug(slug);
   }
 
   listLibraryViews(librarySlug: string): LibraryViewRecord[] {
-    return this.ensureLibrariesCache().bySlug.get(librarySlug)?.viewList ?? [];
+    return this.librariesStore.listLibraryViews(librarySlug);
   }
 
   listLibraryRelations(librarySlug?: string): LibraryRelationRecord[] {
-    const { byId, bySlug } = this.ensureLibrariesCache();
-    const targetLib = librarySlug ? bySlug.get(librarySlug) : undefined;
-    if (librarySlug && !targetLib) return [];
-
-    const rows = targetLib
-      ? this.driver.getAllSync<{
-          id: string;
-          source_library_id: string;
-          target_library_id: string;
-          field_key: string;
-          relation_kind: 'parent_child' | 'reference';
-          allow_multiple: number;
-          created_at: number;
-        }>(
-          `SELECT id, source_library_id, target_library_id, field_key, relation_kind, allow_multiple, created_at
-           FROM library_relations
-           WHERE source_library_id = ? OR target_library_id = ?
-           ORDER BY created_at ASC`,
-          [targetLib.id, targetLib.id]
-        )
-      : this.driver.getAllSync<{
-          id: string;
-          source_library_id: string;
-          target_library_id: string;
-          field_key: string;
-          relation_kind: 'parent_child' | 'reference';
-          allow_multiple: number;
-          created_at: number;
-        }>(
-          `SELECT id, source_library_id, target_library_id, field_key, relation_kind, allow_multiple, created_at
-           FROM library_relations
-           ORDER BY created_at ASC`
-        );
-
-    const result: LibraryRelationRecord[] = [];
-    for (const r of rows) {
-      const src = byId.get(r.source_library_id);
-      const tgt = byId.get(r.target_library_id);
-      if (!src || !tgt) continue;
-      result.push({
-        id: r.id,
-        sourceLibraryId: src.id,
-        sourceLibrarySlug: src.slug,
-        sourceLibraryName: src.name,
-        sourceLibraryIcon: src.icon,
-        targetLibraryId: tgt.id,
-        targetLibrarySlug: tgt.slug,
-        targetLibraryName: tgt.name,
-        targetLibraryIcon: tgt.icon,
-        fieldKey: r.field_key,
-        relationKind: r.relation_kind === 'parent_child' ? 'parent_child' : 'reference',
-        allowMultiple: r.allow_multiple !== 0,
-        createdAt: r.created_at,
-      });
-    }
-    return result;
+    return this.librariesStore.listLibraryRelations(librarySlug);
   }
 
   listChildLibraries(parentSlug: string): LibraryRecord[] {
-    const { list, bySlug, byId } = this.ensureLibrariesCache();
-    const parent = bySlug.get(parentSlug);
-    if (!parent) return [];
-
-    const relRows = this.driver.getAllSync<{ source_library_id: string }>(
-      `SELECT source_library_id FROM library_relations
-       WHERE target_library_id = ? AND relation_kind = 'parent_child'`,
-      [parent.id]
-    );
-    if (relRows.length > 0) {
-      const idSet = new Set(relRows.map((r) => r.source_library_id));
-      const matched = list.filter((l) => idSet.has(l.id) || l.parentLibrarySlug === parentSlug);
-      if (matched.length > 0) return matched;
-      return relRows.map((r) => byId.get(r.source_library_id)).filter(Boolean) as LibraryRecord[];
-    }
-    return list.filter((l) => l.parentLibrarySlug === parentSlug);
-  }
-
-  private syncLibraryViewsFromBlueprintInternal(
-    libId: string,
-    viewsBundle: LibraryLayoutBundle,
-    isNewLibrary: boolean,
-    explicitViewList?: LibraryBlueprint['viewList'],
-    fieldsForDefaults?: FieldDef[]
-  ): void {
-    const now = Date.now();
-    const existingRows = this.driver.getAllSync<{
-      id: string;
-      view_type: LibraryViewType;
-      config_json: string;
-      sort_order: number;
-      created_at: number;
-    }>(
-      'SELECT id, view_type, config_json, sort_order, created_at FROM library_views WHERE library_id = ? ORDER BY sort_order ASC',
-      [libId]
-    );
-
-    const existingByType = new Map<
-      LibraryViewType,
-      { id: string; config_json: string; sort_order: number; created_at: number }
-    >();
-    for (const r of existingRows) {
-      if (!existingByType.has(r.view_type)) {
-        existingByType.set(r.view_type, r);
-      }
-    }
-
-    // 若蓝图显式提供了有序 viewList（如 AI 建筑师按需设计/增删/重排视图），精准按 viewList 重建 library_views
-    if (explicitViewList && explicitViewList.length > 0) {
-      const titleKey = viewsBundle.card?.titleFieldKey || fieldsForDefaults?.[0]?.key || '';
-      const fallbackImgKey =
-        viewsBundle.card?.coverImageFieldKey ||
-        fieldsForDefaults?.find((f) => f.type === 'image')?.key;
-      const fallbackDateKey = fieldsForDefaults?.find((f) => f.type === 'date')?.key || '';
-      const fallbackRatingKey = fieldsForDefaults?.find((f) => f.type === 'rating')?.key;
-
-      const resolvedGallery: GalleryViewConfig = viewsBundle.gallery ?? {
-        titleFieldKey: titleKey,
-        subtitleFieldKey: viewsBundle.card?.subtitleFieldKey,
-        coverImageFieldKey: fallbackImgKey,
-        badgeFieldKey: viewsBundle.card?.rightBadgeFieldKey,
-        ratingFieldKey: fallbackRatingKey,
-      };
-      const resolvedCalendar: CalendarViewConfig = viewsBundle.calendar ?? {
-        dateFieldKey: fallbackDateKey,
-        titleFieldKey: titleKey,
-        metricFieldKey: viewsBundle.card?.footerMetricKeys?.[0],
-        tagFieldKey: viewsBundle.card?.rightBadgeFieldKey,
-      };
-
-      const usedIds = new Set<string>();
-      this.driver.runSync('DELETE FROM library_views WHERE library_id = ?', [libId]);
-
-      explicitViewList.forEach((item, idx) => {
-        const prev = existingByType.get(item.viewType);
-        const reuseId = prev && !usedIds.has(prev.id) ? prev.id : createId('vw');
-        usedIds.add(reuseId);
-
-        const cfg =
-          item.viewType === 'card'
-            ? viewsBundle.card ?? {}
-            : item.viewType === 'gallery'
-              ? resolvedGallery
-              : item.viewType === 'calendar'
-                ? resolvedCalendar
-                : {};
-
-        const fallbackLabel =
-          item.viewType === 'card'
-            ? '列表'
-            : item.viewType === 'gallery'
-              ? '画廊'
-              : item.viewType === 'calendar'
-                ? '日历'
-                : '统计';
-
-        this.driver.runSync(
-          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            reuseId,
-            libId,
-            item.name.trim() || fallbackLabel,
-            item.viewType,
-            JSON.stringify(cfg),
-            idx,
-            idx === 0 ? 1 : 0,
-            prev?.created_at ?? now,
-            now,
-          ]
-        );
-      });
-
-      const hasGallery = explicitViewList.some((v) => v.viewType === 'gallery');
-      const hasCalendar = explicitViewList.some((v) => v.viewType === 'calendar');
-      const syncedBundle: LibraryLayoutBundle = {
-        card: viewsBundle.card,
-        gallery: hasGallery ? resolvedGallery : undefined,
-        calendar: hasCalendar ? resolvedCalendar : undefined,
-      };
-      this.driver.runSync('UPDATE libraries SET views_json = ?, updated_at = ? WHERE id = ?', [
-        JSON.stringify(syncedBundle),
-        now,
-        libId,
-      ]);
-      return;
-    }
-
-    let nextOrder =
-      existingRows.length > 0
-        ? Math.max(...existingRows.map((r) => r.sort_order)) + 1
-        : 0;
-
-    // 1. 主列表视图始终存在，更新其配置
-    const cardRow = existingByType.get('card');
-    if (cardRow) {
-      this.driver.runSync(
-        'UPDATE library_views SET config_json = ?, updated_at = ? WHERE id = ?',
-        [JSON.stringify(viewsBundle.card ?? {}), now, cardRow.id]
-      );
-    } else {
-      this.driver.runSync(
-        `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          createId('vw'),
-          libId,
-          '列表',
-          'card',
-          JSON.stringify(viewsBundle.card ?? {}),
-          isNewLibrary ? 0 : nextOrder++,
-          1,
-          now,
-          now,
-        ]
-      );
-      if (isNewLibrary) nextOrder = 1;
-    }
-
-    // 2. 画廊视图（仅在蓝图配置时创建/更新）
-    if (viewsBundle.gallery) {
-      const galRow = existingByType.get('gallery');
-      if (galRow) {
-        this.driver.runSync(
-          'UPDATE library_views SET config_json = ?, updated_at = ? WHERE id = ?',
-          [JSON.stringify(viewsBundle.gallery), now, galRow.id]
-        );
-      } else {
-        this.driver.runSync(
-          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            createId('vw'),
-            libId,
-            '画廊',
-            'gallery',
-            JSON.stringify(viewsBundle.gallery),
-            nextOrder++,
-            0,
-            now,
-            now,
-          ]
-        );
-      }
-    }
-
-    // 3. 日历视图（仅在蓝图配置时创建/更新）
-    if (viewsBundle.calendar) {
-      const calRow = existingByType.get('calendar');
-      if (calRow) {
-        this.driver.runSync(
-          'UPDATE library_views SET config_json = ?, updated_at = ? WHERE id = ?',
-          [JSON.stringify(viewsBundle.calendar), now, calRow.id]
-        );
-      } else {
-        this.driver.runSync(
-          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            createId('vw'),
-            libId,
-            '日历',
-            'calendar',
-            JSON.stringify(viewsBundle.calendar),
-            nextOrder++,
-            0,
-            now,
-            now,
-          ]
-        );
-      }
-    }
-  }
-
-  private ensureStatsViewForLibraryInternal(libSlug: string): void {
-    const libRow = this.driver.getFirstSync<{ id: string }>(
-      'SELECT id FROM libraries WHERE slug = ?',
-      [libSlug]
-    );
-    if (!libRow) return;
-    const existing = this.driver.getFirstSync<{ id: string }>(
-      "SELECT id FROM library_views WHERE library_id = ? AND view_type = 'stats'",
-      [libRow.id]
-    );
-    if (existing) return;
-
-    const maxRow = this.driver.getFirstSync<{ max_order: number | null }>(
-      'SELECT MAX(sort_order) AS max_order FROM library_views WHERE library_id = ?',
-      [libRow.id]
-    );
-    const now = Date.now();
-    this.driver.runSync(
-      `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        createId('vw'),
-        libRow.id,
-        '统计',
-        'stats',
-        '{}',
-        (maxRow?.max_order ?? -1) + 1,
-        0,
-        now,
-        now,
-      ]
-    );
-  }
-
-  private syncAllLibraryRelationsInternal(): void {
-    const now = Date.now();
-    const libs = this.driver.getAllSync<{
-      id: string;
-      slug: string;
-      parent_slug: string | null;
-      fields_json: string;
-    }>('SELECT id, slug, parent_slug, fields_json FROM libraries');
-
-    const slugToId = new Map<string, string>();
-    for (const l of libs) {
-      slugToId.set(l.slug, l.id);
-    }
-
-    this.driver.execSync('DELETE FROM library_relations;');
-
-    for (const lib of libs) {
-      let fields: FieldDef[] = [];
-      try {
-        fields = JSON.parse(lib.fields_json) as FieldDef[];
-      } catch {
-        fields = [];
-      }
-
-      for (const f of fields) {
-        if (f.type !== 'relation' || !f.relationConfig?.targetLibrarySlug) continue;
-        const targetId = slugToId.get(f.relationConfig.targetLibrarySlug);
-        if (!targetId) continue;
-        const relationKind =
-          lib.parent_slug && f.relationConfig.targetLibrarySlug === lib.parent_slug
-            ? 'parent_child'
-            : 'reference';
-        const allowMultiple = f.relationConfig.allowMultiple === false ? 0 : 1;
-        this.driver.runSync(
-          `INSERT OR IGNORE INTO library_relations (id, source_library_id, target_library_id, field_key, relation_kind, allow_multiple, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          [
-            `lrel_${lib.id}_${f.key}`,
-            lib.id,
-            targetId,
-            f.key,
-            relationKind,
-            allowMultiple,
-            now,
-          ]
-        );
-      }
-    }
-  }
-
-  private buildDefaultConfigForViewType(
-    lib: LibraryRecord,
-    viewType: LibraryViewType
-  ): Record<string, unknown> {
-    const titleKey = lib.views.card.titleFieldKey || lib.fields[0]?.key || '';
-    if (viewType === 'card') {
-      return lib.views.card as unknown as Record<string, unknown>;
-    }
-    if (viewType === 'gallery') {
-      return {
-        titleFieldKey: titleKey,
-        subtitleFieldKey: lib.views.card.subtitleFieldKey,
-        coverImageFieldKey:
-          lib.views.card.coverImageFieldKey || lib.fields.find((f) => f.type === 'image')?.key,
-        badgeFieldKey: lib.views.card.rightBadgeFieldKey,
-        ratingFieldKey: lib.fields.find((f) => f.type === 'rating')?.key,
-      };
-    }
-    if (viewType === 'calendar') {
-      return {
-        dateFieldKey: lib.fields.find((f) => f.type === 'date')?.key || '',
-        titleFieldKey: titleKey,
-        metricFieldKey: lib.views.card.footerMetricKeys[0],
-        tagFieldKey: lib.views.card.rightBadgeFieldKey,
-      };
-    }
-    return {};
+    return this.librariesStore.listChildLibraries(parentSlug);
   }
 
   /**
-   * 原子保存某记录本在独立 library_views 表中的完整按需视图配置（增删、改名、排序）
+   * 原子创建或更新库结构；支持在同一事务内同步写入显式 viewInputs，避免双重事务与双重重绘
    */
+  upsertLibrary(bp: LibraryBlueprint, viewInputs?: LibraryViewInput[]): string {
+    const id = this.driver.withTransactionSync(() =>
+      this.librariesStore.upsertLibraryInternal(bp, { viewInputs })
+    );
+    this.notify();
+    return id;
+  }
+
   saveLibraryViews(librarySlug: string, nextViews: LibraryViewInput[]): void {
-    const lib = this.getLibraryBySlug(librarySlug);
-    if (!lib) throw new Error(`记录本不存在: ${librarySlug}`);
-    if (nextViews.length === 0) {
-      throw new Error('每个记录本至少需要保留 1 个视图');
-    }
-
-    const now = Date.now();
     this.driver.withTransactionSync(() => {
-      const existingById = new Map(lib.viewList.map((v) => [v.id, v]));
-      const existingByType = new Map(lib.viewList.map((v) => [v.viewType, v]));
-
-      this.driver.runSync('DELETE FROM library_views WHERE library_id = ?', [lib.id]);
-
-      const resolvedConfigs = new Map<LibraryViewType, Record<string, unknown>>();
-      nextViews.forEach((v, idx) => {
-        const prev = (v.id ? existingById.get(v.id) : undefined) ?? existingByType.get(v.viewType);
-        const cfg =
-          v.config ??
-          prev?.config ??
-          this.buildDefaultConfigForViewType(lib, v.viewType);
-        if (!resolvedConfigs.has(v.viewType)) {
-          resolvedConfigs.set(v.viewType, cfg);
-        }
-        const id = v.id && existingById.has(v.id) ? v.id : createId('vw');
-        this.driver.runSync(
-          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            id,
-            lib.id,
-            v.name.trim() || (v.viewType === 'card' ? '列表' : v.viewType === 'gallery' ? '画廊' : v.viewType === 'calendar' ? '日历' : '统计'),
-            v.viewType,
-            JSON.stringify(cfg),
-            idx,
-            idx === 0 ? 1 : 0,
-            prev?.createdAt ?? now,
-            now,
-          ]
-        );
-      });
-
-      // 同步回填兼容列 libraries.views_json
-      const syncedBundle: LibraryLayoutBundle = {
-        card: (resolvedConfigs.get('card') as unknown as CardViewConfig) ?? lib.views.card,
-        gallery: resolvedConfigs.has('gallery')
-          ? (resolvedConfigs.get('gallery') as unknown as GalleryViewConfig)
-          : undefined,
-        calendar: resolvedConfigs.has('calendar')
-          ? (resolvedConfigs.get('calendar') as unknown as CalendarViewConfig)
-          : undefined,
-      };
-      this.driver.runSync('UPDATE libraries SET views_json = ?, updated_at = ? WHERE id = ?', [
-        JSON.stringify(syncedBundle),
-        now,
-        lib.id,
-      ]);
+      this.librariesStore.saveLibraryViewsInternal(librarySlug, nextViews);
     });
     this.notify();
   }
@@ -980,14 +200,6 @@ export class OmniRepository {
   ): string {
     const lib = this.getLibraryBySlug(librarySlug);
     if (!lib) throw new Error(`记录本不存在: ${librarySlug}`);
-    const defaultLabel =
-      viewType === 'card'
-        ? '列表'
-        : viewType === 'gallery'
-          ? '画廊'
-          : viewType === 'calendar'
-            ? '日历'
-            : '统计';
     const nextList: LibraryViewInput[] = [
       ...lib.viewList.map((v) => ({
         id: v.id,
@@ -996,9 +208,9 @@ export class OmniRepository {
         config: v.config,
       })),
       {
-        name: name?.trim() || defaultLabel,
+        name: name?.trim() || getDefaultViewLabel(viewType),
         viewType,
-        config: config ?? this.buildDefaultConfigForViewType(lib, viewType),
+        config: config ?? this.librariesStore.buildDefaultConfigForViewType(lib, viewType),
       },
     ];
     this.saveLibraryViews(librarySlug, nextList);
@@ -1012,7 +224,7 @@ export class OmniRepository {
       [viewId]
     );
     if (!row) return;
-    const lib = this.getLibraryById(row.library_id);
+    const lib = this.librariesStore.getLibraryById(row.library_id);
     if (!lib) return;
     if (lib.viewList.length <= 1) {
       throw new Error('至少需要保留 1 个视图');
@@ -1026,132 +238,6 @@ export class OmniRepository {
         config: v.config,
       }));
     this.saveLibraryViews(lib.slug, remaining);
-  }
-
-  getLibraryBySlug(slug: string): LibraryRecord | null {
-    return this.ensureLibrariesCache().bySlug.get(slug) ?? null;
-  }
-
-  private getLibraryById(id: string): LibraryRecord | null {
-    return this.ensureLibrariesCache().byId.get(id) ?? null;
-  }
-
-  private upsertLibraryInternal(bp: LibraryBlueprint, sortOrder?: number): string {
-    const now = Date.now();
-    const existing = this.driver.getFirstSync<{
-      id: string;
-      sort_order: number;
-      parent_slug: string | null;
-      show_on_home: number;
-    }>('SELECT id, sort_order, parent_slug, show_on_home FROM libraries WHERE slug = ?', [bp.slug]);
-
-    const id = existing ? existing.id : createId('lib');
-    let order = sortOrder ?? existing?.sort_order;
-    if (order === undefined) {
-      const maxRow = this.driver.getFirstSync<{ max_order: number | null }>(
-        'SELECT MAX(sort_order) AS max_order FROM libraries'
-      );
-      order = (maxRow?.max_order ?? -1) + 1;
-    }
-
-    const parentSlug =
-      bp.parentLibrarySlug && bp.parentLibrarySlug !== bp.slug ? bp.parentLibrarySlug : null;
-
-    let normalizedFields = bp.fields;
-    if (
-      parentSlug &&
-      !bp.fields.some(
-        (f) => f.type === 'relation' && f.relationConfig?.targetLibrarySlug === parentSlug
-      )
-    ) {
-      const baseKey = `parent_${parentSlug}`.replace(/[^a-z0-9_]/g, '_');
-      const usedKeys = new Set(bp.fields.map((f) => f.key));
-      const relKey = usedKeys.has(baseKey) ? `${baseKey}_ref` : baseKey;
-      normalizedFields = [
-        {
-          key: relKey,
-          label: '关联主记录',
-          type: 'relation',
-          required: false,
-          relationConfig: {
-            targetLibrarySlug: parentSlug,
-            allowMultiple: false,
-          },
-        },
-        ...bp.fields,
-      ];
-    }
-
-    const showOnHome =
-      bp.showOnHome !== undefined
-        ? bp.showOnHome
-          ? 1
-          : 0
-        : existing
-          ? parentSlug && !existing.parent_slug
-            ? 0
-            : Number(existing.show_on_home ?? 1)
-          : parentSlug
-            ? 0
-            : 1;
-
-    if (existing) {
-      this.driver.runSync(
-        `UPDATE libraries
-         SET name = ?, description = ?, icon = ?, color = ?, parent_slug = ?, show_on_home = ?, fields_json = ?, views_json = ?, updated_at = ?
-         WHERE id = ?`,
-        [
-          bp.name,
-          bp.description ?? '',
-          bp.icon || '📦',
-          bp.color || 'teal',
-          parentSlug,
-          showOnHome,
-          JSON.stringify(normalizedFields),
-          JSON.stringify(bp.views),
-          now,
-          id,
-        ]
-      );
-    } else {
-      this.driver.runSync(
-        `INSERT INTO libraries (id, slug, name, description, icon, color, parent_slug, show_on_home, fields_json, views_json, sort_order, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          id,
-          bp.slug,
-          bp.name,
-          bp.description ?? '',
-          bp.icon || '📦',
-          bp.color || 'teal',
-          parentSlug,
-          showOnHome,
-          JSON.stringify(normalizedFields),
-          JSON.stringify(bp.views),
-          order,
-          now,
-          now,
-        ]
-      );
-    }
-
-    compileLibrarySqlView(this.driver, id, bp.slug, normalizedFields);
-    this.syncLibraryViewsFromBlueprintInternal(
-      id,
-      bp.views,
-      !existing,
-      bp.viewList,
-      normalizedFields
-    );
-    this.syncAllLibraryRelationsInternal();
-    this.invalidateLibrariesCache();
-    return id;
-  }
-
-  upsertLibrary(bp: LibraryBlueprint): string {
-    const id = this.driver.withTransactionSync(() => this.upsertLibraryInternal(bp));
-    this.notify();
-    return id;
   }
 
   deleteLibrary(slug: string): void {
@@ -1193,7 +279,7 @@ export class OmniRepository {
             sqlReferencesLibraryView(String(w.readonly_sql ?? ''), slug)
         );
 
-        this.saveSnapshotInternal(`删除记录本「${libName}」`, {
+        this.snapshotsStore.saveSnapshotInternal(`删除记录本「${libName}」`, {
           kind: 'library_deleted',
           library: rawLib,
           libraryViews: libViews,
@@ -1207,7 +293,6 @@ export class OmniRepository {
           this.driver.runSync('DELETE FROM dashboard_widgets WHERE id = ?', [String(w.id)]);
         }
 
-        // 若该库下挂有附属子库，解绑为独立可见记录本，防止子库因隐藏而无法访问
         if (detachedChildLibraries.length > 0) {
           this.driver.runSync(
             'UPDATE libraries SET parent_slug = NULL, show_on_home = 1 WHERE parent_slug = ?',
@@ -1218,159 +303,24 @@ export class OmniRepository {
 
       dropLibrarySqlView(this.driver, slug);
       this.driver.runSync('DELETE FROM libraries WHERE slug = ?', [slug]);
-      this.syncAllLibraryRelationsInternal();
+      this.librariesStore.syncAllLibraryRelations();
     });
     this.notify();
   }
 
-  private computeTitleAndSearch(lib: LibraryRecord, data: Record<string, unknown>): {
-    titleSummary: string;
-    searchText: string;
-  } {
-    const titleKey = lib.views.card.titleFieldKey || lib.fields[0]?.key || '';
-    let rawTitle = data[titleKey];
-    if (rawTitle === undefined || rawTitle === null || String(rawTitle).trim() === '') {
-      const fallbackField = lib.fields.find(
-        (f) =>
-          (f.type === 'text' || f.type === 'select' || f.type === 'date') &&
-          data[f.key] !== undefined &&
-          data[f.key] !== null &&
-          String(data[f.key]).trim() !== ''
-      );
-      if (fallbackField) {
-        rawTitle = data[fallbackField.key];
-      }
-    }
-    const firstLine =
-      rawTitle !== undefined && rawTitle !== null
-        ? String(rawTitle)
-            .split(/\r?\n/)
-            .map((s) => s.trim())
-            .find(Boolean) ?? ''
-        : '';
-    const titleSummary = firstLine
-      ? firstLine.length > 72
-        ? `${firstLine.slice(0, 72)}…`
-        : firstLine
-      : `${lib.name}记录`;
-
-    const fieldByKey = new Map(lib.fields.map((f) => [f.key, f]));
-    const parts: string[] = [titleSummary];
-
-    for (const [k, v] of Object.entries(data)) {
-      if (v === undefined || v === null || v === '') continue;
-      const field = fieldByKey.get(k);
-      // 仅收录可搜索字段（text / select / multi_select / date / number / currency），排除 image / relation 等
-      if (field && !SEARCHABLE_FIELD_TYPES.has(field.type)) {
-        continue;
-      }
-      if (typeof v === 'string') {
-        if (v.startsWith('data:image/') || v.startsWith('images/')) continue;
-        parts.push(v);
-      } else if (typeof v === 'number') {
-        parts.push(String(v));
-      } else if (Array.isArray(v)) {
-        const cleanItems = v
-          .map(String)
-          .filter((item) => item && !item.startsWith('data:image/'));
-        if (cleanItems.length > 0) {
-          parts.push(cleanItems.join(' '));
-        }
-      }
-    }
-
-    return { titleSummary, searchText: parts.join(' ').toLowerCase() };
-  }
-
-  private syncEntryRelationsInternal(
-    entryId: string,
-    libraryId: string,
-    fields: FieldDef[],
-    data: Record<string, unknown>
-  ): void {
-    this.driver.runSync('DELETE FROM entry_relations WHERE source_entry_id = ?', [entryId]);
-
-    for (const f of fields) {
-      if (f.type !== 'relation') continue;
-      const rawTargets = data[f.key];
-      const targets = Array.isArray(rawTargets)
-        ? rawTargets.map(String).filter(Boolean)
-        : typeof rawTargets === 'string' && rawTargets.trim()
-          ? [rawTargets.trim()]
-          : [];
-
-      targets.forEach((targetId, idx) => {
-        // 仅关联真实存在的目标条目，防止脏外键报错
-        const exists = this.driver.getFirstSync<{ id: string }>('SELECT id FROM entries WHERE id = ?', [
-          targetId,
-        ]);
-        if (exists) {
-          this.driver.runSync(
-            `INSERT OR IGNORE INTO entry_relations (id, source_entry_id, target_entry_id, source_library_id, field_key, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [createId('rel'), entryId, targetId, libraryId, f.key, idx]
-          );
-        }
-      });
-    }
-  }
-
-  private createEntryInternal(
-    librarySlug: string,
-    inputData: Record<string, unknown>,
-    customTimestamp?: number
-  ): string {
-    const lib = this.getLibraryBySlug(librarySlug);
-    if (!lib) {
-      throw new Error(`找不到数据表: ${librarySlug}`);
-    }
-
-    const validator = buildEntryPayloadValidator(lib.fields);
-    const parsed = validator.parse(inputData) as Record<string, unknown>;
-    const { titleSummary, searchText } = this.computeTitleAndSearch(lib, parsed);
-    const now = customTimestamp ?? Date.now();
-    const id = createId('ent');
-
-    this.driver.runSync(
-      `INSERT INTO entries (id, library_id, title_summary, search_text, data_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, lib.id, titleSummary, searchText, JSON.stringify(parsed), now, now]
-    );
-
-    this.syncEntryRelationsInternal(id, lib.id, lib.fields, parsed);
-    this.invalidateLibrariesCache();
-    return id;
-  }
+  // ==================== 条目、关联与搜索 ====================
 
   createEntry(librarySlug: string, inputData: Record<string, unknown>): string {
-    const id = this.driver.withTransactionSync(() => this.createEntryInternal(librarySlug, inputData));
+    const id = this.driver.withTransactionSync(() =>
+      this.entriesStore.createEntryInternal(librarySlug, inputData)
+    );
     this.notify();
     return id;
   }
 
   updateEntry(entryId: string, inputData: Record<string, unknown>): void {
     this.driver.withTransactionSync(() => {
-      const existing = this.driver.getFirstSync<{ library_id: string }>(
-        'SELECT library_id FROM entries WHERE id = ?',
-        [entryId]
-      );
-      if (!existing) throw new Error('记录不存在');
-
-      const lib = this.getLibraryById(existing.library_id);
-      if (!lib) throw new Error('所属库不存在');
-
-      const validator = buildEntryPayloadValidator(lib.fields);
-      const parsed = validator.parse(inputData) as Record<string, unknown>;
-      const { titleSummary, searchText } = this.computeTitleAndSearch(lib, parsed);
-
-      this.driver.runSync(
-        `UPDATE entries
-         SET title_summary = ?, search_text = ?, data_json = ?, updated_at = ?
-         WHERE id = ?`,
-        [titleSummary, searchText, JSON.stringify(parsed), Date.now(), entryId]
-      );
-
-      this.syncEntryRelationsInternal(entryId, lib.id, lib.fields, parsed);
+      this.entriesStore.updateEntryInternal(entryId, inputData);
     });
     this.notify();
   }
@@ -1378,862 +328,113 @@ export class OmniRepository {
   deleteEntry(entryId: string): string | null {
     let snapshotId: string | null = null;
     this.driver.withTransactionSync(() => {
-      const entryRow = this.driver.getFirstSync<Record<string, unknown>>(
-        'SELECT * FROM entries WHERE id = ?',
-        [entryId]
-      );
-      if (!entryRow) return;
-
-      const relRows = this.driver.getAllSync<Record<string, unknown>>(
-        'SELECT * FROM entry_relations WHERE source_entry_id = ? OR target_entry_id = ?',
-        [entryId, entryId]
-      );
-
-      // 对所有反向关联到该记录的子记录/引用记录：保留记录本身，仅干净断开关联（同步清理 data_json 中的悬空 ID）
-      const fieldsBySourceId = new Map<string, Set<string>>();
-      for (const r of relRows) {
-        if (String(r.target_entry_id) === entryId) {
-          const srcId = String(r.source_entry_id);
-          let keys = fieldsBySourceId.get(srcId);
-          if (!keys) {
-            keys = new Set<string>();
-            fieldsBySourceId.set(srcId, keys);
-          }
-          keys.add(String(r.field_key));
-        }
-      }
-
-      const detachedSources: Array<{ id: string; prevDataJson: string }> = [];
-      for (const [srcId, fieldKeys] of fieldsBySourceId.entries()) {
-        const srcRow = this.driver.getFirstSync<{ id: string; data_json: string }>(
-          'SELECT id, data_json FROM entries WHERE id = ?',
-          [srcId]
-        );
-        if (!srcRow) continue;
-        detachedSources.push({ id: srcRow.id, prevDataJson: srcRow.data_json });
-        try {
-          const parsedData = JSON.parse(srcRow.data_json) as Record<string, unknown>;
-          for (const fk of fieldKeys) {
-            const cur = parsedData[fk];
-            if (Array.isArray(cur)) {
-              parsedData[fk] = cur.map(String).filter((id) => id !== entryId);
-            } else if (cur === entryId) {
-              parsedData[fk] = [];
-            }
-          }
-          this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
-            JSON.stringify(parsedData),
-            srcRow.id,
-          ]);
-        } catch {
-          // ignore malformed payload
-        }
-      }
-
-      const title = String(entryRow.title_summary ?? '记录');
-      snapshotId = this.saveSnapshotInternal(`删除记录「${title}」`, {
+      const deleted = this.entriesStore.deleteEntryWithDetachInternal(entryId);
+      if (!deleted) return;
+      const title = String(deleted.entryRow.title_summary ?? '记录');
+      snapshotId = this.snapshotsStore.saveSnapshotInternal(`删除记录「${title}」`, {
         kind: 'entry_deleted',
-        entry: entryRow,
-        relations: relRows,
-        detachedSources,
+        entry: deleted.entryRow,
+        relations: deleted.relRows,
+        detachedSources: deleted.detachedSources,
       });
-
-      this.driver.runSync('DELETE FROM entries WHERE id = ?', [entryId]);
     });
     this.notify();
     return snapshotId;
   }
 
-  /**
-   * 批量提交 AI 万能快记跨库草稿（支持 "@prev:0" 引用同一事务内前序新建条目）
-   * 使用轻量增量快照仅记录新建 ID，撤销时只删本批记录且不膨胀数据库
-   */
   commitOmniDrafts(drafts: DraftEntryItem[], snapshotNote?: string): string[] {
-    const createdIds: string[] = [];
-
+    let createdIds: string[] = [];
     this.driver.withTransactionSync(() => {
-      drafts.forEach((draft) => {
-        const resolved: Record<string, unknown> = { ...draft.data };
-        for (const [k, v] of Object.entries(resolved)) {
-          if (Array.isArray(v)) {
-            resolved[k] = v
-              .map((item) => {
-                if (typeof item === 'string' && item.startsWith('@prev:')) {
-                  const idx = Number(item.slice(6));
-                  return createdIds[idx] ?? '';
-                }
-                return String(item);
-              })
-              .filter(Boolean);
-          } else if (typeof v === 'string' && v.startsWith('@prev:')) {
-            const idx = Number(v.slice(6));
-            resolved[k] = createdIds[idx] ? [createdIds[idx]] : [];
-          }
-        }
-        const newId = this.createEntryInternal(draft.librarySlug, resolved);
-        createdIds.push(newId);
-      });
-
+      createdIds = this.entriesStore.commitOmniDraftsInternal(drafts);
       if (snapshotNote && createdIds.length > 0) {
-        this.saveSnapshotInternal(snapshotNote, {
+        this.snapshotsStore.saveSnapshotInternal(snapshotNote, {
           kind: 'entries_created',
           entryIds: [...createdIds],
         });
       }
     });
-
     this.notify();
     return createdIds;
   }
 
-  /**
-   * 轻量级跨库全局搜索：单条 SQL 直接返回标题与所属库，不做全量水合或 JSON 解析
-   */
+  getEntryTitleMap(entryIds: string[]): Map<string, string> {
+    return this.entriesStore.getEntryTitleMap(entryIds);
+  }
+
   searchEntrySummaries(query: string, limit = 30): EntrySearchHit[] {
-    const trimmed = query.trim();
-    if (!trimmed) return [];
-
-    const { byId } = this.ensureLibrariesCache();
-    const escaped = escapeLikePattern(trimmed.toLowerCase());
-    const rows = this.driver.getAllSync<{
-      id: string;
-      library_id: string;
-      title_summary: string;
-      updated_at: number;
-    }>(
-      `SELECT id, library_id, title_summary, updated_at
-       FROM entries
-       WHERE search_text LIKE ? ESCAPE '\\'
-       ORDER BY updated_at DESC
-       LIMIT ?`,
-      [`%${escaped}%`, limit]
-    );
-
-    const hits: EntrySearchHit[] = [];
-    for (const r of rows) {
-      const lib = byId.get(r.library_id);
-      if (!lib) continue;
-      hits.push({
-        id: r.id,
-        title: r.title_summary,
-        libraryId: lib.id,
-        librarySlug: lib.slug,
-        libraryName: lib.name,
-        libraryIcon: lib.icon,
-        updatedAt: r.updated_at,
-      });
-    }
-    return hits;
+    return this.entriesStore.searchEntrySummaries(query, limit);
   }
 
-  /**
-   * 轻量查询全库最近更新的条目摘要，用于首页快捷回溯条
-   */
   listRecentEntrySummaries(limit = 6): EntrySearchHit[] {
-    const { byId } = this.ensureLibrariesCache();
-    const rows = this.driver.getAllSync<{
-      id: string;
-      library_id: string;
-      title_summary: string;
-      updated_at: number;
-    }>(
-      `SELECT id, library_id, title_summary, updated_at
-       FROM entries
-       ORDER BY updated_at DESC
-       LIMIT ?`,
-      [limit]
-    );
-
-    const hits: EntrySearchHit[] = [];
-    for (const r of rows) {
-      const lib = byId.get(r.library_id);
-      if (!lib) continue;
-      hits.push({
-        id: r.id,
-        title: r.title_summary,
-        libraryId: lib.id,
-        librarySlug: lib.slug,
-        libraryName: lib.name,
-        libraryIcon: lib.icon,
-        updatedAt: r.updated_at,
-      });
-    }
-    return hits;
+    return this.entriesStore.listRecentEntrySummaries(limit);
   }
 
-  /**
-   * 查询每个记录本最新一条记录的标题与时间，用于首页记录本卡片动态预览
-   */
   listLatestEntryByLibrary(): Map<string, { title: string; updatedAt: number }> {
-    const rows = this.driver.getAllSync<{
-      library_id: string;
-      title_summary: string;
-      updated_at: number;
-    }>(
-      `SELECT library_id, title_summary, updated_at
-       FROM entries
-       ORDER BY updated_at DESC`
-    );
-    const map = new Map<string, { title: string; updatedAt: number }>();
-    for (const r of rows) {
-      if (!map.has(r.library_id)) {
-        map.set(r.library_id, { title: r.title_summary, updatedAt: r.updated_at });
-      }
-    }
-    return map;
+    return this.entriesStore.listLatestEntryByLibrary();
   }
 
-  /**
-   * 批量查询一组条目的正向关联和反向引用，彻底消除列表页 N+1 SQL 查询
-   */
-  private loadRelationsBatch(entryIds: string[]): {
-    forwardBySourceId: Map<string, ForwardRelRow[]>;
-    backByTargetId: Map<string, BackRelRow[]>;
-  } {
-    const forwardBySourceId = new Map<string, ForwardRelRow[]>();
-    const backByTargetId = new Map<string, BackRelRow[]>();
-    if (entryIds.length === 0) {
-      return { forwardBySourceId, backByTargetId };
-    }
-
-    for (let i = 0; i < entryIds.length; i += RELATION_QUERY_CHUNK_SIZE) {
-      const chunk = entryIds.slice(i, i + RELATION_QUERY_CHUNK_SIZE);
-      const placeholders = chunk.map(() => '?').join(', ');
-
-      const forwardRows = this.driver.getAllSync<ForwardRelRow>(
-        `SELECT
-           r.source_entry_id,
-           r.field_key,
-           t.id AS target_id,
-           t.title_summary AS target_title,
-           t.library_id AS target_lib_id,
-           t.data_json AS target_data_json
-         FROM entry_relations r
-         JOIN entries t ON t.id = r.target_entry_id
-         WHERE r.source_entry_id IN (${placeholders})
-         ORDER BY r.sort_order ASC`,
-        chunk
-      );
-
-      for (const fr of forwardRows) {
-        let list = forwardBySourceId.get(fr.source_entry_id);
-        if (!list) {
-          list = [];
-          forwardBySourceId.set(fr.source_entry_id, list);
-        }
-        list.push(fr);
-      }
-
-      const backRows = this.driver.getAllSync<BackRelRow>(
-        `SELECT
-           r.target_entry_id,
-           r.field_key,
-           s.id AS source_id,
-           s.title_summary AS source_title,
-           s.library_id AS source_lib_id,
-           s.data_json AS source_data_json
-         FROM entry_relations r
-         JOIN entries s ON s.id = r.source_entry_id
-         WHERE r.target_entry_id IN (${placeholders})
-         ORDER BY s.created_at DESC`,
-        chunk
-      );
-
-      for (const br of backRows) {
-        let list = backByTargetId.get(br.target_entry_id);
-        if (!list) {
-          list = [];
-          backByTargetId.set(br.target_entry_id, list);
-        }
-        list.push(br);
-      }
-    }
-
-    return { forwardBySourceId, backByTargetId };
-  }
-
-  /**
-   * 读取并完整水合（Hydrate）某个库的全部条目：包含双向关联、Rollup 跨表汇总、Formula 行内公式与条件着色
-   */
   listHydratedEntries(librarySlug: string, searchQuery?: string): HydratedEntry[] {
-    const { byId: allLibsById, bySlug: allLibsBySlug } = this.ensureLibrariesCache();
-    const lib = allLibsBySlug.get(librarySlug);
-    if (!lib) return [];
-
-    const trimmedQuery = searchQuery?.trim();
-    const sql = trimmedQuery
-      ? `SELECT id, library_id, title_summary, data_json, created_at, updated_at
-         FROM entries
-         WHERE library_id = ? AND search_text LIKE ? ESCAPE '\\'
-         ORDER BY created_at DESC`
-      : `SELECT id, library_id, title_summary, data_json, created_at, updated_at
-         FROM entries
-         WHERE library_id = ?
-         ORDER BY created_at DESC`;
-    const params = trimmedQuery
-      ? [lib.id, `%${escapeLikePattern(trimmedQuery.toLowerCase())}%`]
-      : [lib.id];
-
-    const rows = this.driver.getAllSync<RawEntryRow>(sql, params);
-    if (rows.length === 0) return [];
-
-    const { forwardBySourceId, backByTargetId } = this.loadRelationsBatch(rows.map((r) => r.id));
-    const parsedJsonCache = new Map<string, Record<string, unknown>>();
-
-    const hydrated = rows.map((row) =>
-      this.hydrateRowWithRelations(
-        row,
-        lib,
-        allLibsById,
-        allLibsBySlug,
-        forwardBySourceId.get(row.id) ?? [],
-        backByTargetId.get(row.id) ?? [],
-        parsedJsonCache
-      )
-    );
-
-    // 根据视图配置的排序规则排序
-    const sortKey = lib.views.card.sortFieldKey;
-    const sortDir = lib.views.card.sortDir ?? 'desc';
-    if (sortKey) {
-      hydrated.sort((a, b) => {
-        const va = a.computedData[sortKey];
-        const vb = b.computedData[sortKey];
-        if (va === vb) return b.createdAt - a.createdAt;
-        if (typeof va === 'number' && typeof vb === 'number') {
-          return sortDir === 'asc' ? va - vb : vb - va;
-        }
-        const cmp = String(va ?? '').localeCompare(String(vb ?? ''));
-        return sortDir === 'asc' ? cmp : -cmp;
-      });
-    }
-
-    return hydrated;
+    return this.entriesStore.listHydratedEntries(librarySlug, searchQuery);
   }
 
   getHydratedEntryById(entryId: string): { entry: HydratedEntry; library: LibraryRecord } | null {
-    const row = this.driver.getFirstSync<RawEntryRow>(
-      'SELECT id, library_id, title_summary, data_json, created_at, updated_at FROM entries WHERE id = ?',
-      [entryId]
-    );
-    if (!row) return null;
-
-    const { byId: allLibsById, bySlug: allLibsBySlug } = this.ensureLibrariesCache();
-    const lib = allLibsById.get(row.library_id);
-    if (!lib) return null;
-
-    const { forwardBySourceId, backByTargetId } = this.loadRelationsBatch([row.id]);
-    const parsedJsonCache = new Map<string, Record<string, unknown>>();
-
-    return {
-      library: lib,
-      entry: this.hydrateRowWithRelations(
-        row,
-        lib,
-        allLibsById,
-        allLibsBySlug,
-        forwardBySourceId.get(row.id) ?? [],
-        backByTargetId.get(row.id) ?? [],
-        parsedJsonCache
-      ),
-    };
+    return this.entriesStore.getHydratedEntryById(entryId);
   }
 
-  /**
-   * 查询某条主记录下挂载的全部附属子表区块及其已水合的明细条目（按子表视图规则或时间倒序排列）
-   */
   listChildSectionsForEntry(entryId: string, parentLibrarySlug: string): ChildLibrarySection[] {
-    const { byId: allLibsById, bySlug: allLibsBySlug } = this.ensureLibrariesCache();
-    const childLibs = this.listChildLibraries(parentLibrarySlug);
-    if (childLibs.length === 0) return [];
-
-    const sections: ChildLibrarySection[] = [];
-    for (const childLib of childLibs) {
-      const relField = childLib.fields.find(
-        (f) => f.type === 'relation' && f.relationConfig?.targetLibrarySlug === parentLibrarySlug
-      );
-      if (!relField) continue;
-
-      const rows = this.driver.getAllSync<RawEntryRow>(
-        `SELECT s.id, s.library_id, s.title_summary, s.data_json, s.created_at, s.updated_at
-         FROM entry_relations r
-         JOIN entries s ON s.id = r.source_entry_id
-         WHERE r.target_entry_id = ? AND s.library_id = ? AND r.field_key = ?
-         ORDER BY s.created_at DESC`,
-        [entryId, childLib.id, relField.key]
-      );
-
-      if (rows.length === 0) {
-        sections.push({
-          childLibrary: childLib,
-          relationFieldKey: relField.key,
-          entries: [],
-        });
-        continue;
-      }
-
-      const { forwardBySourceId, backByTargetId } = this.loadRelationsBatch(rows.map((r) => r.id));
-      const parsedJsonCache = new Map<string, Record<string, unknown>>();
-      const hydrated = rows.map((row) =>
-        this.hydrateRowWithRelations(
-          row,
-          childLib,
-          allLibsById,
-          allLibsBySlug,
-          forwardBySourceId.get(row.id) ?? [],
-          backByTargetId.get(row.id) ?? [],
-          parsedJsonCache
-        )
-      );
-
-      const sortKey = childLib.views.card.sortFieldKey;
-      const sortDir = childLib.views.card.sortDir ?? 'desc';
-      if (sortKey) {
-        hydrated.sort((a, b) => {
-          const va = a.computedData[sortKey];
-          const vb = b.computedData[sortKey];
-          if (va === vb) return b.createdAt - a.createdAt;
-          if (typeof va === 'number' && typeof vb === 'number') {
-            return sortDir === 'asc' ? va - vb : vb - va;
-          }
-          const cmp = String(va ?? '').localeCompare(String(vb ?? ''));
-          return sortDir === 'asc' ? cmp : -cmp;
-        });
-      }
-
-      sections.push({
-        childLibrary: childLib,
-        relationFieldKey: relField.key,
-        entries: hydrated,
-      });
-    }
-
-    return sections;
+    return this.entriesStore.listChildSectionsForEntry(entryId, parentLibrarySlug);
   }
 
-  /**
-   * 查询反向引用某条记录的跨表条目，按「来源库 + 关联字段」分组并完整水合（排除已作为附属子表展示的库）
-   */
   listBacklinkGroupsForEntry(
     entryId: string,
     excludeLibrarySlugs?: Set<string>
   ): BacklinkGroupSection[] {
-    const { byId: allLibsById, bySlug: allLibsBySlug } = this.ensureLibrariesCache();
-
-    const rawRows = this.driver.getAllSync<RawEntryRow & { field_key: string }>(
-      `SELECT
-         r.field_key,
-         s.id,
-         s.library_id,
-         s.title_summary,
-         s.data_json,
-         s.created_at,
-         s.updated_at
-       FROM entry_relations r
-       JOIN entries s ON s.id = r.source_entry_id
-       WHERE r.target_entry_id = ?
-       ORDER BY s.created_at DESC`,
-      [entryId]
-    );
-
-    const filteredRows = rawRows.filter((row) => {
-      const srcLib = allLibsById.get(row.library_id);
-      if (!srcLib) return false;
-      if (excludeLibrarySlugs?.has(srcLib.slug)) return false;
-      return true;
-    });
-
-    if (filteredRows.length === 0) return [];
-
-    const uniqueEntryIds = Array.from(new Set(filteredRows.map((r) => r.id)));
-    const { forwardBySourceId, backByTargetId } = this.loadRelationsBatch(uniqueEntryIds);
-    const parsedJsonCache = new Map<string, Record<string, unknown>>();
-    const hydratedById = new Map<string, HydratedEntry>();
-
-    for (const row of filteredRows) {
-      if (hydratedById.has(row.id)) continue;
-      const srcLib = allLibsById.get(row.library_id)!;
-      hydratedById.set(
-        row.id,
-        this.hydrateRowWithRelations(
-          row,
-          srcLib,
-          allLibsById,
-          allLibsBySlug,
-          forwardBySourceId.get(row.id) ?? [],
-          backByTargetId.get(row.id) ?? [],
-          parsedJsonCache
-        )
-      );
-    }
-
-    const groupMap = new Map<
-      string,
-      {
-        sourceLibrary: LibraryRecord;
-        relationFieldKey: string;
-        relationFieldLabel: string;
-        entries: HydratedEntry[];
-        seenEntryIds: Set<string>;
-      }
-    >();
-
-    for (const row of filteredRows) {
-      const srcLib = allLibsById.get(row.library_id)!;
-      const groupKey = `${srcLib.slug}::${row.field_key}`;
-      let group = groupMap.get(groupKey);
-      if (!group) {
-        const relField = srcLib.fields.find((f) => f.key === row.field_key);
-        group = {
-          sourceLibrary: srcLib,
-          relationFieldKey: row.field_key,
-          relationFieldLabel: relField?.label ?? '关联记录',
-          entries: [],
-          seenEntryIds: new Set<string>(),
-        };
-        groupMap.set(groupKey, group);
-      }
-      if (!group.seenEntryIds.has(row.id)) {
-        group.seenEntryIds.add(row.id);
-        const hydrated = hydratedById.get(row.id);
-        if (hydrated) group.entries.push(hydrated);
-      }
-    }
-
-    const sections: BacklinkGroupSection[] = [];
-    for (const g of groupMap.values()) {
-      const sortKey = g.sourceLibrary.views.card.sortFieldKey;
-      const sortDir = g.sourceLibrary.views.card.sortDir ?? 'desc';
-      if (sortKey) {
-        g.entries.sort((a, b) => {
-          const va = a.computedData[sortKey];
-          const vb = b.computedData[sortKey];
-          if (va === vb) return b.createdAt - a.createdAt;
-          if (typeof va === 'number' && typeof vb === 'number') {
-            return sortDir === 'asc' ? va - vb : vb - va;
-          }
-          const cmp = String(va ?? '').localeCompare(String(vb ?? ''));
-          return sortDir === 'asc' ? cmp : -cmp;
-        });
-      }
-      sections.push({
-        sourceLibrary: g.sourceLibrary,
-        relationFieldKey: g.relationFieldKey,
-        relationFieldLabel: g.relationFieldLabel,
-        entries: g.entries,
-      });
-    }
-
-    return sections;
+    return this.entriesStore.listBacklinkGroupsForEntry(entryId, excludeLibrarySlugs);
   }
 
-  private hydrateRowWithRelations(
-    row: RawEntryRow,
-    lib: LibraryRecord,
-    allLibsById: Map<string, LibraryRecord>,
-    allLibsBySlug: Map<string, LibraryRecord>,
-    forwardRows: ForwardRelRow[],
-    backRows: BackRelRow[],
-    parsedJsonCache: Map<string, Record<string, unknown>>
-  ): HydratedEntry {
-    const parsePayload = (entryId: string, jsonStr: string): Record<string, unknown> => {
-      const cached = parsedJsonCache.get(entryId);
-      if (cached) return cached;
-      const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-      parsedJsonCache.set(entryId, parsed);
-      return parsed;
-    };
-
-    const rawData = parsePayload(row.id, row.data_json);
-    const computedData: Record<string, unknown> = { ...rawData };
-
-    const forwardLinks: Record<string, LinkedEntryRef[]> = {};
-    const forwardTargetPayloads: Record<string, Array<Record<string, unknown>>> = {};
-
-    for (const fr of forwardRows) {
-      const targetLib = allLibsById.get(fr.target_lib_id);
-      if (!targetLib) continue;
-      if (!forwardLinks[fr.field_key]) forwardLinks[fr.field_key] = [];
-      if (!forwardTargetPayloads[fr.field_key]) forwardTargetPayloads[fr.field_key] = [];
-
-      forwardLinks[fr.field_key].push({
-        id: fr.target_id,
-        title: fr.target_title,
-        libraryId: targetLib.id,
-        librarySlug: targetLib.slug,
-        libraryName: targetLib.name,
-        libraryIcon: targetLib.icon,
-        fieldKey: fr.field_key,
-      });
-      forwardTargetPayloads[fr.field_key].push(parsePayload(fr.target_id, fr.target_data_json));
-    }
-
-    const backlinks: LinkedEntryRef[] = [];
-    const reversePayloadsByKey: Record<string, Array<Record<string, unknown>>> = {};
-
-    for (const br of backRows) {
-      const srcLib = allLibsById.get(br.source_lib_id);
-      if (!srcLib) continue;
-      backlinks.push({
-        id: br.source_id,
-        title: br.source_title,
-        libraryId: srcLib.id,
-        librarySlug: srcLib.slug,
-        libraryName: srcLib.name,
-        libraryIcon: srcLib.icon,
-        fieldKey: br.field_key,
-      });
-      const revKey = `reverse:${srcLib.slug}.${br.field_key}`;
-      if (!reversePayloadsByKey[revKey]) reversePayloadsByKey[revKey] = [];
-      reversePayloadsByKey[revKey].push(parsePayload(br.source_id, br.source_data_json));
-    }
-
-    // 计算 Rollup 汇总字段（支持正向 relationFieldKey 与反向 reverse:<slug>.<fieldKey>）
-    for (const field of lib.fields) {
-      if (field.type !== 'rollup' || !field.rollupConfig) continue;
-      const { relationFieldKey, targetFieldKey, fn } = field.rollupConfig;
-
-      let payloads: Array<Record<string, unknown>> = [];
-      if (relationFieldKey.startsWith('reverse:')) {
-        payloads = reversePayloadsByKey[relationFieldKey] ?? [];
-      } else if (allLibsBySlug.has(relationFieldKey)) {
-        const prefix = `reverse:${relationFieldKey}.`;
-        for (const [rk, list] of Object.entries(reversePayloadsByKey)) {
-          if (rk.startsWith(prefix)) payloads.push(...list);
-        }
-      } else {
-        payloads = forwardTargetPayloads[relationFieldKey] ?? [];
-      }
-
-      if (fn === 'COUNT') {
-        computedData[field.key] = payloads.length;
-        continue;
-      }
-
-      const nums = payloads
-        .map((p) => Number(p[targetFieldKey]))
-        .filter((n) => Number.isFinite(n));
-
-      if (nums.length === 0) {
-        computedData[field.key] = 0;
-      } else if (fn === 'SUM') {
-        computedData[field.key] = Math.round(nums.reduce((a, b) => a + b, 0) * 100) / 100;
-      } else if (fn === 'AVG') {
-        computedData[field.key] =
-          Math.round((nums.reduce((a, b) => a + b, 0) / nums.length) * 100) / 100;
-      } else if (fn === 'MIN') {
-        computedData[field.key] = Math.min(...nums);
-      } else if (fn === 'MAX') {
-        computedData[field.key] = Math.max(...nums);
-      }
-    }
-
-    // 计算行内 Formula 字段（可引用基础字段与刚算出的 Rollup 字段）
-    for (const field of lib.fields) {
-      if (field.type !== 'formula' || !field.formulaExpr) continue;
-      computedData[field.key] = evaluateFormula(field.formulaExpr, computedData);
-    }
-
-    // 计算条件高亮规则
-    const highlight = evaluateHighlightRules(lib.views.card.highlightRules, computedData);
-
-    return {
-      id: row.id,
-      libraryId: row.library_id,
-      librarySlug: lib.slug,
-      titleSummary: row.title_summary,
-      rawData,
-      computedData,
-      forwardLinks,
-      backlinks,
-      highlight,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-    };
+  listRelationCandidates(targetLibrarySlug: string): Array<{ id: string; title: string }> {
+    return this.entriesStore.listRelationCandidates(targetLibrarySlug);
   }
 
-  /**
-   * 看板组件 CRUD 与离线实时求值
-   */
+  collectReferencedImagePaths(): Set<string> {
+    return this.entriesStore.collectReferencedImagePaths();
+  }
+
+  // ==================== 统计看板组件与只读查询 ====================
+
   listDashboardWidgets(librarySlug?: string | null): DashboardWidget[] {
-    const rows = librarySlug
-      ? this.driver.getAllSync<{
-          id: string;
-          title: string;
-          subtitle: string | null;
-          chart_type: DashboardWidget['chartType'];
-          readonly_sql: string;
-          x_key: string | null;
-          y_key: string;
-          unit_prefix: string | null;
-          unit_suffix: string | null;
-          accent_tone: AccentTone;
-        }>(
-          'SELECT * FROM dashboard_widgets WHERE library_slug = ? ORDER BY sort_order ASC, created_at ASC',
-          [librarySlug]
-        )
-      : this.driver.getAllSync<{
-          id: string;
-          title: string;
-          subtitle: string | null;
-          chart_type: DashboardWidget['chartType'];
-          readonly_sql: string;
-          x_key: string | null;
-          y_key: string;
-          unit_prefix: string | null;
-          unit_suffix: string | null;
-          accent_tone: AccentTone;
-        }>(
-          'SELECT * FROM dashboard_widgets WHERE library_slug IS NULL ORDER BY sort_order ASC, created_at ASC'
-        );
-
-    return rows.map((r) => ({
-      id: r.id,
-      title: r.title,
-      subtitle: r.subtitle ?? undefined,
-      chartType: r.chart_type,
-      readonlySql: r.readonly_sql,
-      xKey: r.x_key ?? undefined,
-      yKey: r.y_key,
-      unitPrefix: r.unit_prefix ?? undefined,
-      unitSuffix: r.unit_suffix ?? undefined,
-      accentTone: r.accent_tone,
-    }));
+    return this.widgetsStore.listDashboardWidgets(librarySlug);
   }
 
   listAllDashboardWidgets(): SavedDashboardWidget[] {
-    const rows = this.driver.getAllSync<{
-      id: string;
-      library_slug: string | null;
-      title: string;
-      subtitle: string | null;
-      chart_type: DashboardWidget['chartType'];
-      readonly_sql: string;
-      x_key: string | null;
-      y_key: string;
-      unit_prefix: string | null;
-      unit_suffix: string | null;
-      accent_tone: AccentTone;
-      pinned_overview: number;
-      sort_order: number;
-    }>('SELECT * FROM dashboard_widgets ORDER BY sort_order ASC, created_at ASC');
-
-    return rows.map((r) => ({
-      id: r.id,
-      librarySlug: r.library_slug ?? null,
-      title: r.title,
-      subtitle: r.subtitle ?? undefined,
-      chartType: r.chart_type,
-      readonlySql: r.readonly_sql,
-      xKey: r.x_key ?? undefined,
-      yKey: r.y_key,
-      unitPrefix: r.unit_prefix ?? undefined,
-      unitSuffix: r.unit_suffix ?? undefined,
-      accentTone: r.accent_tone,
-      pinnedOverview: r.pinned_overview !== 0,
-      sortOrder: Number(r.sort_order ?? 0),
-    }));
+    return this.widgetsStore.listAllDashboardWidgets();
   }
 
   listWidgetsForLibrary(slug: string): SavedDashboardWidget[] {
-    const all = this.listAllDashboardWidgets();
-    return all.filter(
-      (w) => w.librarySlug === slug || sqlReferencesLibraryView(w.readonlySql, slug)
-    );
-  }
-
-  private saveDashboardWidgetInternal(
-    w: DashboardWidget,
-    librarySlug: string | null = null,
-    sortOrder?: number,
-    pinnedOverview = true
-  ): string {
-    const id = w.id || createId('wdg');
-    let order = sortOrder;
-    if (order === undefined) {
-      const maxRow = this.driver.getFirstSync<{ max_order: number | null }>(
-        'SELECT MAX(sort_order) AS max_order FROM dashboard_widgets'
-      );
-      order = (maxRow?.max_order ?? -1) + 1;
-    }
-    this.driver.runSync(
-      `INSERT OR REPLACE INTO dashboard_widgets
-       (id, library_slug, title, subtitle, chart_type, readonly_sql, x_key, y_key, unit_prefix, unit_suffix, accent_tone, pinned_overview, sort_order, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        id,
-        librarySlug,
-        w.title,
-        w.subtitle ?? null,
-        w.chartType,
-        w.readonlySql,
-        w.xKey ?? null,
-        w.yKey,
-        w.unitPrefix ?? null,
-        w.unitSuffix ?? null,
-        w.accentTone ?? 'teal',
-        pinnedOverview ? 1 : 0,
-        order,
-        Date.now(),
-      ]
-    );
-    // 图表落盘后，自动为相关记录本在 library_views 表中按需点亮「统计」视图
-    const allLibSlugs = this.driver.getAllSync<{ slug: string }>('SELECT slug FROM libraries');
-    for (const row of allLibSlugs) {
-      if (row.slug === librarySlug || sqlReferencesLibraryView(w.readonlySql, row.slug)) {
-        this.ensureStatsViewForLibraryInternal(row.slug);
-      }
-    }
-    return id;
+    return this.widgetsStore.listWidgetsForLibrary(slug);
   }
 
   saveDashboardWidget(w: DashboardWidget, librarySlug: string | null = null): void {
-    // 落盘前先在只读沙盒预执行校验一次 SQL 合法性
     this.driver.queryReadOnlySync(w.readonlySql);
-    this.saveDashboardWidgetInternal(w, librarySlug);
+    this.driver.withTransactionSync(() => {
+      this.widgetsStore.saveDashboardWidgetInternal(w, librarySlug);
+    });
     this.notify();
   }
 
   setWidgetPinnedOverview(widgetId: string, pinned: boolean): void {
-    this.driver.runSync('UPDATE dashboard_widgets SET pinned_overview = ? WHERE id = ?', [
-      pinned ? 1 : 0,
-      widgetId,
-    ]);
+    this.widgetsStore.setWidgetPinnedOverviewInternal(widgetId, pinned);
     this.notify();
   }
 
-  moveDashboardWidget(
-    widgetId: string,
-    direction: 'up' | 'down',
-    scopeIds: string[]
-  ): void {
-    const scopeIdx = scopeIds.indexOf(widgetId);
-    if (scopeIdx < 0) return;
-    const neighborIdx = direction === 'up' ? scopeIdx - 1 : scopeIdx + 1;
-    if (neighborIdx < 0 || neighborIdx >= scopeIds.length) return;
-
-    const neighborId = scopeIds[neighborIdx];
-    const allIds = this.listAllDashboardWidgets().map((w) => w.id);
-    const fromGlobal = allIds.indexOf(widgetId);
-    const toGlobal = allIds.indexOf(neighborId);
-    if (fromGlobal < 0 || toGlobal < 0) return;
-
-    const nextIds = [...allIds];
-    nextIds.splice(fromGlobal, 1);
-    const insertAt = nextIds.indexOf(neighborId);
-    if (insertAt < 0) return;
-    nextIds.splice(direction === 'up' ? insertAt : insertAt + 1, 0, widgetId);
-
-    this.driver.withTransactionSync(() => {
-      nextIds.forEach((id, idx) => {
-        this.driver.runSync('UPDATE dashboard_widgets SET sort_order = ? WHERE id = ?', [idx, id]);
-      });
-    });
-    this.notify();
+  moveDashboardWidget(widgetId: string, direction: 'up' | 'down', scopeIds: string[]): void {
+    if (this.widgetsStore.moveDashboardWidgetInternal(widgetId, direction, scopeIds)) {
+      this.notify();
+    }
   }
 
   deleteDashboardWidget(widgetId: string): void {
-    this.driver.runSync('DELETE FROM dashboard_widgets WHERE id = ?', [widgetId]);
+    this.widgetsStore.deleteDashboardWidgetInternal(widgetId);
     this.notify();
   }
 
@@ -2241,681 +442,64 @@ export class OmniRepository {
     return this.driver.queryReadOnlySync(sql);
   }
 
-  /**
-   * 对比 AI 建筑师方案与当前存量库结构，检测可能导致旧数据不可见或校验失败的字段变更
-   */
+  // ==================== Architect 演进、增量撤销与全量备份 ====================
+
   analyzeArchitectPlanDiff(plan: ArchitectPlan): ArchitectLibraryDiff[] {
-    const diffs: ArchitectLibraryDiff[] = [];
-
-    for (const bp of plan.libraries) {
-      const existing = this.getLibraryBySlug(bp.slug);
-      if (!existing) continue;
-
-      const nextByKey = new Map(bp.fields.map((f) => [f.key, f]));
-      const removedFields: ArchitectLibraryDiff['removedFields'] = [];
-      const typeChangedFields: ArchitectFieldTypeChange[] = [];
-      const newlyRequiredFields: ArchitectLibraryDiff['newlyRequiredFields'] = [];
-
-      for (const oldField of existing.fields) {
-        const nextField = nextByKey.get(oldField.key);
-        if (!nextField) {
-          // rollup / formula 无物理存储值，删除不会丢原始数据
-          if (oldField.type !== 'rollup' && oldField.type !== 'formula') {
-            removedFields.push({
-              key: oldField.key,
-              label: oldField.label,
-              type: oldField.type,
-            });
-          }
-          continue;
-        }
-        if (oldField.type !== nextField.type) {
-          typeChangedFields.push({
-            key: oldField.key,
-            label: oldField.label,
-            fromType: oldField.type,
-            toType: nextField.type,
-          });
-        }
-        if (!oldField.required && nextField.required) {
-          newlyRequiredFields.push({ key: oldField.key, label: nextField.label });
-        }
-      }
-
-      const hasIncompatibleTypeChange = typeChangedFields.some(
-        (c) => !isCompatibleFieldTypeChange(c.fromType, c.toType)
-      );
-      const hasDestructiveChanges =
-        existing.entryCount > 0 && (removedFields.length > 0 || hasIncompatibleTypeChange);
-
-      if (
-        removedFields.length > 0 ||
-        typeChangedFields.length > 0 ||
-        newlyRequiredFields.length > 0
-      ) {
-        diffs.push({
-          slug: existing.slug,
-          name: existing.name,
-          entryCount: existing.entryCount,
-          removedFields,
-          typeChangedFields,
-          newlyRequiredFields,
-          hasDestructiveChanges,
-        });
-      }
-    }
-
-    return diffs;
+    return this.snapshotsStore.analyzeArchitectPlanDiff(plan);
   }
 
-  /**
-   * AI 建筑师方案应用（自动保存增量回滚快照 + 创建/更新多表 + 创建看板组件）
-   */
   applyArchitectPlan(
     plan: ArchitectPlan,
     options?: { allowDestructiveFieldChanges?: boolean }
   ): string {
-    const diffs = this.analyzeArchitectPlanDiff(plan);
-    const destructive = diffs.filter((d) => d.hasDestructiveChanges);
-    if (destructive.length > 0 && !options?.allowDestructiveFieldChanges) {
-      const details = destructive
-        .map((d) => {
-          const msgs: string[] = [];
-          if (d.removedFields.length > 0) {
-            msgs.push(`移除字段: ${d.removedFields.map((f) => f.label).join('、')}`);
-          }
-          if (d.typeChangedFields.length > 0) {
-            msgs.push(
-              `变更类型: ${d.typeChangedFields
-                .map((f) => `${f.label}(${f.fromType}->${f.toType})`)
-                .join('、')}`
-            );
-          }
-          return `「${d.name}」(${d.entryCount} 条记录，${msgs.join('；')})`;
-        })
-        .join('；');
-      throw new Error(`方案包含破坏性字段变更，可能导致旧数据无法显示或保存：${details}`);
-    }
-
-    const createdLibrarySlugs: string[] = [];
-    const previousLibraries: Array<Record<string, unknown>> = [];
-    const previousLibraryViews: Array<Record<string, unknown>> = [];
-    let snapshotId = '';
-
-    // 先提交表结构与视图变更，再使用独立只读连接校验并保存看板图表
-    this.driver.withTransactionSync(() => {
-      for (const bp of plan.libraries) {
-        const existingRaw = this.driver.getFirstSync<Record<string, unknown>>(
-          'SELECT * FROM libraries WHERE slug = ?',
-          [bp.slug]
-        );
-        if (existingRaw) {
-          previousLibraries.push(existingRaw);
-          const prevViews = this.driver.getAllSync<Record<string, unknown>>(
-            'SELECT * FROM library_views WHERE library_id = ? ORDER BY sort_order ASC',
-            [String(existingRaw.id)]
-          );
-          previousLibraryViews.push(...prevViews);
-        } else {
-          createdLibrarySlugs.push(bp.slug);
-        }
-      }
-
-      snapshotId = this.saveSnapshotInternal(plan.summary || '更新记录本与样式', {
-        kind: 'architect_plan',
-        createdLibrarySlugs,
-        previousLibraries,
-        previousLibraryViews,
-        createdWidgetIds: [],
-      });
-
-      plan.libraries.forEach((bp) => {
-        this.upsertLibraryInternal(bp);
-      });
-    });
-
-    const createdWidgetIds: string[] = [];
-    if (plan.dashboardWidgets.length > 0) {
-      plan.dashboardWidgets.forEach((w, idx) => {
-        try {
-          this.driver.queryReadOnlySync(w.readonlySql);
-          const wid = this.saveDashboardWidgetInternal(w, null, 50 + idx);
-          createdWidgetIds.push(wid);
-        } catch {
-          // 跳过语法有误的可选图表，不阻塞主模型创建
-        }
-      });
-    }
-
-    if (createdWidgetIds.length > 0 && snapshotId) {
-      this.driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
-        JSON.stringify({
-          kind: 'architect_plan',
-          createdLibrarySlugs,
-          previousLibraries,
-          previousLibraryViews,
-          createdWidgetIds,
-        } satisfies SnapshotPayload),
-        snapshotId,
-      ]);
-    }
-
+    const snapshotId = this.snapshotsStore.applyArchitectPlanInternal(plan, options);
     this.notify();
     return snapshotId;
   }
 
-  private saveSnapshotInternal(summary: string, payload: SnapshotPayload): string {
-    const id = createId('snap');
-    this.driver.runSync(
-      `INSERT INTO ai_snapshots (id, action_summary, snapshot_json, undone, created_at)
-       VALUES (?, ?, ?, 0, ?)`,
-      [id, summary, JSON.stringify(payload), Date.now()]
-    );
-    // 严格保留最近 MAX_AI_SNAPSHOTS 条，防止快照无限膨胀
-    this.driver.runSync(
-      `DELETE FROM ai_snapshots
-       WHERE id NOT IN (
-         SELECT id FROM ai_snapshots ORDER BY created_at DESC LIMIT ?
-       )`,
-      [MAX_AI_SNAPSHOTS]
-    );
-    return id;
-  }
-
   listSnapshots(): AiSnapshotItem[] {
-    const rows = this.driver.getAllSync<{
-      id: string;
-      action_summary: string;
-      undone: number;
-      created_at: number;
-    }>(
-      'SELECT id, action_summary, undone, created_at FROM ai_snapshots ORDER BY created_at DESC LIMIT ?',
-      [MAX_AI_SNAPSHOTS]
-    );
-
-    return rows.map((r) => ({
-      id: r.id,
-      actionSummary: r.action_summary,
-      undone: Boolean(r.undone),
-      createdAt: r.created_at,
-    }));
+    return this.snapshotsStore.listSnapshots();
   }
 
-  /**
-   * 评估撤销某条快照的影响范围，用于撤销前向用户清晰提示
-   */
   describeSnapshotUndoImpact(snapshotId: string): SnapshotUndoImpact {
-    const row = this.driver.getFirstSync<{
-      action_summary: string;
-      snapshot_json: string;
-      created_at: number;
-    }>('SELECT action_summary, snapshot_json, created_at FROM ai_snapshots WHERE id = ?', [
-      snapshotId,
-    ]);
-    if (!row) {
-      throw new Error('该操作记录不存在');
-    }
-
-    const payload = JSON.parse(row.snapshot_json) as SnapshotPayload;
-
-    if ('kind' in payload) {
-      if (payload.kind === 'entries_created') {
-        const placeholders = payload.entryIds.map(() => '?').join(', ');
-        const cntRow =
-          payload.entryIds.length > 0
-            ? this.driver.getFirstSync<{ cnt: number }>(
-                `SELECT COUNT(*) AS cnt FROM entries WHERE id IN (${placeholders})`,
-                payload.entryIds
-              )
-            : { cnt: 0 };
-        const count = Number(cntRow?.cnt ?? 0);
-        return {
-          summary: row.action_summary,
-          isFullRestore: false,
-          affectedEntriesCount: count,
-          warningText: `将删除本次添加的 ${count} 条记录，不影响其他数据。`,
-        };
-      }
-
-      if (payload.kind === 'entry_deleted') {
-        return {
-          summary: row.action_summary,
-          isFullRestore: false,
-          affectedEntriesCount: 1,
-          warningText: '将恢复被删除的这条记录及其关联关系，不影响其他数据。',
-        };
-      }
-
-      if (payload.kind === 'library_deleted') {
-        const libName = String(payload.library.name ?? '');
-        return {
-          summary: row.action_summary,
-          isFullRestore: false,
-          affectedEntriesCount: payload.entries.length,
-          warningText: `将恢复记录本「${libName}」及其 ${payload.entries.length} 条记录，不影响其他记录本。`,
-        };
-      }
-
-      if (payload.kind === 'architect_plan') {
-        let newLibEntryCount = 0;
-        for (const slug of payload.createdLibrarySlugs) {
-          const lib = this.getLibraryBySlug(slug);
-          if (lib) newLibEntryCount += lib.entryCount;
-        }
-        const warningText =
-          newLibEntryCount > 0
-            ? `将移除本次新建的记录本（含此后新增的 ${newLibEntryCount} 条记录），并还原被修改记录本的结构；其他记录本数据不受影响。`
-            : '将撤销本次记录本结构与图表变更，其他记录本及已有条目不受影响。';
-        return {
-          summary: row.action_summary,
-          isFullRestore: false,
-          affectedEntriesCount: newLibEntryCount,
-          warningText,
-        };
-      }
-    }
-
-    // 兼容历史全量快照
-    const newerRow = this.driver.getFirstSync<{ cnt: number }>(
-      'SELECT COUNT(*) AS cnt FROM entries WHERE created_at > ? OR updated_at > ?',
-      [row.created_at, row.created_at]
-    );
-    const newerCount = Number(newerRow?.cnt ?? 0);
-    return {
-      summary: row.action_summary,
-      isFullRestore: true,
-      affectedEntriesCount: newerCount,
-      warningText:
-        newerCount > 0
-          ? `此历史快照会恢复整个数据库，将丢失此后新增或修改的 ${newerCount} 条记录。`
-          : '此历史快照会恢复整个数据库到操作前的状态。',
-    };
+    return this.snapshotsStore.describeSnapshotUndoImpact(snapshotId);
   }
 
   undoSnapshot(snapshotId: string): void {
-    const row = this.driver.getFirstSync<{ snapshot_json: string; undone: number }>(
-      'SELECT snapshot_json, undone FROM ai_snapshots WHERE id = ?',
-      [snapshotId]
-    );
-    if (!row || row.undone) {
-      throw new Error('该快照不存在或已撤销');
-    }
-
-    const payload = JSON.parse(row.snapshot_json) as SnapshotPayload;
-
     this.driver.withTransactionSync(() => {
-      if ('kind' in payload) {
-        if (payload.kind === 'entries_created') {
-          for (const entryId of payload.entryIds) {
-            this.driver.runSync('DELETE FROM entries WHERE id = ?', [entryId]);
-          }
-        } else if (payload.kind === 'entry_deleted') {
-          const e = payload.entry;
-          const libExists = this.driver.getFirstSync<{ id: string }>(
-            'SELECT id FROM libraries WHERE id = ?',
-            [String(e.library_id)]
-          );
-          if (!libExists) {
-            throw new Error('所属记录本已被删除，请先撤销删除记录本的操作');
-          }
-          this.insertRawEntry(e);
-          if (payload.detachedSources) {
-            for (const src of payload.detachedSources) {
-              const srcExists = this.driver.getFirstSync<{ id: string }>(
-                'SELECT id FROM entries WHERE id = ?',
-                [src.id]
-              );
-              if (srcExists) {
-                this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
-                  src.prevDataJson,
-                  src.id,
-                ]);
-              }
-            }
-          }
-          this.insertRawRelationsSafe(payload.relations);
-        } else if (payload.kind === 'library_deleted') {
-          const l = payload.library;
-          const conflict = this.driver.getFirstSync<{ id: string }>(
-            'SELECT id FROM libraries WHERE id = ? OR slug = ?',
-            [String(l.id), String(l.slug)]
-          );
-          if (conflict) {
-            throw new Error(`已存在同标识记录本（${String(l.slug)}），无法直接撤销`);
-          }
-          this.insertRawLibrary(l);
-          const fields = JSON.parse(String(l.fields_json)) as FieldDef[];
-          compileLibrarySqlView(this.driver, String(l.id), String(l.slug), fields);
-          if (payload.libraryViews && payload.libraryViews.length > 0) {
-            for (const lv of payload.libraryViews) {
-              this.insertRawLibraryView(lv);
-            }
-          } else {
-            this.syncLibraryViewsFromBlueprintInternal(
-              String(l.id),
-              JSON.parse(String(l.views_json)) as LibraryLayoutBundle,
-              true
-            );
-          }
-          for (const e of payload.entries) {
-            this.insertRawEntry(e);
-          }
-          this.insertRawRelationsSafe(payload.relations);
-          for (const w of payload.widgets) {
-            this.insertRawWidget(w);
-          }
-          if (payload.detachedChildLibraries) {
-            for (const child of payload.detachedChildLibraries) {
-              this.driver.runSync(
-                'UPDATE libraries SET parent_slug = ?, show_on_home = ? WHERE id = ?',
-                [child.parent_slug ?? null, Number(child.show_on_home ?? 0), child.id]
-              );
-            }
-          }
-          this.syncAllLibraryRelationsInternal();
-        } else if (payload.kind === 'architect_plan') {
-          for (const slug of payload.createdLibrarySlugs) {
-            dropLibrarySqlView(this.driver, slug);
-            const allRawWidgets = this.driver.getAllSync<{ id: string; library_slug: string | null; readonly_sql: string }>(
-              'SELECT id, library_slug, readonly_sql FROM dashboard_widgets'
-            );
-            for (const w of allRawWidgets) {
-              if (w.library_slug === slug || sqlReferencesLibraryView(w.readonly_sql, slug)) {
-                this.driver.runSync('DELETE FROM dashboard_widgets WHERE id = ?', [w.id]);
-              }
-            }
-            this.driver.runSync('DELETE FROM libraries WHERE slug = ?', [slug]);
-          }
-
-          for (const prev of payload.previousLibraries) {
-            const exists = this.driver.getFirstSync<{ id: string }>(
-              'SELECT id FROM libraries WHERE id = ?',
-              [String(prev.id)]
-            );
-            const prevParentSlug = prev.parent_slug ? String(prev.parent_slug) : null;
-            const prevShowOnHome =
-              prev.show_on_home === undefined ? (prevParentSlug ? 0 : 1) : Number(prev.show_on_home);
-            if (exists) {
-              this.driver.runSync(
-                `UPDATE libraries
-                 SET name = ?, description = ?, icon = ?, color = ?, parent_slug = ?, show_on_home = ?, fields_json = ?, views_json = ?, updated_at = ?
-                 WHERE id = ?`,
-                [
-                  String(prev.name),
-                  String(prev.description ?? ''),
-                  String(prev.icon ?? '📦'),
-                  String(prev.color ?? 'teal'),
-                  prevParentSlug,
-                  prevShowOnHome,
-                  String(prev.fields_json),
-                  String(prev.views_json),
-                  Number(prev.updated_at ?? Date.now()),
-                  String(prev.id),
-                ]
-              );
-            } else {
-              this.insertRawLibrary(prev);
-            }
-            const fields = JSON.parse(String(prev.fields_json)) as FieldDef[];
-            compileLibrarySqlView(this.driver, String(prev.id), String(prev.slug), fields);
-            const prevLibId = String(prev.id);
-            const savedPrevViews = (payload.previousLibraryViews ?? []).filter(
-              (v) => String(v.library_id) === prevLibId
-            );
-            if (savedPrevViews.length > 0) {
-              this.driver.runSync('DELETE FROM library_views WHERE library_id = ?', [prevLibId]);
-              for (const lv of savedPrevViews) {
-                this.insertRawLibraryView(lv);
-              }
-            } else {
-              this.syncLibraryViewsFromBlueprintInternal(
-                prevLibId,
-                JSON.parse(String(prev.views_json)) as LibraryLayoutBundle,
-                !exists
-              );
-            }
-          }
-
-          for (const wid of payload.createdWidgetIds) {
-            this.driver.runSync('DELETE FROM dashboard_widgets WHERE id = ?', [wid]);
-          }
-          this.syncAllLibraryRelationsInternal();
-        }
-      } else {
-        // 兼容旧版全量备份快照
-        this.importBackupBundleInternal(payload);
-      }
-
-      this.driver.runSync('UPDATE ai_snapshots SET undone = 1 WHERE id = ?', [snapshotId]);
+      this.snapshotsStore.undoSnapshotInternal(snapshotId);
     });
-
     this.notify();
   }
 
-  private insertRawLibrary(l: Record<string, unknown>): void {
-    const parentSlug = l.parent_slug ? String(l.parent_slug) : null;
-    const showOnHome =
-      l.show_on_home === undefined ? (parentSlug ? 0 : 1) : Number(l.show_on_home);
-    this.driver.runSync(
-      `INSERT INTO libraries (id, slug, name, description, icon, color, parent_slug, show_on_home, fields_json, views_json, sort_order, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        String(l.id),
-        String(l.slug),
-        String(l.name),
-        String(l.description ?? ''),
-        String(l.icon ?? '📦'),
-        String(l.color ?? 'teal'),
-        parentSlug,
-        showOnHome,
-        String(l.fields_json),
-        String(l.views_json),
-        Number(l.sort_order ?? 0),
-        Number(l.created_at ?? Date.now()),
-        Number(l.updated_at ?? Date.now()),
-      ]
-    );
-  }
-
-  private insertRawEntry(e: Record<string, unknown>): void {
-    this.driver.runSync(
-      `INSERT OR REPLACE INTO entries (id, library_id, title_summary, search_text, data_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [
-        String(e.id),
-        String(e.library_id),
-        String(e.title_summary ?? ''),
-        String(e.search_text ?? ''),
-        String(e.data_json),
-        Number(e.created_at ?? Date.now()),
-        Number(e.updated_at ?? Date.now()),
-      ]
-    );
-  }
-
-  private insertRawRelationsSafe(relations: Array<Record<string, unknown>>): void {
-    for (const r of relations) {
-      const srcExists = this.driver.getFirstSync<{ id: string }>(
-        'SELECT id FROM entries WHERE id = ?',
-        [String(r.source_entry_id)]
-      );
-      const tgtExists = this.driver.getFirstSync<{ id: string }>(
-        'SELECT id FROM entries WHERE id = ?',
-        [String(r.target_entry_id)]
-      );
-      if (!srcExists || !tgtExists) continue;
-      this.driver.runSync(
-        `INSERT OR IGNORE INTO entry_relations (id, source_entry_id, target_entry_id, source_library_id, field_key, sort_order)
-          VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          String(r.id),
-          String(r.source_entry_id),
-          String(r.target_entry_id),
-          String(r.source_library_id),
-          String(r.field_key),
-          Number(r.sort_order ?? 0),
-        ]
-      );
-    }
-  }
-
-  private insertRawWidget(w: Record<string, unknown>): void {
-    this.driver.runSync(
-      `INSERT OR REPLACE INTO dashboard_widgets (id, library_slug, title, subtitle, chart_type, readonly_sql, x_key, y_key, unit_prefix, unit_suffix, accent_tone, pinned_overview, sort_order, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        String(w.id),
-        w.library_slug ? String(w.library_slug) : null,
-        String(w.title),
-        w.subtitle ? String(w.subtitle) : null,
-        String(w.chart_type),
-        String(w.readonly_sql),
-        w.x_key ? String(w.x_key) : null,
-        String(w.y_key),
-        w.unit_prefix ? String(w.unit_prefix) : null,
-        w.unit_suffix ? String(w.unit_suffix) : null,
-        String(w.accent_tone ?? 'teal'),
-        w.pinned_overview === undefined ? 1 : Number(w.pinned_overview),
-        Number(w.sort_order ?? 0),
-        Number(w.created_at ?? Date.now()),
-      ]
-    );
-  }
-
-  private insertRawLibraryView(lv: Record<string, unknown>): void {
-    this.driver.runSync(
-      `INSERT OR REPLACE INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        String(lv.id),
-        String(lv.library_id),
-        String(lv.name ?? '列表'),
-        String(lv.view_type ?? 'card'),
-        String(lv.config_json ?? '{}'),
-        Number(lv.sort_order ?? 0),
-        Number(lv.is_default ?? 0),
-        Number(lv.created_at ?? Date.now()),
-        Number(lv.updated_at ?? Date.now()),
-      ]
-    );
-  }
-
-  /**
-   * 导出/导入完整纯单机离线快照包（含独立的 library_views 与 library_relations 表）
-   */
   exportBackupBundle(): FullBackupBundle {
-    return {
-      version: 2,
-      exportedAt: new Date().toISOString(),
-      libraries: this.driver.getAllSync('SELECT * FROM libraries ORDER BY sort_order ASC'),
-      libraryViews: this.driver.getAllSync(
-        'SELECT * FROM library_views ORDER BY library_id ASC, sort_order ASC'
-      ),
-      libraryRelations: this.driver.getAllSync(
-        'SELECT * FROM library_relations ORDER BY created_at ASC'
-      ),
-      entries: this.driver.getAllSync('SELECT * FROM entries ORDER BY created_at ASC'),
-      relations: this.driver.getAllSync('SELECT * FROM entry_relations'),
-      widgets: this.driver.getAllSync('SELECT * FROM dashboard_widgets ORDER BY sort_order ASC'),
-    };
-  }
-
-  private importBackupBundleInternal(bundle: FullBackupBundle): void {
-    const oldLibs = this.driver.getAllSync<{ slug: string }>('SELECT slug FROM libraries');
-    for (const l of oldLibs) {
-      dropLibrarySqlView(this.driver, l.slug);
-    }
-
-    this.driver.execSync('DELETE FROM entry_relations;');
-    this.driver.execSync('DELETE FROM entries;');
-    this.driver.execSync('DELETE FROM library_views;');
-    this.driver.execSync('DELETE FROM library_relations;');
-    this.driver.execSync('DELETE FROM dashboard_widgets;');
-    this.driver.execSync('DELETE FROM libraries;');
-
-    for (const l of bundle.libraries) {
-      this.insertRawLibrary(l);
-    }
-
-    if (bundle.libraryViews && bundle.libraryViews.length > 0) {
-      for (const lv of bundle.libraryViews) {
-        this.insertRawLibraryView(lv);
-      }
-    } else {
-      // 兼容旧版 v1 备份：自动由 views_json 生成 library_views 行
-      for (const l of bundle.libraries) {
-        try {
-          this.syncLibraryViewsFromBlueprintInternal(
-            String(l.id),
-            JSON.parse(String(l.views_json)) as LibraryLayoutBundle,
-            true
-          );
-        } catch {
-          // ignore malformed legacy views_json
-        }
-      }
-    }
-
-    for (const e of bundle.entries) {
-      this.insertRawEntry(e);
-    }
-
-    for (const r of bundle.relations) {
-      this.driver.runSync(
-        `INSERT INTO entry_relations (id, source_entry_id, target_entry_id, source_library_id, field_key, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          String(r.id),
-          String(r.source_entry_id),
-          String(r.target_entry_id),
-          String(r.source_library_id),
-          String(r.field_key),
-          Number(r.sort_order ?? 0),
-        ]
-      );
-    }
-
-    for (const w of bundle.widgets) {
-      this.insertRawWidget(w);
-    }
-
-    // 兼容旧版 v1 备份时若没有自带 stats 视图，则根据导入的图表补齐
-    if (!bundle.libraryViews || bundle.libraryViews.length === 0) {
-      for (const l of bundle.libraries) {
-        const slug = String(l.slug);
-        const hasWidget = bundle.widgets.some(
-          (w) =>
-            w.library_slug === slug ||
-            sqlReferencesLibraryView(String(w.readonly_sql ?? ''), slug)
-        );
-        if (hasWidget) {
-          this.ensureStatsViewForLibraryInternal(slug);
-        }
-      }
-    }
-
-    this.syncAllLibraryRelationsInternal();
-    this.ensureViewsCompiled();
+    return exportBackupBundleFromDriver(this.driver);
   }
 
   importBackupBundle(bundle: FullBackupBundle, shouldNotify = true): void {
     this.driver.withTransactionSync(() => {
-      this.importBackupBundleInternal(bundle);
+      importBackupBundleInternal(
+        this.driver,
+        this.librariesStore,
+        this.entriesStore,
+        this.widgetsStore,
+        bundle
+      );
     });
 
     if (shouldNotify) {
       this.notify();
     } else {
-      this.invalidateLibrariesCache();
+      this.librariesStore.invalidateCache();
     }
   }
 
   /**
-   * 构造发往 deepseek-flash 的精简上下文目录（含各库最近 30 条记录 ID 供外键消歧）
+   * 导出结构化库目录（纯数据，不含 Prompt 拼接，供 AI 层按需组装上下文）
    */
-  getAiCatalogPrompt(includeEntryCandidates = false): string {
+  getLibraryCatalogItems(includeEntryCandidates = false): LibraryCatalogItem[] {
     const libs = this.listLibraries();
-    const items: LibraryCatalogItem[] = libs.map((l) => {
+    return libs.map((l) => {
       const recentEntries = includeEntryCandidates
         ? this.driver
             .getAllSync<{ id: string; title_summary: string }>(
@@ -2936,21 +520,5 @@ export class OmniRepository {
         recentEntries,
       };
     });
-
-    return buildDatabaseCatalogPrompt(items);
-  }
-
-  /**
-   * 列表选择关联目标候选集
-   */
-  listRelationCandidates(targetLibrarySlug: string): Array<{ id: string; title: string }> {
-    const lib = this.getLibraryBySlug(targetLibrarySlug);
-    if (!lib) return [];
-    return this.driver
-      .getAllSync<{ id: string; title_summary: string }>(
-        'SELECT id, title_summary FROM entries WHERE library_id = ? ORDER BY updated_at DESC LIMIT 200',
-        [lib.id]
-      )
-      .map((r) => ({ id: r.id, title: r.title_summary }));
   }
 }

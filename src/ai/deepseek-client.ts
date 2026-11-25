@@ -1,5 +1,6 @@
-import type { z } from 'zod';
 import { getAiPreferences, getDeepSeekApiKey, type ReasoningEffort } from './settings-store';
+
+export { parseAndValidateAiJson } from './schemas';
 
 export type ChatContentBlock =
   | { type: 'text'; text: string }
@@ -45,6 +46,8 @@ export interface ChatRequestOptions {
   jsonMode?: boolean;
   tools?: Array<FunctionToolDef | ServerToolDef>;
   maxTokens?: number;
+  signal?: AbortSignal;
+  timeoutMs?: number;
 }
 
 export interface ChatCompletionChoiceMessage {
@@ -61,6 +64,48 @@ export interface DeepSeekUsage {
   prompt_cache_miss_tokens?: number;
 }
 
+export function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as { name?: string };
+  return e.name === 'AbortError';
+}
+
+function createRequestAbortHandle(externalSignal?: AbortSignal, timeoutMs = 60_000) {
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const onExternalAbort = () => {
+    controller.abort(externalSignal?.reason);
+  };
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort(externalSignal.reason);
+    } else {
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+    }
+  }
+
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true;
+          controller.abort();
+        }, timeoutMs)
+      : null;
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      if (timer) clearTimeout(timer);
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      }
+    },
+  };
+}
+
 async function resolveAuthAndEndpoint() {
   const apiKey = await getDeepSeekApiKey();
   if (!apiKey) {
@@ -72,7 +117,7 @@ async function resolveAuthAndEndpoint() {
 }
 
 /**
- * 调用 DeepSeek V4.1 (deepseek-flash) Chat Completions 接口
+ * 调用 DeepSeek V4.1 (deepseek-flash) Chat Completions 接口，支持外部 AbortSignal 与超时保护
  */
 export async function callDeepSeekChat(options: ChatRequestOptions): Promise<{
   message: ChatCompletionChoiceMessage;
@@ -104,16 +149,31 @@ export async function callDeepSeekChat(options: ChatRequestOptions): Promise<{
     body.max_tokens = options.maxTokens;
   }
 
-  const res = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  const timeoutMs = options.timeoutMs ?? (options.thinking ? 90_000 : 45_000);
+  const abortHandle = createRequestAbortHandle(options.signal, timeoutMs);
 
-  const text = await res.text();
+  let res: Response;
+  let text: string;
+  try {
+    res = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+      signal: abortHandle.signal,
+    });
+    text = await res.text();
+  } catch (err) {
+    if (abortHandle.didTimeout()) {
+      throw new Error('请求超时，请检查网络或稍后重试');
+    }
+    throw err;
+  } finally {
+    abortHandle.cleanup();
+  }
+
   let json: Record<string, unknown>;
   try {
     json = JSON.parse(text);
@@ -147,6 +207,7 @@ export async function runDeepSeekToolLoop(params: {
   tools: FunctionToolDef[];
   reasoningEffort?: ReasoningEffort;
   maxIterations?: number;
+  signal?: AbortSignal;
   executeTool: (name: string, args: Record<string, unknown>) => Promise<string> | string;
   onProgress?: (statusText: string) => void;
 }): Promise<{ finalContent: string; lastReasoning: string }> {
@@ -160,13 +221,13 @@ export async function runDeepSeekToolLoop(params: {
       thinking: true,
       reasoningEffort: params.reasoningEffort ?? 'high',
       tools: params.tools,
+      signal: params.signal,
     });
 
     if (message.reasoning_content) {
       lastReasoning = message.reasoning_content;
     }
 
-    // 关键：将包含 reasoning_content 与 tool_calls 的 assistant 消息原样入栈
     messages.push({
       role: 'assistant',
       content: message.content ?? '',
@@ -182,6 +243,11 @@ export async function runDeepSeekToolLoop(params: {
     }
 
     for (const tc of message.tool_calls) {
+      if (params.signal?.aborted) {
+        const abortErr = new Error('已取消请求');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
       params.onProgress?.('正在统计本地数据...');
       let parsedArgs: Record<string, unknown> = {};
       try {
@@ -202,12 +268,13 @@ export async function runDeepSeekToolLoop(params: {
 }
 
 /**
- * 利用 DeepSeek 2026.11 全家桶服务端联网/读链接工具预提取网页或实体背景资料
- * 注意：官方规范要求 deepseek_web_search / deepseek_read_url 不可与自定义 function tools 或 json_object 同请求混用
+ * 利用 DeepSeek 服务端联网/读链接工具预提取网页或实体背景资料
+ * 注意：deepseek_web_search / deepseek_read_url 不可与自定义 function tools 或 json_object 同请求混用
  */
 export async function enrichTextWithDeepSeekWeb(
   userText: string,
-  allowSearch: boolean
+  allowSearch: boolean,
+  signal?: AbortSignal
 ): Promise<string | null> {
   const hasUrl = /https?:\/\/[^\s]+/i.test(userText);
   if (!hasUrl && !allowSearch) return null;
@@ -221,6 +288,8 @@ export async function enrichTextWithDeepSeekWeb(
     const { message } = await callDeepSeekChat({
       thinking: false,
       tools,
+      signal,
+      timeoutMs: 35_000,
       messages: [
         {
           role: 'system',
@@ -231,7 +300,10 @@ export async function enrichTextWithDeepSeekWeb(
       ],
     });
     return message.content?.trim() || null;
-  } catch {
+  } catch (err) {
+    if (isAbortError(err) && signal?.aborted) {
+      throw err;
+    }
     // 联网补充失败时优雅降级，不阻塞本地录入
     return null;
   }
@@ -252,18 +324,18 @@ function inferAudioMeta(uri: string, fallbackName: string): { name: string; mime
 }
 
 /**
- * 调用 DeepSeek 全家桶官方语音识别接口 POST /v1/tools/asr
+ * 调用 DeepSeek 官方语音识别接口 POST /v1/tools/asr
  */
 export async function transcribeAudioWithDeepSeek(
   audioUriOrBlob: string | Blob,
-  filename = 'speech.wav'
+  filename = 'speech.wav',
+  signal?: AbortSignal
 ): Promise<string> {
   const { apiKey, baseUrl } = await resolveAuthAndEndpoint();
   const formData = new FormData();
 
   if (typeof audioUriOrBlob === 'string') {
     const { name, mime } = inferAudioMeta(audioUriOrBlob, filename);
-    // Expo SDK 58 WinterCG fetch 要求 FormData 文件项为 Blob 或实现 bytes() 的对象（如 expo-file-system File）
     const { File } = await import('expo-file-system');
     const localFile = new File(audioUriOrBlob);
     const audioBytes = await localFile.bytes();
@@ -276,15 +348,28 @@ export async function transcribeAudioWithDeepSeek(
     formData.append('file', audioUriOrBlob, filename);
   }
 
-  const res = await fetch(`${baseUrl}/v1/tools/asr`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: formData,
-  });
+  const abortHandle = createRequestAbortHandle(signal, 45_000);
+  let res: Response;
+  let rawText: string;
+  try {
+    res = await fetch(`${baseUrl}/v1/tools/asr`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: formData,
+      signal: abortHandle.signal,
+    });
+    rawText = await res.text();
+  } catch (err) {
+    if (abortHandle.didTimeout()) {
+      throw new Error('语音转写超时，请稍后重试');
+    }
+    throw err;
+  } finally {
+    abortHandle.cleanup();
+  }
 
-  const rawText = await res.text();
   let json: { text?: string; error?: { message?: string } } = {};
   try {
     json = JSON.parse(rawText) as { text?: string; error?: { message?: string } };
@@ -296,38 +381,4 @@ export async function transcribeAudioWithDeepSeek(
     throw new Error(json.error?.message || `语音转写失败 (HTTP ${res.status})`);
   }
   return json.text.trim();
-}
-
-/**
- * 提取 JSON 并使用 Zod v4 校验返回强类型结果
- */
-export function parseAndValidateAiJson<T>(rawText: string, schema: z.ZodType<T>): T {
-  const cleaned = rawText
-    .trim()
-    .replace(/^```(?:json)?\s*/i, '')
-    .replace(/\s*```$/i, '')
-    .trim();
-
-  let obj: unknown;
-  try {
-    obj = JSON.parse(cleaned);
-  } catch {
-    // 尝试截取最外层花括号
-    const start = cleaned.indexOf('{');
-    const end = cleaned.lastIndexOf('}');
-    if (start >= 0 && end > start) {
-      obj = JSON.parse(cleaned.slice(start, end + 1));
-    } else {
-      throw new Error(`AI 未返回合法 JSON: ${cleaned.slice(0, 120)}`);
-    }
-  }
-
-  const result = schema.safeParse(obj);
-  if (!result.success) {
-    const firstIssue = result.error.issues[0];
-    throw new Error(
-      `AI 输出结构未通过 Zod 校验 (${firstIssue?.path.join('.') || 'root'}): ${firstIssue?.message}`
-    );
-  }
-  return result.data;
 }

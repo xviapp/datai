@@ -1,51 +1,26 @@
 import Feather from '@expo/vector-icons/Feather';
 import React, { useMemo, useState } from 'react';
-import {
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View,
-} from 'react-native';
+import { Pressable, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SchemaEditorModal } from '@/components/dynamic-renderer/SchemaEditorModal';
 import { TabPageHeader } from '@/components/layout/TabPageHeader';
+import { FloatingAssistantButton } from '@/components/ui/FloatingAssistantButton';
 import { Palette, ToneMap } from '@/constants/design-tokens';
-import { useOmni } from '@/context/omni-context';
-import type { LibraryRecord } from '@/db/repository';
+import { useOmniModalActions, useRepository } from '@/context/omni-context';
+import type { LibraryRecord } from '@/db/models';
+import { formatShortRelativeTime } from '@/engine/date';
 import { useSafeNavigation } from '@/utils/navigation';
-
-function formatShortRelativeTime(ts: number): string {
-  const now = new Date();
-  const d = new Date(ts);
-  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const startOfTarget = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-  const diffDays = Math.round((startOfToday - startOfTarget) / 86400000);
-  if (diffDays <= 0) return '今天';
-  if (diffDays === 1) return '昨天';
-  if (diffDays < 7) return `${diffDays}天前`;
-  return `${d.getMonth() + 1}/${d.getDate()}`;
-}
 
 export default function HomeVaultScreen() {
   const nav = useSafeNavigation();
-  const {
-    repo,
-    libraries,
-    revision,
-    hasApiKey,
-    persistWarning,
-    dismissPersistWarning,
-    openOmniCapture,
-  } = useOmni();
+  const { repo, libraries, revision, hasApiKey, persistWarning, dismissPersistWarning } =
+    useRepository();
+  const { openOmniCapture } = useOmniModalActions();
+
   const [globalSearch, setGlobalSearch] = useState('');
   const [createModalOpen, setCreateModalOpen] = useState(false);
   const [managingLibrary, setManagingLibrary] = useState<LibraryRecord | null>(null);
 
-  const visibleLibraries = useMemo(
-    () => libraries.filter((l) => l.showOnHome),
-    [libraries]
-  );
+  const visibleLibraries = useMemo(() => libraries.filter((l) => l.showOnHome), [libraries]);
 
   const childLibsByParent = useMemo(() => {
     const map = new Map<string, LibraryRecord[]>();
@@ -86,7 +61,10 @@ export default function HomeVaultScreen() {
             {!hasApiKey ? (
               <Pressable
                 onPress={() => nav.navigate('/(tabs)/settings')}
-                style={({ pressed }) => [styles.keyStatusPill, pressed && { opacity: 0.75, transform: [{ scale: 0.96 }] }]}
+                style={({ pressed }) => [
+                  styles.keyStatusPill,
+                  pressed && { opacity: 0.75, transform: [{ scale: 0.96 }] },
+                ]}
               >
                 <View style={styles.statusDot} />
                 <Text style={styles.keyStatusText}>连接助手</Text>
@@ -95,7 +73,10 @@ export default function HomeVaultScreen() {
             <Pressable
               id="btn-new-library"
               onPress={() => setCreateModalOpen(true)}
-              style={({ pressed }) => [styles.newLibBtn, pressed && { opacity: 0.85, transform: [{ scale: 0.96 }] }]}
+              style={({ pressed }) => [
+                styles.newLibBtn,
+                pressed && { opacity: 0.85, transform: [{ scale: 0.96 }] },
+              ]}
             >
               <Feather name="plus" size={16} color={Palette.inkInverse} />
               <Text style={styles.newLibBtnText}>新建</Text>
@@ -267,7 +248,10 @@ export default function HomeVaultScreen() {
                           pressed && { opacity: 0.72 },
                         ]}
                       >
-                        <Text style={[styles.subLibChipText, { color: tone.ink }]} numberOfLines={1}>
+                        <Text
+                          style={[styles.subLibChipText, { color: tone.ink }]}
+                          numberOfLines={1}
+                        >
                           ↳ {child.icon} {child.name} · {child.entryCount}
                         </Text>
                       </Pressable>
@@ -293,19 +277,12 @@ export default function HomeVaultScreen() {
         </View>
       </ScrollView>
 
-      {/* 右下角统一悬浮主按钮（点击打开全局管家，长按直接开录音） */}
-      <Pressable
+      <FloatingAssistantButton
         id="btn-open-omni-bar"
         accessibilityLabel="随手说与智能助手"
         onPress={() => openOmniCapture(undefined, 'text', undefined, 'home')}
         onLongPress={() => openOmniCapture(undefined, 'voice', undefined, 'home')}
-        style={({ pressed }) => [
-          styles.omniFab,
-          pressed && { opacity: 0.9, transform: [{ scale: 0.94 }] },
-        ]}
-      >
-        <Feather name="message-circle" size={24} color={Palette.inkInverse} />
-      </Pressable>
+      />
 
       <SchemaEditorModal
         visible={createModalOpen || Boolean(managingLibrary)}
@@ -519,11 +496,6 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: Palette.inkPrimary,
   },
-  linkAction: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: Palette.brand,
-  },
   libGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -632,21 +604,5 @@ const styles = StyleSheet.create({
   addLibHint: {
     fontSize: 11,
     color: Palette.inkMuted,
-  },
-  omniFab: {
-    position: 'absolute',
-    right: 20,
-    bottom: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: Palette.brand,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#0F766E',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.28,
-    shadowRadius: 14,
-    elevation: 8,
   },
 });

@@ -1,23 +1,15 @@
 import Feather from '@expo/vector-icons/Feather';
 import { useFocusEffect } from 'expo-router';
-import React, { type ComponentRef, useCallback, useMemo, useRef, useState } from 'react';
-import {
-  type LayoutChangeEvent,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  useWindowDimensions,
-  View,
-} from 'react-native';
+import React, { useCallback, useMemo, useState } from 'react';
+import { Animated, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
 import { TabPageHeader } from '@/components/layout/TabPageHeader';
+import { FloatingAssistantButton } from '@/components/ui/FloatingAssistantButton';
 import { Palette, ToneMap } from '@/constants/design-tokens';
-import { useOmni } from '@/context/omni-context';
-import type { LibraryRecord, SavedDashboardWidget } from '@/db/repository';
+import { useOmniModalActions, useRepository } from '@/context/omni-context';
+import type { LibraryRecord, SavedDashboardWidget } from '@/db/models';
 import { sqlReferencesLibraryView } from '@/db/types';
+import { useSwipeablePager } from '@/hooks/useSwipeablePager';
 import { useSafeNavigation } from '@/utils/navigation';
 
 type StatsTabItem =
@@ -39,18 +31,12 @@ type StatsTabItem =
 
 export default function StatsScreen() {
   const nav = useSafeNavigation();
-  const { width: screenWidth } = useWindowDimensions();
-  const { repo, libraries, revision, openOmniCapture } = useOmni();
+  const { repo, libraries, revision } = useRepository();
+  const { openOmniCapture } = useOmniModalActions();
 
   const [isFocused, setIsFocused] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [manageMode, setManageMode] = useState(false);
-  const [pagerWidth, setPagerWidth] = useState(screenWidth);
-  const pagerRef = useRef<ComponentRef<typeof ScrollView>>(null);
-  const chipsScrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
-  const chipLayoutsRef = useRef<Record<number, { x: number; width: number }>>({});
-  const programmaticScrollRef = useRef(false);
-  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useFocusEffect(
     useCallback(() => {
@@ -77,34 +63,34 @@ export default function StatsScreen() {
     [allWidgets]
   );
 
-  // 仅对「已设计统计图表」的记录本生成分组标签
-  const libraryTabs: StatsTabItem[] = [];
-  for (const lib of libraries) {
-    const matched = allWidgets.filter(
-      (w) => w.librarySlug === lib.slug || sqlReferencesLibraryView(w.readonlySql, lib.slug)
-    );
-    if (matched.length > 0) {
-      libraryTabs.push({
-        id: lib.slug,
-        kind: 'library',
-        label: lib.name,
-        icon: lib.icon,
-        library: lib,
-        widgets: matched,
-      });
+  const tabs: StatsTabItem[] = useMemo(() => {
+    const libraryTabs: StatsTabItem[] = [];
+    for (const lib of libraries) {
+      const matched = allWidgets.filter(
+        (w) => w.librarySlug === lib.slug || sqlReferencesLibraryView(w.readonlySql, lib.slug)
+      );
+      if (matched.length > 0) {
+        libraryTabs.push({
+          id: lib.slug,
+          kind: 'library',
+          label: lib.name,
+          icon: lib.icon,
+          library: lib,
+          widgets: matched,
+        });
+      }
     }
-  }
-
-  const tabs: StatsTabItem[] = [
-    {
-      id: 'overview',
-      kind: 'overview',
-      label: '总览',
-      icon: '★',
-      widgets: overviewWidgets,
-    },
-    ...libraryTabs,
-  ];
+    return [
+      {
+        id: 'overview',
+        kind: 'overview',
+        label: '总览',
+        icon: '★',
+        widgets: overviewWidgets,
+      },
+      ...libraryTabs,
+    ];
+  }, [libraries, allWidgets, overviewWidgets]);
 
   const safeActiveIndex = Math.min(activeIndex, Math.max(0, tabs.length - 1));
   const currentTab = tabs[safeActiveIndex];
@@ -115,56 +101,20 @@ export default function StatsScreen() {
       ? (ToneMap[currentTab.library.color] ?? ToneMap.teal)
       : ToneMap.teal;
 
-  const effectiveWidth = pagerWidth > 0 ? pagerWidth : screenWidth;
-
-  const scrollChipIntoView = (idx: number) => {
-    const layout = chipLayoutsRef.current[idx];
-    if (!layout || !chipsScrollRef.current) return;
-    const targetX = Math.max(0, layout.x - effectiveWidth / 2 + layout.width / 2);
-    chipsScrollRef.current.scrollTo({ x: targetX, animated: true });
-  };
-
-  const handleSelectTab = (idx: number) => {
-    programmaticScrollRef.current = true;
-    if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
-    scrollTimerRef.current = setTimeout(() => {
-      programmaticScrollRef.current = false;
-    }, 380);
-    setActiveIndex(idx);
-    pagerRef.current?.scrollTo({ x: idx * effectiveWidth, animated: true });
-    scrollChipIntoView(idx);
-  };
-
-  const handlePagerScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    if (programmaticScrollRef.current) return;
-    const offsetX = e.nativeEvent.contentOffset.x;
-    const nextIdx = Math.round(offsetX / Math.max(1, effectiveWidth));
-    const clamped = Math.max(0, Math.min(tabs.length - 1, nextIdx));
-    if (clamped !== safeActiveIndex) {
-      setActiveIndex(clamped);
-      scrollChipIntoView(clamped);
-    }
-  };
-
-  const handlePagerMomentumEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-    programmaticScrollRef.current = false;
-    if (scrollTimerRef.current) {
-      clearTimeout(scrollTimerRef.current);
-      scrollTimerRef.current = null;
-    }
-    const offsetX = e.nativeEvent.contentOffset.x;
-    const nextIdx = Math.round(offsetX / Math.max(1, effectiveWidth));
-    const clamped = Math.max(0, Math.min(tabs.length - 1, nextIdx));
-    if (clamped !== safeActiveIndex) {
-      setActiveIndex(clamped);
-      scrollChipIntoView(clamped);
-    }
-  };
-
-  const handleChipLayout = (idx: number) => (e: LayoutChangeEvent) => {
-    const { x, width } = e.nativeEvent.layout;
-    chipLayoutsRef.current[idx] = { x, width };
-  };
+  const {
+    pagerRef,
+    chipsScrollRef,
+    effectiveWidth,
+    selectPage,
+    handlePagerLayout,
+    handlePagerMomentumEnd,
+    handleChipLayout,
+    onPagerScroll,
+  } = useSwipeablePager({
+    pageCount: tabs.length,
+    activeIndex: safeActiveIndex,
+    onIndexChange: setActiveIndex,
+  });
 
   const handleToggleOverview = (id: string, nextPinned: boolean) => {
     repo?.setWidgetPinnedOverview(id, nextPinned);
@@ -180,7 +130,6 @@ export default function StatsScreen() {
 
   return (
     <View style={styles.safeArea}>
-      {/* 顶部标题栏 */}
       <TabPageHeader
         title="统计"
         subtitle={
@@ -213,7 +162,6 @@ export default function StatsScreen() {
         }
       />
 
-      {/* 横向分组胶囊 */}
       {tabs.length > 1 ? (
         <View style={styles.chipsBarWrap}>
           <ScrollView
@@ -233,7 +181,7 @@ export default function StatsScreen() {
                 <Pressable
                   key={tab.id}
                   onLayout={handleChipLayout(idx)}
-                  onPress={() => handleSelectTab(idx)}
+                  onPress={() => selectPage(idx)}
                   style={({ pressed }) => [
                     styles.chipPill,
                     active && { backgroundColor: tone.solid, borderColor: tone.solid },
@@ -249,7 +197,10 @@ export default function StatsScreen() {
                   >
                     {tab.icon}
                   </Text>
-                  <Text style={[styles.chipLabel, active && styles.chipLabelActive]} numberOfLines={1}>
+                  <Text
+                    style={[styles.chipLabel, active && styles.chipLabelActive]}
+                    numberOfLines={1}
+                  >
                     {tab.label}
                   </Text>
                   <Text style={[styles.chipCount, active && styles.chipCountActive]}>
@@ -262,19 +213,15 @@ export default function StatsScreen() {
         </View>
       ) : null}
 
-      {/* 可左右滑动的分组内容页 */}
-      <ScrollView
+      <Animated.ScrollView
         ref={pagerRef}
         horizontal
         pagingEnabled
         nestedScrollEnabled
         scrollEnabled={tabs.length > 1}
         showsHorizontalScrollIndicator={false}
-        onLayout={(e) => {
-          const w = e.nativeEvent.layout.width;
-          if (w > 0 && Math.abs(w - pagerWidth) > 0.5) setPagerWidth(w);
-        }}
-        onScroll={handlePagerScroll}
+        onLayout={handlePagerLayout}
+        onScroll={onPagerScroll}
         onMomentumScrollEnd={handlePagerMomentumEnd}
         scrollEventThrottle={16}
         style={styles.pager}
@@ -401,12 +348,13 @@ export default function StatsScreen() {
                 </>
               )}
 
-              {/* 在总览页（排序模式或空态时）提供一键挑图加入总览 */}
               {tab.kind === 'overview' &&
               unpinnedWidgets.length > 0 &&
               (manageMode || overviewWidgets.length === 0) ? (
                 <View style={styles.pickBox}>
-                  <Text style={styles.pickHeading}>可加入总览的图表 ({unpinnedWidgets.length})</Text>
+                  <Text style={styles.pickHeading}>
+                    可加入总览的图表 ({unpinnedWidgets.length})
+                  </Text>
                   {unpinnedWidgets.map((w) => (
                     <View key={w.id} style={styles.pickRow}>
                       <View style={{ flex: 1, gap: 1 }}>
@@ -432,21 +380,16 @@ export default function StatsScreen() {
             </ScrollView>
           );
         })}
-      </ScrollView>
+      </Animated.ScrollView>
 
-      {/* 右下角数据分析师入口（自动聚焦当前总览或对应记录本） */}
-      <Pressable
+      <FloatingAssistantButton
         accessibilityLabel="问数据或定制统计"
+        icon="bar-chart-2"
+        iconSize={23}
+        backgroundColor={activeStatsTone.solid}
         onPress={() => openOmniCapture(activeStatsLibSlug, 'text', undefined, 'stats')}
         onLongPress={() => openOmniCapture(activeStatsLibSlug, 'voice', undefined, 'stats')}
-        style={({ pressed }) => [
-          styles.statsFab,
-          { backgroundColor: activeStatsTone.solid },
-          pressed && { opacity: 0.9, transform: [{ scale: 0.94 }] },
-        ]}
-      >
-        <Feather name="bar-chart-2" size={23} color={Palette.inkInverse} />
-      </Pressable>
+      />
     </View>
   );
 }
@@ -538,22 +481,6 @@ const styles = StyleSheet.create({
   pageContentNoChips: {
     paddingTop: 4,
   },
-  statsFab: {
-    position: 'absolute',
-    right: 20,
-    bottom: 20,
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: Palette.brand,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#0F766E',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.28,
-    shadowRadius: 14,
-    elevation: 8,
-  },
   kpiRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -621,11 +548,6 @@ const styles = StyleSheet.create({
     backgroundColor: '#FEF3C7',
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  emptyTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: Palette.inkPrimary,
   },
   emptyDesc: {
     fontSize: 13,

@@ -7,12 +7,12 @@ import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { initialWindowMetrics, SafeAreaProvider } from 'react-native-safe-area-context';
 import { OmniCaptureModal } from '@/components/ai/OmniCaptureModal';
 import { Palette } from '@/constants/design-tokens';
-import { OmniProvider, useOmni } from '@/context/omni-context';
+import { OmniProvider, useRepository } from '@/context/omni-context';
 
 SplashScreen.preventAutoHideAsync().catch(() => {});
 
 function AppShell() {
-  const { ready, error } = useOmni();
+  const { ready, error } = useRepository();
 
   useEffect(() => {
     if (ready || error) {

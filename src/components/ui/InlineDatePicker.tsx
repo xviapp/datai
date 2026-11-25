@@ -9,7 +9,11 @@ import {
   View,
 } from 'react-native';
 import { Palette } from '@/constants/design-tokens';
-import { formatLocalDate, formatLocalDateOffset } from '@/engine/date';
+import {
+  buildMonthCalendarCells,
+  formatLocalDate,
+  formatLocalDateOffset,
+} from '@/engine/date';
 
 interface InlineDatePickerProps {
   value: string;
@@ -57,17 +61,10 @@ export function InlineDatePicker({
     setViewMonth(next.getMonth());
   };
 
-  const dayCells = useMemo(() => {
-    const firstWeekday = new Date(viewYear, viewMonth, 1).getDay();
-    const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
-    const prefix = `${viewYear}-${String(viewMonth + 1).padStart(2, '0')}`;
-    const cells: Array<string | null> = [];
-    for (let i = 0; i < firstWeekday; i++) cells.push(null);
-    for (let d = 1; d <= daysInMonth; d++) {
-      cells.push(`${prefix}-${String(d).padStart(2, '0')}`);
-    }
-    return cells;
-  }, [viewYear, viewMonth]);
+  const dayCells = useMemo(
+    () => buildMonthCalendarCells(viewYear, viewMonth),
+    [viewYear, viewMonth]
+  );
 
   return (
     <View style={styles.wrap}>
