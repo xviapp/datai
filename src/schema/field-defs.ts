@@ -105,7 +105,7 @@ export function buildEntryPayloadValidator(fields: FieldDef[]) {
       case 'multi_select':
       case 'relation':
         validator = z.preprocess((val) => {
-          if (Array.isArray(val)) return val.map(String);
+          if (Array.isArray(val)) return val.map((item) => String(item ?? '').trim()).filter(Boolean);
           if (typeof val === 'string' && val.trim()) {
             return val
               .split(',')
@@ -113,7 +113,7 @@ export function buildEntryPayloadValidator(fields: FieldDef[]) {
               .filter(Boolean);
           }
           return [];
-        }, z.array(z.string()));
+        }, field.required && field.type === 'relation' ? z.array(z.string()).min(1, `请至少选择一项${field.label}`) : z.array(z.string()));
         break;
       case 'date':
       case 'text':

@@ -17,9 +17,15 @@ export interface LibrarySortOption {
   isDefault: boolean;
 }
 
+export interface LibraryFilterSelection {
+  fieldKey: string;
+  value: string;
+}
+
 export interface LibraryFilterAndSortResult {
   entries: HydratedEntry[];
   primaryFilterField: FieldDef | null;
+  activeFilterValue: string;
   sortOptions: LibrarySortOption[];
   activeSort: LibrarySortOption;
 }
@@ -132,7 +138,7 @@ export function getPrimaryMetricField(library: LibraryRecord): FieldDef | null {
  * 根据记录本字段与视图配置生成明确的排序选项列表：
  * - 若卡片配置了 sortFieldKey，第一项明确标示视图默认字段与方向，第二项为显式「最新更新」（按 updatedAt 降序）；
  * - 若未配置 sortFieldKey，默认即「最新更新」（按 updatedAt 降序）；
- * - 自动避免与视图默认排序字段重复的按钮。
+ * - 按「字段 + 方向」去重，避免把同字段但相反方向的排序（如有效期升序 vs 有效期降序）误删。
  */
 export function getLibrarySortOptions(
   library: LibraryRecord,
@@ -170,7 +176,10 @@ export function getLibrarySortOptions(
     });
   }
 
-  if (primaryDateField && primaryDateField.key !== defaultSortField?.key) {
+  const isSameDefaultRule = (fieldKey: string, direction: 'asc' | 'desc') =>
+    defaultSortField?.key === fieldKey && defaultSortDir === direction;
+
+  if (primaryDateField && !isSameDefaultRule(primaryDateField.key, 'desc')) {
     options.push({
       id: 'date_desc',
       label: `按${primaryDateField.label}`,
@@ -179,7 +188,7 @@ export function getLibrarySortOptions(
     });
   }
 
-  if (primaryMetricField && primaryMetricField.key !== defaultSortField?.key) {
+  if (primaryMetricField && !isSameDefaultRule(primaryMetricField.key, 'desc')) {
     options.push({
       id: 'metric_desc',
       label: `按${primaryMetricField.label}`,
@@ -188,9 +197,7 @@ export function getLibrarySortOptions(
     });
   }
 
-  const defaultIsTitleAsc =
-    defaultSortField?.key === effectiveCard.titleFieldKey && defaultSortDir === 'asc';
-  if (!defaultIsTitleAsc) {
+  if (!isSameDefaultRule(effectiveCard.titleFieldKey, 'asc')) {
     options.push({
       id: 'title_asc',
       label: '按标题',
@@ -218,25 +225,36 @@ export function resolveActiveSortOption(
 }
 
 /**
- * 统一执行记录本页面的主分类筛选与显式排序，保证按钮标签与实际列表顺序始终一一对应。
+ * 统一执行记录本页面的主分类筛选与显式排序：
+ * - 筛选值绑定 `fieldKey`，切换视图导致主筛选字段变化时自动失效，不会把旧字段选项误用到新字段；
+ * - 按钮标签与实际列表顺序由同一份排序规则派生。
  */
 export function filterAndSortLibraryEntries(params: {
   entries: readonly HydratedEntry[];
   library: LibraryRecord;
   cardConfig?: Partial<CardViewConfig>;
-  selectedFilterValue: string;
+  selectedFilter?: LibraryFilterSelection | null;
   sortMode: LibrarySortModeId;
 }): LibraryFilterAndSortResult {
-  const { entries, library, cardConfig, selectedFilterValue, sortMode } = params;
+  const { entries, library, cardConfig, selectedFilter, sortMode } = params;
   const effectiveCard = resolveEffectiveCardConfig(library, cardConfig);
   const primaryFilterField = getPrimaryFilterField(library, effectiveCard);
   const sortOptions = getLibrarySortOptions(library, effectiveCard);
   const activeSort = resolveActiveSortOption(sortOptions, sortMode);
 
+  const activeFilterValue =
+    primaryFilterField &&
+    selectedFilter &&
+    selectedFilter.fieldKey === primaryFilterField.key &&
+    selectedFilter.value &&
+    (primaryFilterField.options?.some((opt) => opt.value === selectedFilter.value) ?? true)
+      ? selectedFilter.value
+      : '';
+
   const filtered =
-    primaryFilterField && selectedFilterValue
+    primaryFilterField && activeFilterValue
       ? entries.filter(
-          (e) => String(e.computedData[primaryFilterField.key] ?? '') === selectedFilterValue
+          (e) => String(e.computedData[primaryFilterField.key] ?? '') === activeFilterValue
         )
       : [...entries];
 
@@ -285,6 +303,7 @@ export function filterAndSortLibraryEntries(params: {
   return {
     entries: copy,
     primaryFilterField,
+    activeFilterValue,
     sortOptions,
     activeSort,
   };

@@ -106,6 +106,16 @@ export class OmniRepository {
     };
   }
 
+  private runWriteTransaction<T>(fn: () => T): T {
+    try {
+      return this.driver.withTransactionSync(fn);
+    } catch (err) {
+      // 事务回滚时必须清空事务内可能已重建的库缓存（例如批量写入中前序草稿写入后读取了未提交的 entry_count）
+      this.librariesStore.invalidateCache();
+      throw err;
+    }
+  }
+
   private notify(scope: RepositoryChangeScope = 'all'): void {
     if (scope === 'data' || scope === 'all') {
       this.librariesStore.invalidateCache();
@@ -129,7 +139,7 @@ export class OmniRepository {
     }
 
     const seed = buildDefaultSeedBundle();
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       const refToEntryId = new Map<string, string>();
 
       for (let idx = 0; idx < seed.libraries.length; idx++) {
@@ -201,7 +211,7 @@ export class OmniRepository {
    * 原子创建或更新库结构；支持在同一事务内同步写入显式 viewInputs，避免双重事务与双重重绘
    */
   upsertLibrary(bp: LibraryBlueprint, viewInputs?: LibraryViewInput[]): string {
-    const id = this.driver.withTransactionSync(() =>
+    const id = this.runWriteTransaction(() =>
       this.librariesStore.upsertLibraryInternal(bp, { viewInputs })
     );
     this.notify('data');
@@ -209,7 +219,7 @@ export class OmniRepository {
   }
 
   saveLibraryViews(librarySlug: string, nextViews: LibraryViewInput[]): void {
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       this.librariesStore.saveLibraryViewsInternal(librarySlug, nextViews);
     });
     this.notify('data');
@@ -269,7 +279,7 @@ export class OmniRepository {
       [slug]
     );
 
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       if (rawLib) {
         const libId = String(rawLib.id);
         const libName = String(rawLib.name ?? slug);
@@ -334,7 +344,7 @@ export class OmniRepository {
   // ==================== 条目、关联与搜索 ====================
 
   createEntry(librarySlug: string, inputData: Record<string, unknown>): string {
-    const id = this.driver.withTransactionSync(() =>
+    const id = this.runWriteTransaction(() =>
       this.entriesStore.createEntryInternal(librarySlug, inputData)
     );
     this.notify('data');
@@ -342,7 +352,7 @@ export class OmniRepository {
   }
 
   updateEntry(entryId: string, inputData: Record<string, unknown>): void {
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       this.entriesStore.updateEntryInternal(entryId, inputData);
     });
     this.notify('data');
@@ -350,7 +360,7 @@ export class OmniRepository {
 
   deleteEntry(entryId: string): string | null {
     let snapshotId: string | null = null;
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       const deleted = this.entriesStore.deleteEntryWithDetachInternal(entryId);
       if (!deleted) return;
       const title = String(deleted.entryRow.title_summary ?? '记录');
@@ -367,7 +377,7 @@ export class OmniRepository {
 
   commitOmniDrafts(drafts: readonly CommitDraftEntryItem[], snapshotNote?: string): string[] {
     let createdIds: string[] = [];
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       createdIds = this.entriesStore.commitOmniDraftsInternal(drafts);
       if (snapshotNote && createdIds.length > 0) {
         this.snapshotsStore.saveSnapshotInternal(snapshotNote, {
@@ -382,6 +392,10 @@ export class OmniRepository {
 
   getEntryTitleMap(entryIds: string[]): Map<string, string> {
     return this.entriesStore.getEntryTitleMap(entryIds);
+  }
+
+  getEntrySummaryMap(entryIds: string[]): Map<string, { title: string; librarySlug: string }> {
+    return this.entriesStore.getEntrySummaryMap(entryIds);
   }
 
   searchEntrySummaries(query: string, limit = 30): EntrySearchHit[] {
@@ -415,8 +429,12 @@ export class OmniRepository {
     return this.entriesStore.listBacklinkGroupsForEntry(entryId, excludeLibrarySlugs);
   }
 
-  listRelationCandidates(targetLibrarySlug: string): Array<{ id: string; title: string }> {
-    return this.entriesStore.listRelationCandidates(targetLibrarySlug);
+  listRelationCandidates(
+    targetLibrarySlug: string,
+    searchQuery?: string,
+    limit = 200
+  ): Array<{ id: string; title: string }> {
+    return this.entriesStore.listRelationCandidates(targetLibrarySlug, searchQuery, limit);
   }
 
   collectReferencedImagePaths(): Set<string> {
@@ -440,7 +458,7 @@ export class OmniRepository {
   saveDashboardWidget(w: DashboardWidget, librarySlug: string | null = null): void {
     this.driver.queryReadOnlySync(w.readonlySql);
     let viewsChanged = false;
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       const saved = this.widgetsStore.saveDashboardWidgetInternal(w, librarySlug);
       viewsChanged = saved.viewsChanged;
     });
@@ -477,9 +495,14 @@ export class OmniRepository {
     plan: ArchitectPlan,
     options?: { allowDestructiveFieldChanges?: boolean }
   ): string {
-    const snapshotId = this.snapshotsStore.applyArchitectPlanInternal(plan, options);
-    this.notify();
-    return snapshotId;
+    try {
+      const snapshotId = this.snapshotsStore.applyArchitectPlanInternal(plan, options);
+      this.notify();
+      return snapshotId;
+    } catch (err) {
+      this.librariesStore.invalidateCache();
+      throw err;
+    }
   }
 
   listSnapshots(): AiSnapshotItem[] {
@@ -491,7 +514,7 @@ export class OmniRepository {
   }
 
   undoSnapshot(snapshotId: string): void {
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       this.snapshotsStore.undoSnapshotInternal(snapshotId);
     });
     this.notify();
@@ -502,7 +525,7 @@ export class OmniRepository {
   }
 
   importBackupBundle(bundle: FullBackupBundle, shouldNotify = true): void {
-    this.driver.withTransactionSync(() => {
+    this.runWriteTransaction(() => {
       importBackupBundleInternal(
         this.driver,
         this.librariesStore,

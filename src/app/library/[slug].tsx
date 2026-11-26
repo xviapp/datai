@@ -34,6 +34,7 @@ import { useOmniModalActions, useRepository, useWidgetRevision } from '@/context
 import type { HydratedEntry, LibraryViewRecord } from '@/db/models';
 import {
   filterAndSortLibraryEntries,
+  type LibraryFilterSelection,
   type LibrarySortModeId,
 } from '@/engine/library-view-rules';
 import { useSwipeablePager } from '@/hooks/useSwipeablePager';
@@ -150,7 +151,7 @@ export default function LibraryWorkspaceScreen() {
   const [activeTabIndex, setActiveTabIndex] = useState(0);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchText, setSearchText] = useState('');
-  const [selectedFilterVal, setSelectedFilterVal] = useState<string>('');
+  const [selectedFilter, setSelectedFilter] = useState<LibraryFilterSelection | null>(null);
   const [sortMode, setSortMode] = useState<LibrarySortModeId>('view_default');
   const [entryModalOpen, setEntryModalOpen] = useState(false);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
@@ -219,6 +220,7 @@ export default function LibraryWorkspaceScreen() {
   const {
     entries,
     primaryFilterField,
+    activeFilterValue,
     sortOptions: availableSortModes,
     activeSort: activeSortInfo,
   } = useMemo(() => {
@@ -226,6 +228,7 @@ export default function LibraryWorkspaceScreen() {
       return {
         entries: [] as HydratedEntry[],
         primaryFilterField: null,
+        activeFilterValue: '',
         sortOptions: [],
         activeSort: {
           id: 'updated_desc' as LibrarySortModeId,
@@ -239,10 +242,10 @@ export default function LibraryWorkspaceScreen() {
       entries: rawEntries,
       library,
       cardConfig: activeCardConfig,
-      selectedFilterValue: selectedFilterVal,
+      selectedFilter,
       sortMode,
     });
-  }, [rawEntries, library, activeCardConfig, selectedFilterVal, sortMode]);
+  }, [rawEntries, library, activeCardConfig, selectedFilter, sortMode]);
 
   const rootParent = useMemo(
     () =>
@@ -270,7 +273,7 @@ export default function LibraryWorkspaceScreen() {
     (targetSlug: string) => {
       setSearchText('');
       setSearchOpen(false);
-      setSelectedFilterVal('');
+      setSelectedFilter(null);
       setSortMode('view_default');
       setActiveTabIndex(0);
       jumpToPage(0);
@@ -327,28 +330,32 @@ export default function LibraryWorkspaceScreen() {
           {primaryFilterField?.options?.length ? (
             <>
               <Pressable
-                onPress={() => setSelectedFilterVal('')}
+                onPress={() => setSelectedFilter(null)}
                 style={({ pressed }) => [
                   styles.filterChip,
-                  !selectedFilterVal && { backgroundColor: tone.soft, borderColor: tone.solid },
+                  !activeFilterValue && { backgroundColor: tone.soft, borderColor: tone.solid },
                   pressed && styles.pressedSoft,
                 ]}
               >
                 <Text
                   style={[
                     styles.filterChipText,
-                    !selectedFilterVal && { color: tone.ink, fontWeight: '700' },
+                    !activeFilterValue && { color: tone.ink, fontWeight: '700' },
                   ]}
                 >
                   全部 ({rawEntries.length})
                 </Text>
               </Pressable>
               {primaryFilterField.options.map((opt) => {
-                const active = selectedFilterVal === opt.value;
+                const active = activeFilterValue === opt.value;
                 return (
                   <Pressable
                     key={opt.value}
-                    onPress={() => setSelectedFilterVal(active ? '' : opt.value)}
+                    onPress={() =>
+                      setSelectedFilter(
+                        active ? null : { fieldKey: primaryFilterField.key, value: opt.value }
+                      )
+                    }
                     style={({ pressed }) => [
                       styles.filterChip,
                       active && { backgroundColor: tone.soft, borderColor: tone.solid },

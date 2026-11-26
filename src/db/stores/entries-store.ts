@@ -1,6 +1,8 @@
 import {
+  isBatchRefToken,
   resolveDraftDataForCommit,
   type CommitDraftEntryItem,
+  type PriorDraftTarget,
 } from '@/engine/capture-drafts';
 import { createId } from '@/engine/id';
 import { buildEntryPayloadValidator, type FieldDef, type FieldType } from '@/schema/field-defs';
@@ -113,27 +115,32 @@ export class EntriesStore {
           ? [rawTargets.trim()]
           : [];
 
-      const targetLib = f.relationConfig?.targetLibrarySlug
-        ? this.libraries.getLibraryBySlug(f.relationConfig.targetLibrarySlug)
-        : null;
+      const targetSlug = f.relationConfig?.targetLibrarySlug;
+      const targetLib = targetSlug ? this.libraries.getLibraryBySlug(targetSlug) : null;
+      if (targets.length > 0 && targetSlug && !targetLib) {
+        throw new Error(`关联字段「${f.label}」指向的目标记录本不存在: ${targetSlug}`);
+      }
 
-      targets.forEach((targetId, idx) => {
-        const exists = targetLib
-          ? this.driver.getFirstSync<{ id: string }>(
-              'SELECT id FROM entries WHERE id = ? AND library_id = ?',
-              [targetId, targetLib.id]
-            )
-          : this.driver.getFirstSync<{ id: string }>(
-              'SELECT id FROM entries WHERE id = ?',
-              [targetId]
-            );
-        if (exists) {
-          this.driver.runSync(
-            `INSERT OR IGNORE INTO entry_relations (id, source_entry_id, target_entry_id, source_library_id, field_key, sort_order)
-             VALUES (?, ?, ?, ?, ?, ?)`,
-            [createId('rel'), entryId, targetId, libraryId, f.key, idx]
-          );
+      const uniqueTargets = Array.from(new Set(targets));
+      uniqueTargets.forEach((targetId, idx) => {
+        if (isBatchRefToken(targetId)) {
+          throw new Error(`关联字段「${f.label}」包含未解析的草稿引用（${targetId}），请重新选择后再保存`);
         }
+        const targetRow = this.driver.getFirstSync<{ id: string; library_id: string }>(
+          'SELECT id, library_id FROM entries WHERE id = ?',
+          [targetId]
+        );
+        if (!targetRow) {
+          throw new Error(`关联字段「${f.label}」引用的目标记录不存在，请重新选择后再保存`);
+        }
+        if (targetLib && targetRow.library_id !== targetLib.id) {
+          throw new Error(`关联字段「${f.label}」只能关联「${targetLib.name}」中的记录`);
+        }
+        this.driver.runSync(
+          `INSERT OR IGNORE INTO entry_relations (id, source_entry_id, target_entry_id, source_library_id, field_key, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [createId('rel'), entryId, targetId, libraryId, f.key, idx]
+        );
       });
     }
   }
@@ -254,17 +261,49 @@ export class EntriesStore {
 
   commitOmniDraftsInternal(drafts: readonly CommitDraftEntryItem[]): string[] {
     const createdIds: string[] = [];
-    const createdIdByDraftId = new Map<string, string>();
+    const priorTargets: PriorDraftTarget[] = [];
     drafts.forEach((draft) => {
       const lib = this.libraries.getLibraryBySlug(draft.librarySlug);
-      const resolved = resolveDraftDataForCommit(draft, lib, createdIds, createdIdByDraftId);
+      const resolved = resolveDraftDataForCommit(draft, lib, priorTargets);
       const newId = this.createEntryInternal(draft.librarySlug, resolved);
       createdIds.push(newId);
-      if (draft.draftId) {
-        createdIdByDraftId.set(draft.draftId, newId);
-      }
+      priorTargets.push({
+        draftId: draft.draftId,
+        librarySlug: draft.librarySlug,
+        createdEntryId: newId,
+      });
     });
     return createdIds;
+  }
+
+  /**
+   * 轻量批量读取条目 ID -> 标题与所属库 slug 映射（供草稿预览同时做标题展示与跨库校验）
+   */
+  getEntrySummaryMap(entryIds: string[]): Map<string, { title: string; librarySlug: string }> {
+    const map = new Map<string, { title: string; librarySlug: string }>();
+    const uniqueIds = Array.from(new Set(entryIds.filter(Boolean)));
+    if (uniqueIds.length === 0) return map;
+
+    const { byId } = this.libraries.ensureCache();
+    for (let i = 0; i < uniqueIds.length; i += ENTRY_QUERY_CHUNK_SIZE) {
+      const chunk = uniqueIds.slice(i, i + ENTRY_QUERY_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const rows = this.driver.getAllSync<{
+        id: string;
+        library_id: string;
+        title_summary: string;
+      }>(
+        `SELECT id, library_id, title_summary FROM entries WHERE id IN (${placeholders})`,
+        chunk
+      );
+      for (const r of rows) {
+        const lib = byId.get(r.library_id);
+        if (lib) {
+          map.set(r.id, { title: r.title_summary, librarySlug: lib.slug });
+        }
+      }
+    }
+    return map;
   }
 
   /**
@@ -608,13 +647,31 @@ export class EntriesStore {
     return sections;
   }
 
-  listRelationCandidates(targetLibrarySlug: string): Array<{ id: string; title: string }> {
+  listRelationCandidates(
+    targetLibrarySlug: string,
+    searchQuery?: string,
+    limit = 200
+  ): Array<{ id: string; title: string }> {
     const lib = this.libraries.getLibraryBySlug(targetLibrarySlug);
     if (!lib) return [];
+    const trimmed = searchQuery?.trim();
+    if (trimmed) {
+      const escaped = escapeLikePattern(trimmed.toLowerCase());
+      return this.driver
+        .getAllSync<{ id: string; title_summary: string }>(
+          `SELECT id, title_summary
+           FROM entries
+           WHERE library_id = ? AND search_text LIKE ? ESCAPE '\\'
+           ORDER BY updated_at DESC
+           LIMIT ?`,
+          [lib.id, `%${escaped}%`, limit]
+        )
+        .map((r) => ({ id: r.id, title: r.title_summary }));
+    }
     return this.driver
       .getAllSync<{ id: string; title_summary: string }>(
-        'SELECT id, title_summary FROM entries WHERE library_id = ? ORDER BY updated_at DESC LIMIT 200',
-        [lib.id]
+        'SELECT id, title_summary FROM entries WHERE library_id = ? ORDER BY updated_at DESC LIMIT ?',
+        [lib.id, limit]
       )
       .map((r) => ({ id: r.id, title: r.title_summary }));
   }

@@ -11,18 +11,20 @@ import {
   getDraftDisplayTitle,
   isBatchRefToken,
   makeDraftRefToken,
-  parseDraftRefId,
-  parsePrevRefIndex,
+  parseBatchRefToken,
   type DanglingDraftRelation,
   type ManagedCaptureDraft,
 } from '@/engine/capture-drafts';
 import type { FieldType } from '@/schema/field-defs';
 import { IntentFallbackBar } from './IntentFallbackBar';
 
+const RELATION_CANDIDATE_PAGE_SIZE = 20;
+
 export interface CaptureResultViewProps {
   assistantNote?: string;
   drafts: ManagedCaptureDraft[];
   libMap: Map<string, LibraryRecord>;
+  existingEntrySummaryMap: Map<string, { title: string; librarySlug: string }>;
   danglingRelations: DanglingDraftRelation[];
   removedDraftTitles: Record<string, string>;
   loading: boolean;
@@ -36,6 +38,7 @@ export function CaptureResultView({
   assistantNote,
   drafts,
   libMap,
+  existingEntrySummaryMap,
   danglingRelations,
   removedDraftTitles,
   loading,
@@ -47,6 +50,8 @@ export function CaptureResultView({
   const { repo } = useRepository();
   const [editingDraftKey, setEditingDraftKey] = useState<string | null>(null);
   const [pickingRelationKey, setPickingRelationKey] = useState<string | null>(null);
+  const [relSearch, setRelSearch] = useState('');
+  const [relLimit, setRelLimit] = useState(RELATION_CANDIDATE_PAGE_SIZE);
 
   const danglingByField = useMemo(() => {
     const map = new Map<string, DanglingDraftRelation>();
@@ -55,26 +60,6 @@ export function CaptureResultView({
     }
     return map;
   }, [danglingRelations]);
-
-  // 一次性轻量批量查表解析关联目标标题，避免在渲染循环里逐条执行完整水合
-  const relationTitleMap = useMemo(() => {
-    if (!repo) return new Map<string, string>();
-    const ids: string[] = [];
-    for (const d of drafts) {
-      const lib = libMap.get(d.librarySlug);
-      if (!lib) continue;
-      for (const [k, v] of Object.entries(d.data)) {
-        const fDef = lib.fields.find((f) => f.key === k);
-        if (fDef?.type !== 'relation') continue;
-        for (const token of extractRelationTokens(v)) {
-          if (token && !isBatchRefToken(token)) {
-            ids.push(token);
-          }
-        }
-      }
-    }
-    return repo.getEntryTitleMap(ids);
-  }, [repo, drafts, libMap]);
 
   const activePickerTargetSlug = useMemo(() => {
     if (!pickingRelationKey) return undefined;
@@ -85,10 +70,22 @@ export function CaptureResultView({
     return fDef?.relationConfig?.targetLibrarySlug;
   }, [pickingRelationKey, drafts, libMap]);
 
-  const relationCandidates = useMemo(() => {
-    if (!repo || !activePickerTargetSlug) return [];
-    return repo.listRelationCandidates(activePickerTargetSlug);
-  }, [repo, activePickerTargetSlug]);
+  const candidatePage = useMemo(() => {
+    if (!repo || !activePickerTargetSlug) {
+      return { items: [] as Array<{ id: string; title: string }>, hasMore: false };
+    }
+    const fetched = repo.listRelationCandidates(activePickerTargetSlug, relSearch, relLimit + 1);
+    return {
+      items: fetched.slice(0, relLimit),
+      hasMore: fetched.length > relLimit,
+    };
+  }, [repo, activePickerTargetSlug, relSearch, relLimit]);
+
+  const toggleRelationPicker = (fieldSig: string) => {
+    setPickingRelationKey((cur) => (cur === fieldSig ? null : fieldSig));
+    setRelSearch('');
+    setRelLimit(RELATION_CANDIDATE_PAGE_SIZE);
+  };
 
   return (
     <View style={styles.resultSection}>
@@ -98,7 +95,7 @@ export function CaptureResultView({
         <View style={styles.danglingBanner}>
           <Feather name="alert-triangle" size={14} color={Palette.warning} />
           <Text style={styles.danglingBannerText}>
-            有 {danglingRelations.length} 处关联指向已移除的草稿，请重新选择关联或清除后再保存
+            有 {danglingRelations.length} 处关联无效或待补充，请先重新选择后再保存
           </Text>
         </View>
       ) : null}
@@ -106,6 +103,17 @@ export function CaptureResultView({
       {drafts.map((d, idx) => {
         const draftLib = libMap.get(d.librarySlug);
         const priorDraftMap = new Map(drafts.slice(0, idx).map((p) => [p.draftId, p]));
+
+        // 确保必填关联字段即便未出现在 draft.data 中也能展示并供用户选择
+        const fieldEntries: Array<[string, unknown]> = Object.entries(d.data);
+        if (draftLib) {
+          const presentKeys = new Set(fieldEntries.map(([k]) => k));
+          for (const f of draftLib.fields) {
+            if (f.type === 'relation' && f.required && !presentKeys.has(f.key)) {
+              fieldEntries.push([f.key, []]);
+            }
+          }
+        }
 
         return (
           <View key={d.draftId} style={styles.resultCard}>
@@ -126,36 +134,57 @@ export function CaptureResultView({
             </View>
             {d.reason ? <Text style={styles.draftReason}>{d.reason}</Text> : null}
             <View style={styles.draftFieldsGrid}>
-              {Object.entries(d.data).map(([k, v]) => {
+              {fieldEntries.map(([k, v]) => {
                 const fDef = draftLib?.fields.find((f) => f.key === k);
                 const fieldSig = `${d.draftId}::${k}`;
                 const dangling = danglingByField.get(fieldSig);
                 const isRelationField = fDef?.type === 'relation' || Boolean(dangling);
+                const targetLibSlug = fDef?.relationConfig?.targetLibrarySlug;
+                const targetLibName = targetLibSlug ? libMap.get(targetLibSlug)?.name : undefined;
 
                 const formatTokenLabel = (token: string): string => {
-                  const refDraftId = parseDraftRefId(token);
-                  if (refDraftId !== null) {
-                    const targetDraft = priorDraftMap.get(refDraftId);
+                  const parsed = parseBatchRefToken(token);
+                  if (parsed?.kind === 'malformed') {
+                    return '需重选（无效引用）';
+                  }
+                  if (parsed?.kind === 'draft') {
+                    const targetDraft = priorDraftMap.get(parsed.draftId);
                     if (targetDraft) {
+                      if (targetLibSlug && targetDraft.librarySlug !== targetLibSlug) {
+                        return targetLibName
+                          ? `需重选（需关联「${targetLibName}」）`
+                          : '需重选（关联记录本不匹配）';
+                      }
                       const targetLib = libMap.get(targetDraft.librarySlug);
                       return `同批新建：${getDraftDisplayTitle(targetDraft, targetLib)}`;
                     }
-                    const removedTitle = removedDraftTitles[refDraftId];
+                    const removedTitle = removedDraftTitles[parsed.draftId];
                     return removedTitle
                       ? `需重选（原「${removedTitle}」已删）`
                       : '需重新选择关联';
                   }
-                  const prevIdx = parsePrevRefIndex(token);
-                  if (prevIdx !== null) {
-                    const targetDraft = prevIdx < idx ? drafts[prevIdx] : undefined;
+                  if (parsed?.kind === 'prev') {
+                    const targetDraft = parsed.index < idx ? drafts[parsed.index] : undefined;
                     if (targetDraft) {
+                      if (targetLibSlug && targetDraft.librarySlug !== targetLibSlug) {
+                        return targetLibName
+                          ? `需重选（需关联「${targetLibName}」）`
+                          : '需重选（关联记录本不匹配）';
+                      }
                       const targetLib = libMap.get(targetDraft.librarySlug);
                       return `同批新建：${getDraftDisplayTitle(targetDraft, targetLib)}`;
                     }
                     return '需重新选择关联';
                   }
                   if (isRelationField) {
-                    return relationTitleMap.get(token) ?? token;
+                    const summary = existingEntrySummaryMap.get(token);
+                    if (!summary) return '需重选（记录不存在）';
+                    if (targetLibSlug && summary.librarySlug !== targetLibSlug) {
+                      return targetLibName
+                        ? `需重选（需关联「${targetLibName}」）`
+                        : '需重选（关联记录本不匹配）';
+                    }
+                    return summary.title;
                   }
                   return token;
                 };
@@ -163,7 +192,9 @@ export function CaptureResultView({
                 const formatDraftVal = (rawVal: unknown): string => {
                   if (isRelationField) {
                     const tokens = extractRelationTokens(rawVal);
-                    if (tokens.length === 0) return '未关联';
+                    if (tokens.length === 0) {
+                      return fDef?.required ? '请选择必填关联' : '未关联';
+                    }
                     return tokens.map(formatTokenLabel).join('、');
                   }
                   if (Array.isArray(rawVal)) {
@@ -182,12 +213,13 @@ export function CaptureResultView({
 
                 const currentTokens = isRelationField ? extractRelationTokens(v) : [];
                 const invalidTokenSet = new Set(dangling?.invalidTokens ?? []);
+                const searchLower = relSearch.trim().toLowerCase();
                 const compatibleDrafts = isPickingThis
-                  ? getCompatiblePriorDrafts(
-                      drafts,
-                      d.draftId,
-                      fDef?.relationConfig?.targetLibrarySlug
-                    )
+                  ? getCompatiblePriorDrafts(drafts, d.draftId, targetLibSlug).filter((candDraft) => {
+                      if (!searchLower) return true;
+                      const title = getDraftDisplayTitle(candDraft, libMap.get(candDraft.librarySlug));
+                      return title.toLowerCase().includes(searchLower);
+                    })
                   : [];
 
                 const handleSelectRelationToken = (token: string) => {
@@ -198,11 +230,31 @@ export function CaptureResultView({
                     setPickingRelationKey(null);
                     return;
                   }
-                  const next = cleanExisting.includes(token)
-                    ? cleanExisting.filter((t) => t !== token)
-                    : [...cleanExisting, token];
-                  onUpdateRelation(d.draftId, k, next);
+                  if (cleanExisting.includes(token)) {
+                    // 必填多选关联不允许取消勾选最后一个有效目标
+                    if (fDef?.required && cleanExisting.length <= 1) {
+                      return;
+                    }
+                    onUpdateRelation(
+                      d.draftId,
+                      k,
+                      cleanExisting.filter((t) => t !== token)
+                    );
+                  } else {
+                    onUpdateRelation(d.draftId, k, [...cleanExisting, token]);
+                  }
                 };
+
+                const showSearchInput =
+                  Boolean(activePickerTargetSlug) &&
+                  (candidatePage.items.length > 6 || candidatePage.hasMore || Boolean(relSearch));
+                const showClearBtn = !fDef?.required && currentTokens.length > 0;
+                const hasPickerContent =
+                  showSearchInput ||
+                  compatibleDrafts.length > 0 ||
+                  candidatePage.items.length > 0 ||
+                  candidatePage.hasMore ||
+                  showClearBtn;
 
                 return (
                   <View key={k} style={styles.draftFieldBlock}>
@@ -210,9 +262,7 @@ export function CaptureResultView({
                       <Text style={styles.draftKey}>{fDef?.label ?? k}:</Text>
                       {isRelationField ? (
                         <Pressable
-                          onPress={() =>
-                            setPickingRelationKey((cur) => (cur === fieldSig ? null : fieldSig))
-                          }
+                          onPress={() => toggleRelationPicker(fieldSig)}
                           style={({ pressed }) => [
                             styles.relationValBtn,
                             dangling && styles.relationValBtnDangling,
@@ -275,76 +325,113 @@ export function CaptureResultView({
                       )}
                     </View>
 
-                    {isRelationField && isPickingThis ? (
+                    {isRelationField && isPickingThis && hasPickerContent ? (
                       <View style={styles.relationPickerBox}>
-                        <View style={styles.relationPickerChips}>
-                          {compatibleDrafts.map((candDraft) => {
-                            const token = makeDraftRefToken(candDraft.draftId);
-                            const selected = currentTokens.includes(token);
-                            const targetLib = libMap.get(candDraft.librarySlug);
-                            return (
+                        {showSearchInput ? (
+                          <View style={styles.relationSearchRow}>
+                            <Feather name="search" size={13} color={Palette.inkMuted} />
+                            <TextInput
+                              value={relSearch}
+                              onChangeText={(txt) => {
+                                setRelSearch(txt);
+                                setRelLimit(RELATION_CANDIDATE_PAGE_SIZE);
+                              }}
+                              placeholder="搜索可关联记录..."
+                              placeholderTextColor={Palette.inkMuted}
+                              style={styles.relationSearchInput}
+                            />
+                            {relSearch ? (
                               <Pressable
-                                key={token}
-                                onPress={() => handleSelectRelationToken(token)}
-                                style={[
-                                  styles.relationChip,
-                                  selected && styles.relationChipSelected,
-                                ]}
+                                hitSlop={8}
+                                onPress={() => {
+                                  setRelSearch('');
+                                  setRelLimit(RELATION_CANDIDATE_PAGE_SIZE);
+                                }}
                               >
-                                <Text
-                                  style={[
-                                    styles.relationChipText,
-                                    selected && styles.relationChipTextSelected,
-                                  ]}
-                                  numberOfLines={1}
-                                >
-                                  同批新建 · {getDraftDisplayTitle(candDraft, targetLib)}
-                                </Text>
+                                <Feather name="x-circle" size={14} color={Palette.inkMuted} />
                               </Pressable>
-                            );
-                          })}
+                            ) : null}
+                          </View>
+                        ) : null}
 
-                          {relationCandidates.slice(0, 20).map((cand) => {
-                            const selected = currentTokens.includes(cand.id);
-                            return (
+                        {compatibleDrafts.length > 0 || candidatePage.items.length > 0 ? (
+                          <View style={styles.relationPickerChips}>
+                            {compatibleDrafts.map((candDraft) => {
+                              const token = makeDraftRefToken(candDraft.draftId);
+                              const selected = currentTokens.includes(token);
+                              const targetLib = libMap.get(candDraft.librarySlug);
+                              return (
+                                <Pressable
+                                  key={token}
+                                  onPress={() => handleSelectRelationToken(token)}
+                                  style={[
+                                    styles.relationChip,
+                                    selected && styles.relationChipSelected,
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.relationChipText,
+                                      selected && styles.relationChipTextSelected,
+                                    ]}
+                                    numberOfLines={1}
+                                  >
+                                    同批新建 · {getDraftDisplayTitle(candDraft, targetLib)}
+                                  </Text>
+                                </Pressable>
+                              );
+                            })}
+
+                            {candidatePage.items.map((cand) => {
+                              const selected = currentTokens.includes(cand.id);
+                              return (
+                                <Pressable
+                                  key={cand.id}
+                                  onPress={() => handleSelectRelationToken(cand.id)}
+                                  style={[
+                                    styles.relationChip,
+                                    selected && styles.relationChipSelected,
+                                  ]}
+                                >
+                                  <Text
+                                    style={[
+                                      styles.relationChipText,
+                                      selected && styles.relationChipTextSelected,
+                                    ]}
+                                    numberOfLines={1}
+                                  >
+                                    {cand.title}
+                                  </Text>
+                                </Pressable>
+                              );
+                            })}
+                          </View>
+                        ) : null}
+
+                        {candidatePage.hasMore || showClearBtn ? (
+                          <View style={styles.relationPickerFooter}>
+                            {candidatePage.hasMore ? (
                               <Pressable
-                                key={cand.id}
-                                onPress={() => handleSelectRelationToken(cand.id)}
-                                style={[
-                                  styles.relationChip,
-                                  selected && styles.relationChipSelected,
-                                ]}
+                                onPress={() =>
+                                  setRelLimit((n) => n + RELATION_CANDIDATE_PAGE_SIZE)
+                                }
+                                style={styles.loadMoreBtn}
                               >
-                                <Text
-                                  style={[
-                                    styles.relationChipText,
-                                    selected && styles.relationChipTextSelected,
-                                  ]}
-                                  numberOfLines={1}
-                                >
-                                  {cand.title}
-                                </Text>
+                                <Text style={styles.loadMoreText}>显示更多</Text>
                               </Pressable>
-                            );
-                          })}
-
-                          {compatibleDrafts.length === 0 && relationCandidates.length === 0 ? (
-                            <Text style={styles.relationEmptyHint}>
-                              目标记录本暂无可关联记录
-                            </Text>
-                          ) : null}
-                        </View>
-
-                        {!fDef?.required && currentTokens.length > 0 ? (
-                          <Pressable
-                            onPress={() => {
-                              onUpdateRelation(d.draftId, k, []);
-                              setPickingRelationKey(null);
-                            }}
-                            style={styles.clearRelBtn}
-                          >
-                            <Text style={styles.clearRelText}>暂不关联（清除）</Text>
-                          </Pressable>
+                            ) : null}
+                            {showClearBtn ? (
+                              <Pressable
+                                onPress={() => {
+                                  onUpdateRelation(d.draftId, k, []);
+                                  setPickingRelationKey(null);
+                                }}
+                                style={styles.clearRelBtn}
+                              >
+                                <Text style={styles.clearRelText}>暂不关联（清除）</Text>
+                              </Pressable>
+                            ) : null}
+                          </View>
                         ) : null}
                       </View>
                     ) : null}
@@ -482,6 +569,23 @@ const styles = StyleSheet.create({
     padding: 10,
     gap: 8,
   },
+  relationSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: Palette.bgCanvas,
+    borderWidth: 1,
+    borderColor: Palette.borderHairline,
+    borderRadius: 8,
+    paddingHorizontal: 9,
+    paddingVertical: 6,
+  },
+  relationSearchInput: {
+    flex: 1,
+    fontSize: 12,
+    color: Palette.inkPrimary,
+    paddingVertical: 0,
+  },
   relationPickerChips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -508,12 +612,21 @@ const styles = StyleSheet.create({
   relationChipTextSelected: {
     color: Palette.inkInverse,
   },
-  relationEmptyHint: {
+  relationPickerFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 10,
+  },
+  loadMoreBtn: {
+    paddingVertical: 2,
+  },
+  loadMoreText: {
     fontSize: 12,
-    color: Palette.inkMuted,
+    fontWeight: '700',
+    color: Palette.brand,
   },
   clearRelBtn: {
-    alignSelf: 'flex-start',
     paddingVertical: 2,
   },
   clearRelText: {

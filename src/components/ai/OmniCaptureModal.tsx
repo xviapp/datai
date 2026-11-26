@@ -45,6 +45,7 @@ import {
 } from '@/context/omni-context';
 import type { ArchitectLibraryDiff } from '@/db/models';
 import {
+  collectReferencedExistingEntryIds,
   findDanglingDraftRelations,
   normalizeCaptureDrafts,
   removeCaptureDraftById,
@@ -300,16 +301,29 @@ function OmniCaptureBody() {
     }
   };
 
-  const danglingRelations = useMemo(
-    () => findDanglingDraftRelations(drafts, libMap),
-    [drafts, libMap]
-  );
+  const existingEntrySummaryMap = useMemo(() => {
+    if (!repo || drafts.length === 0) {
+      return new Map<string, { title: string; librarySlug: string }>();
+    }
+    const ids = collectReferencedExistingEntryIds(drafts, libMap);
+    return repo.getEntrySummaryMap(ids);
+  }, [repo, drafts, libMap]);
+
+  const danglingRelations = useMemo(() => {
+    const libraryById = new Map<string, string>();
+    for (const [id, info] of existingEntrySummaryMap.entries()) {
+      libraryById.set(id, info.librarySlug);
+    }
+    return findDanglingDraftRelations(drafts, libMap, {
+      existingEntryLibraryById: libraryById,
+    });
+  }, [drafts, libMap, existingEntrySummaryMap]);
 
   const handleCommitDrafts = () => {
     if (!repo || drafts.length === 0) return;
     if (danglingRelations.length > 0) {
       setErrorMsg(
-        `有 ${danglingRelations.length} 处关联指向已删除的草稿，请先重新选择或清除关联后再保存`
+        `有 ${danglingRelations.length} 处关联无效或未完成选择，请先重新选择后再保存`
       );
       return;
     }
@@ -598,6 +612,7 @@ function OmniCaptureBody() {
             assistantNote={result.capture.assistantNote}
             drafts={drafts}
             libMap={libMap}
+            existingEntrySummaryMap={existingEntrySummaryMap}
             danglingRelations={danglingRelations}
             removedDraftTitles={removedDraftTitles}
             loading={Boolean(loadingStep)}

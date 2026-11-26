@@ -425,12 +425,21 @@ export class LibrariesStore {
       const hasGallery = explicitViewList.some((v) => v.viewType === 'gallery');
       const hasCalendar = explicitViewList.some((v) => v.viewType === 'calendar');
       const syncedBundle: LibraryLayoutBundle = {
-        card: (resolvedConfigs.get('card') as unknown as CardViewConfig) ?? viewsBundle.card,
+        card: {
+          ...viewsBundle.card,
+          ...((resolvedConfigs.get('card') as Partial<CardViewConfig> | undefined) ?? {}),
+        },
         gallery: hasGallery
-          ? ((resolvedConfigs.get('gallery') as unknown as GalleryViewConfig) ?? resolvedGallery)
+          ? {
+              ...resolvedGallery,
+              ...((resolvedConfigs.get('gallery') as Partial<GalleryViewConfig> | undefined) ?? {}),
+            }
           : undefined,
         calendar: hasCalendar
-          ? ((resolvedConfigs.get('calendar') as unknown as CalendarViewConfig) ?? resolvedCalendar)
+          ? {
+              ...resolvedCalendar,
+              ...((resolvedConfigs.get('calendar') as Partial<CalendarViewConfig> | undefined) ?? {}),
+            }
           : undefined,
       };
       this.driver.runSync('UPDATE libraries SET views_json = ?, updated_at = ? WHERE id = ?', [

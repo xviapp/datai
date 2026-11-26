@@ -14,7 +14,7 @@ export interface ViewDraftItem {
   id?: string;
   name: string;
   viewType: LibraryViewType;
-  /** 保留原有视图配置快照，避免保存时丢失编辑器未暴露的高级项（如 sortFieldKey / sortDir / tagFieldKey） */
+  /** 保留原有视图配置快照，避免保存时丢失编辑器未暴露的高级项与继承关系 */
   config?: Record<string, unknown>;
 }
 
@@ -165,8 +165,8 @@ export function buildInitialSchemaDraft(
 
 /**
  * 将编辑器草稿组装为可落盘的 blueprint 与 viewInputs：
- * - 已有视图按视图 ID 保留原有配置（含 sortFieldKey / sortDir / highlightRules / tagFieldKey 等），
- *   仅合并用户在编辑器中改动的槽位，并清理已被删除的字段引用；
+ * - 编辑器「列表卡片显示字段」仅作用于主卡片视图且仅写入用户实际改过的字段；
+ * - 其余已有视图（次卡片、画廊、日历、统计）原样保留原有配置及省略键的继承关系，仅清理被删除的字段引用；
  * - 新增视图才按当前字段结构套用默认配置。
  */
 export function buildSchemaSavePayload(
@@ -198,7 +198,6 @@ export function buildSchemaSavePayload(
   const firstRatingKey = draft.fields.find((f) => f.type === 'rating')?.key;
 
   const hadImageField = Boolean(existingLibrary?.fields.some((f) => f.type === 'image'));
-  const hadRatingField = Boolean(existingLibrary?.fields.some((f) => f.type === 'rating'));
 
   const initialCard = existingLibrary?.views.card;
   const initialSubtitleKey = initialCard?.subtitleFieldKey ?? '';
@@ -229,18 +228,19 @@ export function buildSchemaSavePayload(
     highlightRules: [],
   });
 
-  const mergeExistingCardConfig = (
+  const mergePrimaryExistingCardConfig = (
     rawBase: Record<string, unknown>,
-    fallbackFromBundle?: CardViewConfig
+    fallbackBundle: CardViewConfig
   ): CardViewConfig & Record<string, unknown> => {
-    const mergedRaw: Record<string, unknown> = fallbackFromBundle
-      ? { ...(fallbackFromBundle as unknown as Record<string, unknown>), ...rawBase }
-      : { ...rawBase };
+    const mergedRaw: Record<string, unknown> = {
+      ...(fallbackBundle as unknown as Record<string, unknown>),
+      ...rawBase,
+    };
     const baseCard = mergedRaw as Partial<CardViewConfig>;
 
     const baseRules = Array.isArray(baseCard.highlightRules)
       ? baseCard.highlightRules
-      : (fallbackFromBundle?.highlightRules ?? []);
+      : fallbackBundle.highlightRules;
     const validRules = baseRules.filter(
       (rule) => Boolean(rule && typeof rule.fieldKey === 'string' && fieldKeySet.has(rule.fieldKey))
     );
@@ -271,6 +271,47 @@ export function buildSchemaSavePayload(
     };
   };
 
+  /**
+   * 保留次卡片视图的原配置与省略键（如省略 sortFieldKey / sortDir 以继承库默认排序），
+   * 绝不把未显式配置的键实体化成默认值，仅清理已被删除的字段引用。
+   */
+  const preserveSecondaryExistingCardConfig = (
+    rawBase: Record<string, unknown>
+  ): Record<string, unknown> => {
+    const next: Record<string, unknown> = { ...rawBase };
+
+    if ('titleFieldKey' in next && !keepValidKey(next.titleFieldKey)) {
+      delete next.titleFieldKey;
+    }
+    if ('subtitleFieldKey' in next && !keepValidKey(next.subtitleFieldKey)) {
+      delete next.subtitleFieldKey;
+    }
+    if ('coverImageFieldKey' in next && !keepValidKey(next.coverImageFieldKey)) {
+      delete next.coverImageFieldKey;
+    }
+    if ('rightBadgeFieldKey' in next && !keepValidKey(next.rightBadgeFieldKey)) {
+      delete next.rightBadgeFieldKey;
+    }
+    if ('footerMetricKeys' in next && Array.isArray(next.footerMetricKeys)) {
+      next.footerMetricKeys = next.footerMetricKeys.filter(
+        (k) => typeof k === 'string' && fieldKeySet.has(k)
+      );
+    }
+    if ('sortFieldKey' in next && !keepValidKey(next.sortFieldKey)) {
+      delete next.sortFieldKey;
+    }
+    if ('highlightRules' in next && Array.isArray(next.highlightRules)) {
+      next.highlightRules = next.highlightRules.filter((rule) =>
+        Boolean(
+          rule &&
+            typeof (rule as { fieldKey?: unknown }).fieldKey === 'string' &&
+            fieldKeySet.has((rule as { fieldKey: string }).fieldKey)
+        )
+      );
+    }
+    return next;
+  };
+
   const buildDefaultGalleryConfig = (): GalleryViewConfig => ({
     titleFieldKey: validTitleKey,
     subtitleFieldKey: validSubtitleKey,
@@ -279,26 +320,29 @@ export function buildSchemaSavePayload(
     ratingFieldKey: firstRatingKey,
   });
 
-  const mergeExistingGalleryConfig = (
+  /**
+   * 保留已有画廊视图的原配置，不因修改「列表卡片显示字段」而覆盖画廊配置；仅清理失效字段引用。
+   */
+  const preserveExistingGalleryConfig = (
     rawBase: Record<string, unknown>
-  ): GalleryViewConfig & Record<string, unknown> => {
-    const baseGallery = rawBase as Partial<GalleryViewConfig>;
-    return {
-      ...rawBase,
-      titleFieldKey: titleChanged
-        ? validTitleKey
-        : (keepValidKey(baseGallery.titleFieldKey) ?? validTitleKey),
-      subtitleFieldKey: subtitleChanged
-        ? validSubtitleKey
-        : keepValidKey(baseGallery.subtitleFieldKey),
-      coverImageFieldKey:
-        keepValidKey(baseGallery.coverImageFieldKey) ?? (!hadImageField ? firstImageKey : undefined),
-      badgeFieldKey: rightBadgeChanged
-        ? validRightBadgeKey
-        : keepValidKey(baseGallery.badgeFieldKey),
-      ratingFieldKey:
-        keepValidKey(baseGallery.ratingFieldKey) ?? (!hadRatingField ? firstRatingKey : undefined),
-    };
+  ): Record<string, unknown> => {
+    const next: Record<string, unknown> = { ...rawBase };
+    if ('titleFieldKey' in next && !keepValidKey(next.titleFieldKey)) {
+      next.titleFieldKey = validTitleKey;
+    }
+    if ('subtitleFieldKey' in next && !keepValidKey(next.subtitleFieldKey)) {
+      delete next.subtitleFieldKey;
+    }
+    if ('coverImageFieldKey' in next && !keepValidKey(next.coverImageFieldKey)) {
+      delete next.coverImageFieldKey;
+    }
+    if ('badgeFieldKey' in next && !keepValidKey(next.badgeFieldKey)) {
+      delete next.badgeFieldKey;
+    }
+    if ('ratingFieldKey' in next && !keepValidKey(next.ratingFieldKey)) {
+      delete next.ratingFieldKey;
+    }
+    return next;
   };
 
   const buildDefaultCalendarConfig = (): CalendarViewConfig => ({
@@ -308,23 +352,26 @@ export function buildSchemaSavePayload(
     tagFieldKey: validRightBadgeKey,
   });
 
-  const mergeExistingCalendarConfig = (
+  /**
+   * 保留已有日历视图的原配置，不因修改「列表卡片显示字段」而覆盖日历指标/标签；仅清理失效字段引用。
+   */
+  const preserveExistingCalendarConfig = (
     rawBase: Record<string, unknown>
-  ): CalendarViewConfig & Record<string, unknown> => {
-    const baseCalendar = rawBase as Partial<CalendarViewConfig>;
-    return {
-      ...rawBase,
-      dateFieldKey: keepValidKey(baseCalendar.dateFieldKey) ?? firstDateKey ?? '',
-      titleFieldKey: titleChanged
-        ? validTitleKey
-        : (keepValidKey(baseCalendar.titleFieldKey) ?? validTitleKey),
-      metricFieldKey: footerMetricsChanged
-        ? validFooterMetricKeys[0]
-        : keepValidKey(baseCalendar.metricFieldKey),
-      tagFieldKey: rightBadgeChanged
-        ? validRightBadgeKey
-        : keepValidKey(baseCalendar.tagFieldKey),
-    };
+  ): Record<string, unknown> => {
+    const next: Record<string, unknown> = { ...rawBase };
+    if ('dateFieldKey' in next && !keepValidKey(next.dateFieldKey)) {
+      next.dateFieldKey = firstDateKey ?? '';
+    }
+    if ('titleFieldKey' in next && !keepValidKey(next.titleFieldKey)) {
+      next.titleFieldKey = validTitleKey;
+    }
+    if ('metricFieldKey' in next && !keepValidKey(next.metricFieldKey)) {
+      delete next.metricFieldKey;
+    }
+    if ('tagFieldKey' in next && !keepValidKey(next.tagFieldKey)) {
+      delete next.tagFieldKey;
+    }
+    return next;
   };
 
   const normalizedViews: ViewDraftItem[] =
@@ -339,21 +386,25 @@ export function buildSchemaSavePayload(
 
     let resolvedConfig: Record<string, unknown>;
     if (v.viewType === 'card') {
-      resolvedConfig = hasExistingConfig
-        ? mergeExistingCardConfig(
-            baseConfig ?? {},
-            existingView && existingView.id === primaryExistingCardId
-              ? existingLibrary?.views.card
-              : undefined
-          )
-        : (buildDefaultCardConfig() as unknown as Record<string, unknown>);
+      if (hasExistingConfig) {
+        const isPrimaryExistingCard =
+          Boolean(existingLibrary) &&
+          ((existingView && existingView.id === primaryExistingCardId) ||
+            (!primaryExistingCardId && !existingView));
+        resolvedConfig =
+          isPrimaryExistingCard && existingLibrary
+            ? mergePrimaryExistingCardConfig(baseConfig ?? {}, existingLibrary.views.card)
+            : preserveSecondaryExistingCardConfig(baseConfig ?? {});
+      } else {
+        resolvedConfig = buildDefaultCardConfig() as unknown as Record<string, unknown>;
+      }
     } else if (v.viewType === 'gallery') {
       resolvedConfig = hasExistingConfig
-        ? mergeExistingGalleryConfig(baseConfig ?? {})
+        ? preserveExistingGalleryConfig(baseConfig ?? {})
         : (buildDefaultGalleryConfig() as unknown as Record<string, unknown>);
     } else if (v.viewType === 'calendar') {
       resolvedConfig = hasExistingConfig
-        ? mergeExistingCalendarConfig(baseConfig ?? {})
+        ? preserveExistingCalendarConfig(baseConfig ?? {})
         : (buildDefaultCalendarConfig() as unknown as Record<string, unknown>);
     } else {
       resolvedConfig = hasExistingConfig ? { ...(baseConfig ?? {}) } : {};
@@ -367,16 +418,42 @@ export function buildSchemaSavePayload(
     };
   });
 
-  const firstCardInput = viewInputs.find((v) => v.viewType === 'card');
+  const primaryCardInput =
+    (primaryExistingCardId
+      ? viewInputs.find((v) => v.viewType === 'card' && v.id === primaryExistingCardId)
+      : undefined) ?? viewInputs.find((v) => v.viewType === 'card');
   const firstGalleryInput = viewInputs.find((v) => v.viewType === 'gallery');
   const firstCalendarInput = viewInputs.find((v) => v.viewType === 'calendar');
 
   const fallbackBundleCard: CardViewConfig = existingLibrary
-    ? mergeExistingCardConfig(
+    ? mergePrimaryExistingCardConfig(
         existingLibrary.views.card as unknown as Record<string, unknown>,
         existingLibrary.views.card
       )
     : buildDefaultCardConfig();
+
+  const resolvedBundleCard: CardViewConfig = primaryCardInput
+    ? {
+        ...fallbackBundleCard,
+        ...(primaryCardInput.config as Partial<CardViewConfig>),
+      }
+    : fallbackBundleCard;
+
+  const resolvedBundleGallery: GalleryViewConfig | undefined = firstGalleryInput
+    ? {
+        ...buildDefaultGalleryConfig(),
+        ...(existingLibrary?.views.gallery ?? {}),
+        ...(firstGalleryInput.config as Partial<GalleryViewConfig>),
+      }
+    : undefined;
+
+  const resolvedBundleCalendar: CalendarViewConfig | undefined = firstCalendarInput
+    ? {
+        ...buildDefaultCalendarConfig(),
+        ...(existingLibrary?.views.calendar ?? {}),
+        ...(firstCalendarInput.config as Partial<CalendarViewConfig>),
+      }
+    : undefined;
 
   const blueprint: LibraryBlueprint = {
     slug: cleanSlug,
@@ -391,13 +468,9 @@ export function buildSchemaSavePayload(
     showOnHome: draft.showOnHome,
     fields: draft.fields,
     views: {
-      card: (firstCardInput?.config as unknown as CardViewConfig) ?? fallbackBundleCard,
-      gallery: firstGalleryInput
-        ? (firstGalleryInput.config as unknown as GalleryViewConfig)
-        : undefined,
-      calendar: firstCalendarInput
-        ? (firstCalendarInput.config as unknown as CalendarViewConfig)
-        : undefined,
+      card: resolvedBundleCard,
+      gallery: resolvedBundleGallery,
+      calendar: resolvedBundleCalendar,
     },
   };
 

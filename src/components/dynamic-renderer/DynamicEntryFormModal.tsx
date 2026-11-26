@@ -487,6 +487,7 @@ function FieldInputBlock({
                     key={cand.id}
                     onPress={() => {
                       if (active) {
+                        if (field.required && selectedIds.length <= 1) return;
                         onChange(selectedIds.filter((x) => x !== cand.id));
                       } else {
                         onChange(allowMulti ? [...selectedIds, cand.id] : [cand.id]);
