@@ -26,7 +26,8 @@ export function importBackupBundleInternal(
   libraries: LibrariesStore,
   entries: EntriesStore,
   widgets: WidgetsStore,
-  bundle: FullBackupBundle
+  bundle: FullBackupBundle,
+  options?: { clearSnapshots?: boolean }
 ): void {
   const oldLibs = driver.getAllSync<{ slug: string }>('SELECT slug FROM libraries');
   for (const l of oldLibs) {
@@ -39,6 +40,10 @@ export function importBackupBundleInternal(
   driver.execSync('DELETE FROM library_relations;');
   driver.execSync('DELETE FROM dashboard_widgets;');
   driver.execSync('DELETE FROM libraries;');
+  // 全量导入新备份时清空导入前的撤销历史，避免旧库增量快照跨备份误删导入数据
+  if (options?.clearSnapshots !== false) {
+    driver.execSync('DELETE FROM ai_snapshots;');
+  }
 
   for (const l of bundle.libraries) {
     libraries.insertRawLibrary(l);

@@ -186,6 +186,8 @@ export type SnapshotPayload =
       entry: Record<string, unknown>;
       relations: Array<Record<string, unknown>>;
       detachedSources?: DetachedSourceRecord[];
+      /** 当目标条目先于本来源条目被撤销恢复时，暂存待本条目恢复后补回的正向关联 */
+      deferredSelfRestores?: DetachedSourceRecord[];
     }
   | {
       kind: 'library_deleted';
@@ -200,6 +202,8 @@ export type SnapshotPayload =
         show_on_home: number;
       }>;
       detachedSources?: DetachedSourceRecord[];
+      /** 当目标条目先于本库条目被撤销恢复时，暂存待本库条目恢复后补回的正向关联 */
+      deferredSelfRestores?: DetachedSourceRecord[];
     }
   | {
       kind: 'architect_plan';

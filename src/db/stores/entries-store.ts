@@ -16,6 +16,7 @@ import {
   loadRelationsBatch,
   sortHydratedEntries,
 } from '../hydration';
+import { mergeOrderedRelationItems } from '../relations-sync';
 import type {
   BacklinkGroupSection,
   ChildLibrarySection,
@@ -71,80 +72,6 @@ export interface RawRelationRowLike {
   target_entry_id?: unknown;
   field_key?: unknown;
   sort_order?: unknown;
-}
-
-/**
- * 线性时间合并备份/快照中按 sort_order 排序的关联项与现有 data_json 列表：
- * 严格保持 existingTokens 相对顺序不变，同时依据前驱/后继锚点与备份中的 sort_order 插回缺失项。
- */
-function mergeOrderedRelationItems(
-  existingTokens: readonly string[],
-  relItems: ReadonlyArray<{ targetId: string; sortOrder: number }>
-): string[] {
-  const existing = Array.from(new Set(existingTokens));
-  if (existing.length === 0) {
-    return relItems.map((item) => item.targetId);
-  }
-
-  const existingPos = new Map<string, number>();
-  existing.forEach((id, idx) => existingPos.set(id, idx));
-
-  const missingCount = relItems.reduce(
-    (acc, item) => (existingPos.has(item.targetId) ? acc : acc + 1),
-    0
-  );
-  if (missingCount === 0) {
-    return existing;
-  }
-
-  const len = relItems.length;
-  const prefixMaxPos = new Array<number>(len).fill(-1);
-  let runningMax = -1;
-  for (let i = 0; i < len; i++) {
-    prefixMaxPos[i] = runningMax;
-    const pos = existingPos.get(relItems[i].targetId);
-    if (pos !== undefined && pos > runningMax) {
-      runningMax = pos;
-    }
-  }
-
-  const suffixMinPos = new Array<number>(len).fill(Infinity);
-  let runningMin = Infinity;
-  for (let i = len - 1; i >= 0; i--) {
-    suffixMinPos[i] = runningMin;
-    const pos = existingPos.get(relItems[i].targetId);
-    if (pos !== undefined && pos < runningMin) {
-      runningMin = pos;
-    }
-  }
-
-  const buckets: string[][] = Array.from({ length: existing.length + 1 }, () => []);
-  for (let i = 0; i < len; i++) {
-    const { targetId, sortOrder } = relItems[i];
-    if (existingPos.has(targetId)) continue;
-
-    const clampedOrder = Math.max(0, Math.min(Math.trunc(sortOrder), existing.length));
-    const hasPred = prefixMaxPos[i] !== -1;
-    const hasSucc = suffixMinPos[i] !== Infinity;
-
-    let bucket = clampedOrder;
-    if (hasPred && !hasSucc) {
-      bucket = prefixMaxPos[i] + 1;
-    } else if (!hasPred && hasSucc) {
-      bucket = Math.min(clampedOrder, suffixMinPos[i]);
-    } else if (hasPred && hasSucc) {
-      bucket = prefixMaxPos[i] < suffixMinPos[i] ? prefixMaxPos[i] + 1 : clampedOrder;
-    }
-    buckets[bucket].push(targetId);
-  }
-
-  const out: string[] = [];
-  for (let slot = 0; slot < existing.length; slot++) {
-    for (const id of buckets[slot]) out.push(id);
-    out.push(existing[slot]);
-  }
-  for (const id of buckets[existing.length]) out.push(id);
-  return out;
 }
 
 export class EntriesStore {
@@ -209,6 +136,21 @@ export class EntriesStore {
     }
 
     return { titleSummary, searchText: parts.join(' ').toLowerCase() };
+  }
+
+  /**
+   * 更新单条记录的 data_json，并同步重算 title_summary 与 search_text（供撤销恢复非关联字段值使用）
+   */
+  persistEntryDataAndMetadataInternal(
+    entryId: string,
+    lib: LibraryRecord,
+    data: Record<string, unknown>
+  ): void {
+    const { titleSummary, searchText } = this.computeTitleAndSearch(lib, data);
+    this.driver.runSync(
+      'UPDATE entries SET title_summary = ?, search_text = ?, data_json = ? WHERE id = ?',
+      [titleSummary, searchText, JSON.stringify(data), entryId]
+    );
   }
 
   private syncEntryRelationsInternal(
@@ -338,17 +280,34 @@ export class EntriesStore {
     const lib = this.libraries.getLibraryById(libraryId);
     if (!lib) return [];
 
-    const rows = this.driver.getAllSync<{ id: string; data_json: string }>(
-      'SELECT id, data_json FROM entries WHERE library_id = ?',
-      [lib.id]
-    );
-    if (rows.length === 0) return [];
-
     const relationFields = lib.fields.filter((f) => f.type === 'relation');
     if (relationFields.length === 0) {
       this.driver.runSync('DELETE FROM entry_relations WHERE source_library_id = ?', [lib.id]);
       return [];
     }
+
+    // 重建索引前先合并当前库已有的有效 entry_relations 到 data_json，防止旧数据在新增无关字段时丢失原关联
+    const existingLibRelRows = this.driver.getAllSync<{
+      source_entry_id: string;
+      target_entry_id: string;
+      field_key: string;
+      sort_order: number;
+    }>(
+      `SELECT source_entry_id, target_entry_id, field_key, sort_order
+       FROM entry_relations
+       WHERE source_library_id = ?
+       ORDER BY source_entry_id ASC, field_key ASC, sort_order ASC`,
+      [lib.id]
+    );
+    if (existingLibRelRows.length > 0) {
+      this.reconcileRelationRowsIntoEntriesInternal(existingLibRelRows);
+    }
+
+    const rows = this.driver.getAllSync<{ id: string; data_json: string }>(
+      'SELECT id, data_json FROM entries WHERE library_id = ?',
+      [lib.id]
+    );
+    if (rows.length === 0) return [];
 
     const { bySlug } = this.libraries.ensureCache();
     const entryLibCache = new Map<string, string | null>();
@@ -758,6 +717,100 @@ export class EntriesStore {
     }
 
     return updatedSourceIds;
+  }
+
+  /**
+   * 从历史删记录/删库快照的 outgoing relation 行中提取当前目标尚未存在于 entries 表的关联，
+   * 生成 DeferredMissingSource 供挂接到尚未撤销的目标快照，确保按「先恢复笔记再恢复书」顺序时旧快照关联不丢失。
+   */
+  collectDeferredMissingFromRelationRowsInternal(
+    relRows: readonly RawRelationRowLike[]
+  ): DeferredMissingSource[] {
+    if (relRows.length === 0) return [];
+
+    const sortedRows = [...relRows].sort(
+      (a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0)
+    );
+    const { byId } = this.libraries.ensureCache();
+    const relsBySource = new Map<
+      string,
+      Map<string, Array<{ targetId: string; sortOrder: number }>>
+    >();
+    const allTargetIds: string[] = [];
+
+    for (const r of sortedRows) {
+      const sourceEntryId = String(r.source_entry_id ?? '').trim();
+      const targetEntryId = String(r.target_entry_id ?? '').trim();
+      const fieldKey = String(r.field_key ?? '').trim();
+      if (!sourceEntryId || !targetEntryId || !fieldKey || isBatchRefToken(targetEntryId)) continue;
+
+      let byField = relsBySource.get(sourceEntryId);
+      if (!byField) {
+        byField = new Map();
+        relsBySource.set(sourceEntryId, byField);
+      }
+      let items = byField.get(fieldKey);
+      if (!items) {
+        items = [];
+        byField.set(fieldKey, items);
+      }
+      if (!items.some((it) => it.targetId === targetEntryId)) {
+        items.push({ targetId: targetEntryId, sortOrder: Number(r.sort_order ?? items.length) });
+        allTargetIds.push(targetEntryId);
+      }
+    }
+
+    if (relsBySource.size === 0) return [];
+    const existingTargetLibIds = this.loadEntryLibraryIdMap(allTargetIds);
+    const deferred: DeferredMissingSource[] = [];
+
+    for (const [sourceEntryId, byField] of relsBySource.entries()) {
+      const srcRow = this.driver.getFirstSync<{
+        id: string;
+        library_id: string;
+        data_json: string;
+      }>('SELECT id, library_id, data_json FROM entries WHERE id = ?', [sourceEntryId]);
+      if (!srcRow) continue;
+
+      const srcLib = byId.get(srcRow.library_id);
+      if (!srcLib) continue;
+      const fieldByKey = new Map(srcLib.fields.map((f) => [f.key, f]));
+
+      let parsed: Record<string, unknown> | null = null;
+      try {
+        const raw = JSON.parse(srcRow.data_json);
+        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+          parsed = raw as Record<string, unknown>;
+        }
+      } catch {
+        parsed = null;
+      }
+      if (!parsed) continue;
+
+      const missingByField: Record<string, string[]> = {};
+      const syntheticPrev: Record<string, unknown> = { ...parsed };
+      for (const [fieldKey, relItems] of byField.entries()) {
+        const fDef = fieldByKey.get(fieldKey);
+        if (!fDef || fDef.type !== 'relation') continue;
+
+        const missingItems = relItems.filter((it) => !existingTargetLibIds.has(it.targetId));
+        if (missingItems.length === 0) continue;
+
+        missingByField[fieldKey] = missingItems.map((it) => it.targetId);
+        const existingTokens = normalizeRelationValueList(parsed[fieldKey]);
+        syntheticPrev[fieldKey] = mergeOrderedRelationItems(existingTokens, relItems);
+      }
+
+      if (Object.keys(missingByField).length > 0) {
+        deferred.push({
+          id: srcRow.id,
+          prevDataJson: JSON.stringify(syntheticPrev),
+          missingByField,
+        });
+      }
+    }
+
+    return deferred;
   }
 
   /**

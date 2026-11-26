@@ -1,8 +1,11 @@
 import { DEFAULT_VIEW_LABELS } from '@/schema/view-dsl';
-import { rebuildLibraryRelationsTable } from './relations-sync';
+import {
+  rebuildLibraryRelationsTable,
+  reconcileLegacyEntryRelationsV5,
+} from './relations-sync';
 import { sqlReferencesLibraryView, type SyncSqlDriver } from './types';
 
-export const LATEST_SCHEMA_VERSION = 4;
+export const LATEST_SCHEMA_VERSION = 5;
 export const MAX_AI_SNAPSHOTS = 20;
 
 export const CORE_MIGRATION_SQL = `
@@ -305,6 +308,12 @@ export function runCoreMigrations(driver: SyncSqlDriver): void {
 
     if (version < 4) {
       backfillViewsAndRelationsV4(driver);
+      driver.execSync('PRAGMA user_version = 4;');
+      version = 4;
+    }
+
+    if (version < 5) {
+      reconcileLegacyEntryRelationsV5(driver);
       driver.execSync(`PRAGMA user_version = ${LATEST_SCHEMA_VERSION};`);
     }
   });

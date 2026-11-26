@@ -2543,3 +2543,504 @@ describe('6. Round-7 review fixes: legacy snapshot identity, plan trim undo, leg
     );
   });
 });
+
+describe('7. Round-8 review fixes: backup snapshot isolation, non-relation restore, symmetric partial undo & zero-scan startup', () => {
+  it('isolates undo history on full backup import and never lets legacy snapshots without library IDs delete imported libraries', () => {
+    // 场景 A：新版本中全量导入备份必须清空导入前的撤销历史
+    const ctx1 = createSeededRepo();
+    ctx1.repo.applyArchitectPlan({
+      summary: '导入前新建 custom_backup_iso',
+      libraries: [
+        {
+          slug: 'custom_backup_iso',
+          name: '导入前库',
+          description: '',
+          icon: '📦',
+          color: 'teal',
+          fields: [{ key: 'title', label: '标题', type: 'text', required: true }],
+          views: {
+            card: {
+              titleFieldKey: 'title',
+              footerMetricKeys: [],
+              sortDir: 'desc',
+              highlightRules: [],
+            },
+          },
+        },
+      ],
+      dashboardWidgets: [],
+    });
+    assert.ok(ctx1.repo.listSnapshots().length > 0);
+
+    // 另一份备份中恰好在几秒内创建了同 slug 但不同 ID 的库并含数据
+    const ctxOther = createSeededRepo();
+    const importedLibId = ctxOther.repo.upsertLibrary({
+      slug: 'custom_backup_iso',
+      name: '备份里的同名库',
+      description: '',
+      icon: '✨',
+      color: 'blue',
+      fields: [{ key: 'title', label: '标题', type: 'text', required: true }],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    const importedEntryId = ctxOther.repo.createEntry('custom_backup_iso', {
+      title: '来自备份的珍贵数据',
+    });
+    const otherBundle = ctxOther.repo.exportBackupBundle();
+
+    ctx1.repo.importBackupBundle(otherBundle);
+    assert.equal(ctx1.repo.listSnapshots().length, 0, 'Full backup import must clear prior snapshots');
+    assert.equal(ctx1.repo.getLibraryBySlug('custom_backup_iso')?.id, importedLibId);
+    assert.equal(
+      ctx1.repo.getHydratedEntryById(importedEntryId)?.entry.rawData.title,
+      '来自备份的珍贵数据'
+    );
+
+    // 场景 B：模拟 8eaa8a4 遗留的数据库状态（旧版导入备份未清空 ai_snapshots，旧建库快照缺少 createdLibraries 且与导入库时间相差 < 5 秒）
+    const snapTime = Date.now();
+    const legacySnapId = 'snap_legacy_8eaa8a4';
+    ctx1.driver.runSync(
+      `INSERT INTO ai_snapshots (id, action_summary, snapshot_json, undone, created_at)
+       VALUES (?, ?, ?, 0, ?)`,
+      [
+        legacySnapId,
+        '8eaa8a4 遗留建库方案',
+        JSON.stringify({
+          kind: 'architect_plan',
+          createdLibrarySlugs: ['custom_backup_iso'],
+          previousLibraries: [],
+          previousLibraryViews: [],
+          createdWidgetIds: [],
+        }),
+        snapTime,
+      ]
+    );
+    ctx1.driver.runSync('UPDATE libraries SET created_at = ? WHERE id = ?', [
+      snapTime + 1000,
+      importedLibId,
+    ]);
+    // 模拟从 8eaa8a4 (v4) 升级到最新版 (v5)
+    ctx1.driver.execSync('PRAGMA user_version = 4;');
+    const upgradedRepo = new OmniRepository(ctx1.driver);
+
+    assert.equal(upgradedRepo.describeSnapshotUndoImpact(legacySnapId).affectedEntriesCount, 0);
+    upgradedRepo.undoSnapshot(legacySnapId);
+    assert.equal(
+      upgradedRepo.getLibraryBySlug('custom_backup_iso')?.id,
+      importedLibId,
+      'Legacy snapshot without createdLibraries must never delete an imported library by slug/time window'
+    );
+    assert.equal(
+      upgradedRepo.getHydratedEntryById(importedEntryId)?.entry.rawData.title,
+      '来自备份的珍贵数据'
+    );
+  });
+
+  it('restores original text field values and search metadata when undoing an Architect plan that converted text to relation', () => {
+    const { repo } = createSeededRepo();
+    repo.upsertLibrary({
+      slug: 'edition_notes_r8',
+      name: '藏书品相',
+      description: '',
+      icon: '📖',
+      color: 'amber',
+      fields: [
+        { key: 'title', label: '书名', type: 'text', required: true },
+        { key: 'remark', label: '品相备注', type: 'text', required: false },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+
+    const entryId = repo.createEntry('edition_notes_r8', {
+      title: '百年孤独',
+      remark: '签名初版，书衣有折痕',
+    });
+
+    const lib = repo.getLibraryBySlug('edition_notes_r8')!;
+    const convertSnapId = repo.applyArchitectPlan(
+      {
+        summary: '将品相备注误改为关联字段',
+        libraries: [
+          {
+            slug: lib.slug,
+            name: lib.name,
+            description: lib.description,
+            icon: lib.icon,
+            color: lib.color,
+            fields: lib.fields.map((f) =>
+              f.key === 'remark'
+                ? {
+                    ...f,
+                    type: 'relation',
+                    relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+                  }
+                : f
+            ),
+            views: lib.views,
+          },
+        ],
+        dashboardWidgets: [],
+      },
+      { allowDestructiveFieldChanges: true }
+    );
+
+    assert.deepEqual(repo.getHydratedEntryById(entryId)?.entry.rawData.remark, []);
+
+    // 立即撤销方案：字段类型恢复为 text，原文必须完整找回且可搜索
+    repo.undoSnapshot(convertSnapId);
+    const restoredLib = repo.getLibraryBySlug('edition_notes_r8')!;
+    assert.equal(restoredLib.fields.find((f) => f.key === 'remark')?.type, 'text');
+    const restoredEntry = repo.getHydratedEntryById(entryId)!;
+    assert.equal(restoredEntry.entry.rawData.remark, '签名初版，书衣有折痕');
+    assert.ok(
+      repo.searchEntrySummaries('书衣有折痕').some((hit) => hit.id === entryId),
+      'Restored text field must also be reindexed into search_text'
+    );
+  });
+
+  it('preserves pending relations across arbitrary partial undo orders for both delete snapshots and Architect plan trims', () => {
+    const { repo } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    assert.ok(books.length >= 2);
+    const [bookA, bookB] = books;
+
+    // 场景 A：先删书、再删引用它的笔记 -> 先恢复书、再恢复笔记 -> 正向与反向关联均完整恢复
+    const noteId = repo.createEntry('reading_logs', {
+      book: [bookA.id],
+      read_date: '2026-11-27',
+      note: '先删书后删笔记测试',
+    });
+    const delBookSnap = repo.deleteEntry(bookA.id)!;
+    const delNoteSnap = repo.deleteEntry(noteId)!;
+
+    repo.undoSnapshot(delBookSnap);
+    repo.undoSnapshot(delNoteSnap);
+
+    const restoredNote = repo.getHydratedEntryById(noteId)!;
+    const restoredBook = repo.getHydratedEntryById(bookA.id)!;
+    assert.deepEqual(restoredNote.entry.rawData.book, [bookA.id]);
+    assert.deepEqual(
+      restoredNote.entry.forwardLinks.book?.map((r) => r.id),
+      [bookA.id]
+    );
+    assert.ok(restoredBook.entry.backlinks.some((r) => r.id === noteId));
+
+    // 场景 B：书单 [A, B] 经 AI 方案改为单选 -> 删除 B -> 撤销方案 -> 再恢复 B -> 书单恢复 [A, B]
+    repo.upsertLibrary({
+      slug: 'booklists_r8',
+      name: '分次撤销书单',
+      description: '',
+      icon: '📚',
+      color: 'teal',
+      fields: [
+        { key: 'title', label: '书单名', type: 'text', required: true },
+        {
+          key: 'books_ref',
+          label: '收录书籍',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    const listId = repo.createEntry('booklists_r8', {
+      title: '双书单',
+      books_ref: [bookA.id, bookB.id],
+    });
+    const listLib = repo.getLibraryBySlug('booklists_r8')!;
+    const narrowSnap = repo.applyArchitectPlan({
+      summary: '书单改为单选',
+      libraries: [
+        {
+          slug: listLib.slug,
+          name: listLib.name,
+          description: listLib.description,
+          icon: listLib.icon,
+          color: listLib.color,
+          fields: listLib.fields.map((f) =>
+            f.key === 'books_ref'
+              ? { ...f, relationConfig: { targetLibrarySlug: 'books', allowMultiple: false } }
+              : f
+          ),
+          views: listLib.views,
+        },
+      ],
+      dashboardWidgets: [],
+    });
+
+    const delBookBSnap = repo.deleteEntry(bookB.id)!;
+    repo.undoSnapshot(narrowSnap);
+    assert.deepEqual(repo.getHydratedEntryById(listId)?.entry.rawData.books_ref, [bookA.id]);
+
+    repo.undoSnapshot(delBookBSnap);
+    const finalList = repo.getHydratedEntryById(listId)!;
+    assert.deepEqual(finalList.entry.rawData.books_ref, [bookA.id, bookB.id]);
+    assert.deepEqual(
+      finalList.entry.forwardLinks.books_ref?.map((r) => r.id),
+      [bookA.id, bookB.id]
+    );
+  });
+
+  it('preserves legacy 9080eb3 entry_relations when adding unrelated fields after upgrade and when restoring legacy double-deleted entries in order', () => {
+    // 场景 A：9080eb3 遗留的笔记（data_json.book = []，关联仅在 entry_relations），升级后给该库新增无关关联字段，原书籍关联必须保留
+    const ctxA = createSeededRepo();
+    const bookA = ctxA.repo.listHydratedEntries('books')[0];
+    const logAId = ctxA.repo.createEntry('reading_logs', {
+      book: [bookA.id],
+      read_date: '2026-11-27',
+      note: '旧版仅关系表有效笔记',
+    });
+    const rawLogA = ctxA.driver.getFirstSync<{ data_json: string }>(
+      'SELECT data_json FROM entries WHERE id = ?',
+      [logAId]
+    )!;
+    const parsedLogA = JSON.parse(rawLogA.data_json) as Record<string, unknown>;
+    parsedLogA.book = [];
+    ctxA.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+      JSON.stringify(parsedLogA),
+      logAId,
+    ]);
+    // 即使跳过 v4->v5 迁移（保持当前 user_version=5），直接新增无关关联字段也必须先合并旧 entry_relations 而不清空
+    const logsLibA = ctxA.repo.getLibraryBySlug('reading_logs')!;
+    ctxA.repo.upsertLibrary({
+      slug: logsLibA.slug,
+      name: logsLibA.name,
+      description: logsLibA.description,
+      icon: logsLibA.icon,
+      color: logsLibA.color,
+      parentLibrarySlug: logsLibA.parentLibrarySlug ?? undefined,
+      showOnHome: logsLibA.showOnHome,
+      fields: [
+        ...logsLibA.fields,
+        {
+          key: 'extra_asset',
+          label: '关联装备',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'my_assets', allowMultiple: false },
+        },
+      ],
+      views: logsLibA.views,
+    });
+    const afterAddField = ctxA.repo.getHydratedEntryById(logAId)!;
+    assert.deepEqual(afterAddField.entry.rawData.book, [bookA.id]);
+    assert.deepEqual(
+      afterAddField.entry.forwardLinks.book?.map((r) => r.id),
+      [bookA.id]
+    );
+
+    // 场景 B：9080eb3 中先删笔记（data_json.book = []，仅 payload.relations 有 bookB）、再删书 -> 升级后先恢复笔记再恢复书 -> 关联恢复
+    const ctxB = createSeededRepo();
+    const bookB = ctxB.repo.listHydratedEntries('books')[0];
+    const logBId = ctxB.repo.createEntry('reading_logs', {
+      book: [bookB.id],
+      read_date: '2026-11-27',
+      note: '旧版双删同序恢复笔记',
+    });
+    const delLogBSnap = ctxB.repo.deleteEntry(logBId)!;
+    const delBookBSnap = ctxB.repo.deleteEntry(bookB.id)!;
+
+    // 模拟 9080eb3 删笔记快照：entry.data_json.book 为 []，关联只存在 payload.relations
+    const snapRow = ctxB.driver.getFirstSync<{ snapshot_json: string }>(
+      'SELECT snapshot_json FROM ai_snapshots WHERE id = ?',
+      [delLogBSnap]
+    )!;
+    const snapPayload = JSON.parse(snapRow.snapshot_json) as {
+      entry: { data_json: string };
+      relations: Array<Record<string, unknown>>;
+    };
+    const eData = JSON.parse(snapPayload.entry.data_json) as Record<string, unknown>;
+    eData.book = [];
+    snapPayload.entry.data_json = JSON.stringify(eData);
+    ctxB.driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
+      JSON.stringify(snapPayload),
+      delLogBSnap,
+    ]);
+
+    ctxB.repo.undoSnapshot(delLogBSnap);
+    // 书尚未恢复时笔记必须可编辑保存
+    const midLogB = ctxB.repo.getHydratedEntryById(logBId)!;
+    assert.deepEqual(midLogB.entry.rawData.book, []);
+    ctxB.repo.updateEntry(logBId, { ...midLogB.entry.rawData, note: '期间修改正文' });
+
+    ctxB.repo.undoSnapshot(delBookBSnap);
+    const finalLogB = ctxB.repo.getHydratedEntryById(logBId)!;
+    assert.equal(finalLogB.entry.rawData.note, '期间修改正文');
+    assert.deepEqual(finalLogB.entry.rawData.book, [bookB.id]);
+    assert.deepEqual(
+      finalLogB.entry.forwardLinks.book?.map((r) => r.id),
+      [bookB.id]
+    );
+  });
+
+  it('accounts for previously inserted missing items when merging multiple leading sort_order entries on legacy backup import', () => {
+    const { repo } = createSeededRepo();
+    const bookA = repo.createEntry('books', { book_title: '前序A', status: '想读' });
+    const bookB = repo.createEntry('books', { book_title: '前序B', status: '想读' });
+    const bookC = repo.createEntry('books', { book_title: '前序C', status: '想读' });
+    const bookD = repo.createEntry('books', { book_title: '前序D', status: '想读' });
+
+    repo.upsertLibrary({
+      slug: 'multi_lead_import_notes',
+      name: '多前项导入顺序',
+      description: '',
+      icon: '📑',
+      color: 'amber',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'books_ref',
+          label: '书目',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+
+    const noteId = repo.createEntry('multi_lead_import_notes', {
+      title: 'ABCD顺序测试',
+      books_ref: [bookA, bookB, bookC, bookD],
+    });
+
+    const bundle = repo.exportBackupBundle();
+    // 构造实际备份：data_json 只剩 [C, D]，关系表仅记录 A(0)、B(1)
+    bundle.entries = bundle.entries.map((e) => {
+      if (String(e.id) !== noteId) return e;
+      const parsed = JSON.parse(String(e.data_json)) as Record<string, unknown>;
+      parsed.books_ref = [bookC, bookD];
+      return { ...e, data_json: JSON.stringify(parsed) };
+    });
+    bundle.relations = bundle.relations.filter((r) => {
+      if (String(r.source_entry_id) !== noteId) return true;
+      return String(r.target_entry_id) === bookA || String(r.target_entry_id) === bookB;
+    });
+
+    const freshCtx = createInstrumentedSqliteDriver();
+    const freshRepo = new OmniRepository(freshCtx.driver);
+    freshRepo.importBackupBundle(bundle);
+
+    const hydrated = freshRepo.getHydratedEntryById(noteId)!;
+    assert.deepEqual(hydrated.entry.rawData.books_ref, [bookA, bookB, bookC, bookD]);
+    assert.deepEqual(
+      hydrated.entry.forwardLinks.books_ref?.map((r) => r.id),
+      [bookA, bookB, bookC, bookD]
+    );
+  });
+
+  it('performs zero ai_snapshots reads during repository startup after v5 migration even with large snapshots', () => {
+    const { repo, driver, queries, clearQueries } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    assert.ok(books.length >= 2);
+
+    repo.upsertLibrary({
+      slug: 'large_snap_lib_r8',
+      name: '大快照测试库',
+      description: '',
+      icon: '📦',
+      color: 'slate',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        { key: 'body', label: '正文', type: 'text', required: false },
+        {
+          key: 'books_ref',
+          label: '关联书',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    const lib = repo.getLibraryBySlug('large_snap_lib_r8')!;
+    const bigBody = '长正文内容'.repeat(200);
+    const now = Date.now();
+    driver.withTransactionSync(() => {
+      for (let i = 0; i < 64; i++) {
+        driver.runSync(
+          `INSERT INTO entries (id, library_id, title_summary, search_text, data_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            `ent_big_${i}`,
+            lib.id,
+            `大记录${i}`,
+            `大记录${i}`,
+            JSON.stringify({ title: `大记录${i}`, body: bigBody, books_ref: [books[0].id, books[1].id] }),
+            now + i,
+            now + i,
+          ]
+        );
+      }
+    });
+
+    // 生成包含较大 trimmedSources 的新格式 architect_plan 快照
+    repo.applyArchitectPlan({
+      summary: '生成大方案快照',
+      libraries: [
+        {
+          slug: lib.slug,
+          name: lib.name,
+          description: lib.description,
+          icon: lib.icon,
+          color: lib.color,
+          fields: lib.fields.map((f) =>
+            f.key === 'books_ref'
+              ? { ...f, relationConfig: { targetLibrarySlug: 'books', allowMultiple: false } }
+              : f
+          ),
+          views: lib.views,
+        },
+      ],
+      dashboardWidgets: [],
+    });
+
+    // 连续两次重新初始化 OmniRepository：均不应查询 ai_snapshots 表
+    for (let boot = 0; boot < 2; boot++) {
+      clearQueries();
+      new OmniRepository(driver);
+      const snapshotQueries = queries.filter((q) => /SELECT[\s\S]*FROM\s+ai_snapshots/i.test(q));
+      assert.deepEqual(
+        snapshotQueries,
+        [],
+        `Startup #${boot + 1} must not read ai_snapshots`
+      );
+    }
+  });
+});
