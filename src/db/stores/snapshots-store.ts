@@ -202,7 +202,7 @@ export class SnapshotsStore {
       plan.dashboardWidgets.forEach((w, idx) => {
         try {
           this.driver.queryReadOnlySync(w.readonlySql);
-          const wid = this.widgets.saveDashboardWidgetInternal(w, null, 50 + idx);
+          const { id: wid } = this.widgets.saveDashboardWidgetInternal(w, null, 50 + idx);
           createdWidgetIds.push(wid);
         } catch {
           // 跳过语法有误的可选图表，不阻塞主模型创建

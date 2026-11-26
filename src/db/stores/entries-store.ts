@@ -1,4 +1,7 @@
-import type { DraftEntryItem } from '@/ai/schemas';
+import {
+  resolveDraftDataForCommit,
+  type CommitDraftEntryItem,
+} from '@/engine/capture-drafts';
 import { createId } from '@/engine/id';
 import { buildEntryPayloadValidator, type FieldDef, type FieldType } from '@/schema/field-defs';
 import {
@@ -110,11 +113,20 @@ export class EntriesStore {
           ? [rawTargets.trim()]
           : [];
 
+      const targetLib = f.relationConfig?.targetLibrarySlug
+        ? this.libraries.getLibraryBySlug(f.relationConfig.targetLibrarySlug)
+        : null;
+
       targets.forEach((targetId, idx) => {
-        const exists = this.driver.getFirstSync<{ id: string }>(
-          'SELECT id FROM entries WHERE id = ?',
-          [targetId]
-        );
+        const exists = targetLib
+          ? this.driver.getFirstSync<{ id: string }>(
+              'SELECT id FROM entries WHERE id = ? AND library_id = ?',
+              [targetId, targetLib.id]
+            )
+          : this.driver.getFirstSync<{ id: string }>(
+              'SELECT id FROM entries WHERE id = ?',
+              [targetId]
+            );
         if (exists) {
           this.driver.runSync(
             `INSERT OR IGNORE INTO entry_relations (id, source_entry_id, target_entry_id, source_library_id, field_key, sort_order)
@@ -240,28 +252,17 @@ export class EntriesStore {
     return { entryRow, relRows, detachedSources };
   }
 
-  commitOmniDraftsInternal(drafts: DraftEntryItem[]): string[] {
+  commitOmniDraftsInternal(drafts: readonly CommitDraftEntryItem[]): string[] {
     const createdIds: string[] = [];
+    const createdIdByDraftId = new Map<string, string>();
     drafts.forEach((draft) => {
-      const resolved: Record<string, unknown> = { ...draft.data };
-      for (const [k, v] of Object.entries(resolved)) {
-        if (Array.isArray(v)) {
-          resolved[k] = v
-            .map((item) => {
-              if (typeof item === 'string' && item.startsWith('@prev:')) {
-                const idx = Number(item.slice(6));
-                return createdIds[idx] ?? '';
-              }
-              return String(item);
-            })
-            .filter(Boolean);
-        } else if (typeof v === 'string' && v.startsWith('@prev:')) {
-          const idx = Number(v.slice(6));
-          resolved[k] = createdIds[idx] ? [createdIds[idx]] : [];
-        }
-      }
+      const lib = this.libraries.getLibraryBySlug(draft.librarySlug);
+      const resolved = resolveDraftDataForCommit(draft, lib, createdIds, createdIdByDraftId);
       const newId = this.createEntryInternal(draft.librarySlug, resolved);
       createdIds.push(newId);
+      if (draft.draftId) {
+        createdIdByDraftId.set(draft.draftId, newId);
+      }
     });
     return createdIds;
   }

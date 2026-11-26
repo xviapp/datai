@@ -30,8 +30,12 @@ import {
 } from '@/components/ui/SlidingSegmentedBar';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { VIEW_TYPE_META } from '@/constants/schema-meta';
-import { useOmniModalActions, useRepository } from '@/context/omni-context';
+import { useOmniModalActions, useRepository, useWidgetRevision } from '@/context/omni-context';
 import type { HydratedEntry, LibraryViewRecord } from '@/db/models';
+import {
+  filterAndSortLibraryEntries,
+  type LibrarySortModeId,
+} from '@/engine/library-view-rules';
 import { useSwipeablePager } from '@/hooks/useSwipeablePager';
 import type {
   CalendarViewConfig,
@@ -40,10 +44,99 @@ import type {
 } from '@/schema/view-dsl';
 import { useSafeNavigation } from '@/utils/navigation';
 
-type SortMode = 'updated' | 'date_desc' | 'metric_desc' | 'title_asc';
-
 function CardSeparator() {
   return <View style={{ height: 10 }} />;
+}
+
+function LibraryStatsTabPage({
+  librarySlug,
+  tone,
+  shouldLoad,
+  paused,
+  bottomInset,
+  pageStyle,
+  onOpenCustomize,
+}: {
+  librarySlug: string;
+  tone: (typeof ToneMap)['teal'];
+  shouldLoad: boolean;
+  paused: boolean;
+  bottomInset: number;
+  pageStyle: { width: number } | typeof styles.singlePage;
+  onOpenCustomize: () => void;
+}) {
+  const { repo } = useRepository();
+  const widgetRevision = useWidgetRevision();
+
+  const designedStatsWidgets = useMemo(
+    () =>
+      !repo || widgetRevision < 0 || !shouldLoad
+        ? []
+        : repo.listWidgetsForLibrary(librarySlug),
+    [repo, widgetRevision, librarySlug, shouldLoad]
+  );
+
+  return (
+    <ScrollView
+      nestedScrollEnabled
+      keyboardShouldPersistTaps="handled"
+      style={pageStyle}
+      contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + bottomInset }]}
+    >
+      {designedStatsWidgets.length === 0 ? (
+        <View style={styles.emptyStatsCard}>
+          <View style={[styles.emptyStatsIcon, { backgroundColor: tone.soft }]}>
+            <Feather name="bar-chart-2" size={20} color={tone.solid} />
+          </View>
+          <Text style={styles.emptyStatsDesc}>
+            告诉助手你想看的指标或图表，生成后展示在这里
+          </Text>
+          <Pressable
+            onPress={onOpenCustomize}
+            style={({ pressed }) => [
+              styles.emptyStatsBtn,
+              { backgroundColor: tone.solid },
+              pressed && styles.pressedScale,
+            ]}
+          >
+            <Text style={styles.emptyStatsBtnText}>去定制统计</Text>
+          </Pressable>
+        </View>
+      ) : (
+        <View style={styles.statsWrap}>
+          {designedStatsWidgets.some((w) => w.chartType === 'kpi_number') ? (
+            <View style={styles.kpiRow}>
+              {designedStatsWidgets
+                .filter((w) => w.chartType === 'kpi_number')
+                .map((w) => (
+                  <SqlWidgetCard
+                    key={w.id}
+                    widget={w}
+                    compact
+                    paused={paused}
+                    pinnedOverview={w.pinnedOverview}
+                    onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
+                    onDelete={(id) => repo?.deleteDashboardWidget(id)}
+                  />
+                ))}
+            </View>
+          ) : null}
+          {designedStatsWidgets
+            .filter((w) => w.chartType !== 'kpi_number')
+            .map((w) => (
+              <SqlWidgetCard
+                key={w.id}
+                widget={w}
+                paused={paused}
+                pinnedOverview={w.pinnedOverview}
+                onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
+                onDelete={(id) => repo?.deleteDashboardWidget(id)}
+              />
+            ))}
+        </View>
+      )}
+    </ScrollView>
+  );
 }
 
 export default function LibraryWorkspaceScreen() {
@@ -58,7 +151,7 @@ export default function LibraryWorkspaceScreen() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [selectedFilterVal, setSelectedFilterVal] = useState<string>('');
-  const [sortMode, setSortMode] = useState<SortMode>('updated');
+  const [sortMode, setSortMode] = useState<LibrarySortModeId>('view_default');
   const [entryModalOpen, setEntryModalOpen] = useState(false);
   const [schemaModalOpen, setSchemaModalOpen] = useState(false);
   const [createSubForParent, setCreateSubForParent] = useState<string | null>(null);
@@ -115,81 +208,41 @@ export default function LibraryWorkspaceScreen() {
     [repo, revision, library, searchText]
   );
 
-  const primaryFilterField = useMemo(() => {
-    if (!library) return null;
-    const badgeKey = library.views.card.rightBadgeFieldKey;
-    const badgeSelect = badgeKey
-      ? library.fields.find((f) => f.key === badgeKey && f.type === 'select' && f.options?.length)
-      : undefined;
-    return (
-      badgeSelect ??
-      library.fields.find((f) => f.type === 'select' && f.options && f.options.length > 0) ??
-      null
-    );
-  }, [library]);
-
-  const primaryDateField = useMemo(
-    () => library?.fields.find((f) => f.type === 'date') ?? null,
-    [library]
-  );
-
-  const primaryMetricField = useMemo(
+  const activeCardConfig = useMemo(
     () =>
-      library?.fields.find(
-        (f) =>
-          f.type === 'currency' ||
-          f.type === 'number' ||
-          f.type === 'rating' ||
-          f.type === 'formula'
-      ) ?? null,
-    [library]
+      currentView?.viewType === 'card'
+        ? (currentView.config as Partial<CardViewConfig>)
+        : undefined,
+    [currentView]
   );
 
-  const availableSortModes = useMemo(() => {
-    const list: Array<{ id: SortMode; label: string }> = [{ id: 'updated', label: '最新更新' }];
-    if (primaryDateField) list.push({ id: 'date_desc', label: `按${primaryDateField.label}` });
-    if (primaryMetricField) list.push({ id: 'metric_desc', label: `按${primaryMetricField.label}` });
-    list.push({ id: 'title_asc', label: '按标题' });
-    return list;
-  }, [primaryDateField, primaryMetricField]);
-
-  const activeSortInfo =
-    availableSortModes.find((m) => m.id === sortMode) ?? availableSortModes[0];
-
-  const entries = useMemo(() => {
-    let list = rawEntries;
-    if (primaryFilterField && selectedFilterVal) {
-      list = list.filter(
-        (e) => String(e.computedData[primaryFilterField.key] ?? '') === selectedFilterVal
-      );
-    }
-    if (activeSortInfo.id === 'updated') return list;
-
-    const copy = [...list];
-    if (activeSortInfo.id === 'date_desc' && primaryDateField) {
-      copy.sort((a, b) =>
-        String(b.computedData[primaryDateField.key] ?? '').localeCompare(
-          String(a.computedData[primaryDateField.key] ?? '')
-        )
-      );
-    } else if (activeSortInfo.id === 'metric_desc' && primaryMetricField) {
-      copy.sort(
-        (a, b) =>
-          (Number(b.computedData[primaryMetricField.key]) || 0) -
-          (Number(a.computedData[primaryMetricField.key]) || 0)
-      );
-    } else if (activeSortInfo.id === 'title_asc') {
-      copy.sort((a, b) => a.titleSummary.localeCompare(b.titleSummary, 'zh-CN'));
-    }
-    return copy;
-  }, [
-    rawEntries,
+  const {
+    entries,
     primaryFilterField,
-    selectedFilterVal,
-    activeSortInfo.id,
-    primaryDateField,
-    primaryMetricField,
-  ]);
+    sortOptions: availableSortModes,
+    activeSort: activeSortInfo,
+  } = useMemo(() => {
+    if (!library) {
+      return {
+        entries: [] as HydratedEntry[],
+        primaryFilterField: null,
+        sortOptions: [],
+        activeSort: {
+          id: 'updated_desc' as LibrarySortModeId,
+          label: '最新更新',
+          direction: 'desc' as const,
+          isDefault: true,
+        },
+      };
+    }
+    return filterAndSortLibraryEntries({
+      entries: rawEntries,
+      library,
+      cardConfig: activeCardConfig,
+      selectedFilterValue: selectedFilterVal,
+      sortMode,
+    });
+  }, [rawEntries, library, activeCardConfig, selectedFilterVal, sortMode]);
 
   const rootParent = useMemo(
     () =>
@@ -212,20 +265,13 @@ export default function LibraryWorkspaceScreen() {
   );
 
   const shouldLoadStats = statsViewIdx >= 0 && Math.abs(safeTabIndex - statsViewIdx) <= 1;
-  const designedStatsWidgets = useMemo(
-    () =>
-      !repo || revision < 0 || !library || !shouldLoadStats
-        ? []
-        : repo.listWidgetsForLibrary(library.slug),
-    [repo, revision, library, shouldLoadStats]
-  );
 
   const handleSwitchFamilyLibrary = useCallback(
     (targetSlug: string) => {
       setSearchText('');
       setSearchOpen(false);
       setSelectedFilterVal('');
-      setSortMode('updated');
+      setSortMode('view_default');
       setActiveTabIndex(0);
       jumpToPage(0);
       nav.setParams({ slug: targetSlug });
@@ -331,7 +377,7 @@ export default function LibraryWorkspaceScreen() {
             onPress={cycleSortMode}
             style={({ pressed }) => [
               styles.sortPillBtn,
-              activeSortInfo.id !== 'updated' && {
+              !activeSortInfo.isDefault && {
                 borderColor: tone.solid,
                 backgroundColor: tone.soft,
               },
@@ -339,15 +385,15 @@ export default function LibraryWorkspaceScreen() {
             ]}
           >
             <Feather
-              name="arrow-down"
+              name={activeSortInfo.direction === 'asc' ? 'arrow-up' : 'arrow-down'}
               size={12}
-              color={activeSortInfo.id !== 'updated' ? tone.ink : Palette.inkSecondary}
+              color={!activeSortInfo.isDefault ? tone.ink : Palette.inkSecondary}
             />
             <Text
               numberOfLines={1}
               style={[
                 styles.sortPillText,
-                activeSortInfo.id !== 'updated' && { color: tone.ink },
+                !activeSortInfo.isDefault && { color: tone.ink },
               ]}
             >
               {activeSortInfo.label}
@@ -437,66 +483,16 @@ export default function LibraryWorkspaceScreen() {
     }
 
     return (
-      <ScrollView
+      <LibraryStatsTabPage
         key={view.id}
-        nestedScrollEnabled
-        keyboardShouldPersistTaps="handled"
-        style={pageStyle}
-        contentContainerStyle={[styles.pageContent, { paddingBottom: 88 + insets.bottom }]}
-      >
-        {designedStatsWidgets.length === 0 ? (
-          <View style={styles.emptyStatsCard}>
-            <View style={[styles.emptyStatsIcon, { backgroundColor: tone.soft }]}>
-              <Feather name="bar-chart-2" size={20} color={tone.solid} />
-            </View>
-            <Text style={styles.emptyStatsDesc}>
-              告诉助手你想看的指标或图表，生成后展示在这里
-            </Text>
-            <Pressable
-              onPress={() => openOmniCapture(library.slug, 'text', undefined, 'stats')}
-              style={({ pressed }) => [
-                styles.emptyStatsBtn,
-                { backgroundColor: tone.solid },
-                pressed && styles.pressedScale,
-              ]}
-            >
-              <Text style={styles.emptyStatsBtnText}>去定制统计</Text>
-            </Pressable>
-          </View>
-        ) : (
-          <View style={styles.statsWrap}>
-            {designedStatsWidgets.some((w) => w.chartType === 'kpi_number') ? (
-              <View style={styles.kpiRow}>
-                {designedStatsWidgets
-                  .filter((w) => w.chartType === 'kpi_number')
-                  .map((w) => (
-                    <SqlWidgetCard
-                      key={w.id}
-                      widget={w}
-                      compact
-                      paused={safeTabIndex !== viewIndex}
-                      pinnedOverview={w.pinnedOverview}
-                      onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
-                      onDelete={(id) => repo?.deleteDashboardWidget(id)}
-                    />
-                  ))}
-              </View>
-            ) : null}
-            {designedStatsWidgets
-              .filter((w) => w.chartType !== 'kpi_number')
-              .map((w) => (
-                <SqlWidgetCard
-                  key={w.id}
-                  widget={w}
-                  paused={safeTabIndex !== viewIndex}
-                  pinnedOverview={w.pinnedOverview}
-                  onToggleOverview={(id, next) => repo?.setWidgetPinnedOverview(id, next)}
-                  onDelete={(id) => repo?.deleteDashboardWidget(id)}
-                />
-              ))}
-          </View>
-        )}
-      </ScrollView>
+        librarySlug={library.slug}
+        tone={tone}
+        shouldLoad={shouldLoadStats}
+        paused={safeTabIndex !== viewIndex}
+        bottomInset={insets.bottom}
+        pageStyle={pageStyle}
+        onOpenCustomize={() => openOmniCapture(library.slug, 'text', undefined, 'stats')}
+      />
     );
   };
 

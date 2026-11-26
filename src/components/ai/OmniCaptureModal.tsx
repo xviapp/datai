@@ -23,7 +23,6 @@ import {
   type UnifiedAssistantResult,
 } from '@/ai/agents';
 import { isAbortError } from '@/ai/deepseek-client';
-import type { DraftEntryItem } from '@/ai/schemas';
 import { AnalystResultView } from '@/components/ai/omni-capture/AnalystResultView';
 import { ArchitectPlanView } from '@/components/ai/omni-capture/ArchitectPlanView';
 import { CaptureResultView } from '@/components/ai/omni-capture/CaptureResultView';
@@ -45,6 +44,13 @@ import {
   useRepository,
 } from '@/context/omni-context';
 import type { ArchitectLibraryDiff } from '@/db/models';
+import {
+  findDanglingDraftRelations,
+  normalizeCaptureDrafts,
+  removeCaptureDraftById,
+  updateDraftRelationTokens,
+  type ManagedCaptureDraft,
+} from '@/engine/capture-drafts';
 import { createId } from '@/engine/id';
 import { compressImageForAiVision, pickImageAsset } from '@/engine/image-storage';
 import type { FieldType } from '@/schema/field-defs';
@@ -110,7 +116,8 @@ function OmniCaptureBody() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [result, setResult] = useState<UnifiedAssistantResult | null>(null);
-  const [drafts, setDrafts] = useState<DraftEntryItem[]>([]);
+  const [drafts, setDrafts] = useState<ManagedCaptureDraft[]>([]);
+  const [removedDraftTitles, setRemovedDraftTitles] = useState<Record<string, string>>({});
   const [composerExpanded, setComposerExpanded] = useState(true);
   const [selectedMode, setSelectedMode] = useState<AssistantMode>(() =>
     getDefaultModeForScene(omniScene, omniEntryContext)
@@ -201,14 +208,14 @@ function OmniCaptureBody() {
   const showComposerBody = !result || composerExpanded;
 
   const updateDraftField = (
-    draftIdx: number,
+    draftId: string,
     fieldKey: string,
     nextRaw: string,
     fieldType?: FieldType
   ) => {
     setDrafts((prev) =>
-      prev.map((d, i) => {
-        if (i !== draftIdx) return d;
+      prev.map((d) => {
+        if (d.draftId !== draftId) return d;
         let parsed: unknown = nextRaw;
         if (fieldType === 'number' || fieldType === 'currency' || fieldType === 'rating') {
           const num = Number(nextRaw);
@@ -217,6 +224,11 @@ function OmniCaptureBody() {
         return { ...d, data: { ...d.data, [fieldKey]: parsed } };
       })
     );
+  };
+
+  const updateDraftRelation = (draftId: string, fieldKey: string, nextTokens: string[]) => {
+    setErrorMsg(null);
+    setDrafts((prev) => updateDraftRelationTokens(prev, draftId, fieldKey, nextTokens));
   };
 
   const handleToggleVoicePress = () => {
@@ -248,6 +260,7 @@ function OmniCaptureBody() {
       setSuccessMsg(null);
       setResult(null);
       setDrafts([]);
+      setRemovedDraftTitles({});
 
       const outcome = await runUnifiedAssistant(
         repo,
@@ -274,7 +287,8 @@ function OmniCaptureBody() {
       setResult(outcome);
       setComposerExpanded(false);
       if (outcome.intent === 'capture') {
-        setDrafts(outcome.capture.drafts);
+        setDrafts(normalizeCaptureDrafts(outcome.capture.drafts, libMap));
+        setRemovedDraftTitles({});
       }
     } catch (err) {
       if (isAbortError(err)) return;
@@ -286,9 +300,21 @@ function OmniCaptureBody() {
     }
   };
 
+  const danglingRelations = useMemo(
+    () => findDanglingDraftRelations(drafts, libMap),
+    [drafts, libMap]
+  );
+
   const handleCommitDrafts = () => {
     if (!repo || drafts.length === 0) return;
+    if (danglingRelations.length > 0) {
+      setErrorMsg(
+        `有 ${danglingRelations.length} 处关联指向已删除的草稿，请先重新选择或清除关联后再保存`
+      );
+      return;
+    }
     try {
+      setErrorMsg(null);
       repo.commitOmniDrafts(drafts, `随手记：${inputText.slice(0, 24) || '图片识别'}`);
       closeOmniCapture();
     } catch (err) {
@@ -336,8 +362,15 @@ function OmniCaptureBody() {
     }
   };
 
-  const removeDraftAt = (idx: number) => {
-    setDrafts((prev) => prev.filter((_, i) => i !== idx));
+  const removeDraftById = (draftId: string) => {
+    setErrorMsg(null);
+    setDrafts((prev) => {
+      const { nextDrafts, removedLabel } = removeCaptureDraftById(prev, draftId, libMap);
+      if (removedLabel) {
+        setRemovedDraftTitles((titles) => ({ ...titles, [draftId]: removedLabel }));
+      }
+      return nextDrafts;
+    });
   };
 
   const inputPlaceholder = getSceneInputPlaceholder({
@@ -565,9 +598,12 @@ function OmniCaptureBody() {
             assistantNote={result.capture.assistantNote}
             drafts={drafts}
             libMap={libMap}
+            danglingRelations={danglingRelations}
+            removedDraftTitles={removedDraftTitles}
             loading={Boolean(loadingStep)}
             onUpdateField={updateDraftField}
-            onRemoveDraft={removeDraftAt}
+            onUpdateRelation={updateDraftRelation}
+            onRemoveDraft={removeDraftById}
             onRetryAs={(alt) => void handleSend(alt)}
           />
         ) : null}
@@ -606,9 +642,23 @@ function OmniCaptureBody() {
             >
               <Text style={styles.secondaryBtnText}>重新来</Text>
             </Pressable>
-            <Pressable onPress={handleCommitDrafts} style={styles.primaryBtn}>
-              <Feather name="check" size={16} color={Palette.inkInverse} />
-              <Text style={styles.primaryBtnText}>保存记录 ({drafts.length})</Text>
+            <Pressable
+              onPress={handleCommitDrafts}
+              style={[
+                styles.primaryBtn,
+                danglingRelations.length > 0 && { backgroundColor: Palette.warning },
+              ]}
+            >
+              <Feather
+                name={danglingRelations.length > 0 ? 'alert-circle' : 'check'}
+                size={16}
+                color={Palette.inkInverse}
+              />
+              <Text style={styles.primaryBtnText}>
+                {danglingRelations.length > 0
+                  ? `待重选关联 (${danglingRelations.length})`
+                  : `保存记录 (${drafts.length})`}
+              </Text>
             </Pressable>
           </>
         ) : result?.intent === 'architect' ? (

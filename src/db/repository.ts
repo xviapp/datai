@@ -1,4 +1,5 @@
-import type { ArchitectPlan, DraftEntryItem } from '@/ai/schemas';
+import type { ArchitectPlan } from '@/ai/schemas';
+import type { CommitDraftEntryItem } from '@/engine/capture-drafts';
 import {
   getDefaultViewLabel,
   type DashboardWidget,
@@ -52,6 +53,7 @@ export type {
 } from './models';
 
 type ChangeListener = () => void;
+export type RepositoryChangeScope = 'data' | 'widgets' | 'all';
 
 /**
  * 本地单机数据库仓储门面（Facade）：
@@ -60,6 +62,7 @@ type ChangeListener = () => void;
 export class OmniRepository {
   private driver: SyncSqlDriver;
   private listeners = new Set<ChangeListener>();
+  private widgetListeners = new Set<ChangeListener>();
   private librariesStore: LibrariesStore;
   private entriesStore: EntriesStore;
   private widgetsStore: WidgetsStore;
@@ -83,6 +86,9 @@ export class OmniRepository {
     });
   }
 
+  /**
+   * 订阅核心数据变更（记录本结构、视图、条目、快照恢复等）；纯图表置顶/排序不会触发此订阅。
+   */
   subscribe(listener: ChangeListener): () => void {
     this.listeners.add(listener);
     return () => {
@@ -90,10 +96,27 @@ export class OmniRepository {
     };
   }
 
-  private notify(): void {
-    this.librariesStore.invalidateCache();
-    for (const fn of this.listeners) {
-      fn();
+  /**
+   * 订阅统计图表变更（新增、总览置顶、排序、删除以及全量恢复/删库等会影响图表列表的操作）。
+   */
+  subscribeWidgets(listener: ChangeListener): () => void {
+    this.widgetListeners.add(listener);
+    return () => {
+      this.widgetListeners.delete(listener);
+    };
+  }
+
+  private notify(scope: RepositoryChangeScope = 'all'): void {
+    if (scope === 'data' || scope === 'all') {
+      this.librariesStore.invalidateCache();
+      for (const fn of this.listeners) {
+        fn();
+      }
+    }
+    if (scope === 'widgets' || scope === 'all') {
+      for (const fn of this.widgetListeners) {
+        fn();
+      }
     }
   }
 
@@ -181,7 +204,7 @@ export class OmniRepository {
     const id = this.driver.withTransactionSync(() =>
       this.librariesStore.upsertLibraryInternal(bp, { viewInputs })
     );
-    this.notify();
+    this.notify('data');
     return id;
   }
 
@@ -189,7 +212,7 @@ export class OmniRepository {
     this.driver.withTransactionSync(() => {
       this.librariesStore.saveLibraryViewsInternal(librarySlug, nextViews);
     });
-    this.notify();
+    this.notify('data');
   }
 
   addLibraryView(
@@ -314,7 +337,7 @@ export class OmniRepository {
     const id = this.driver.withTransactionSync(() =>
       this.entriesStore.createEntryInternal(librarySlug, inputData)
     );
-    this.notify();
+    this.notify('data');
     return id;
   }
 
@@ -322,7 +345,7 @@ export class OmniRepository {
     this.driver.withTransactionSync(() => {
       this.entriesStore.updateEntryInternal(entryId, inputData);
     });
-    this.notify();
+    this.notify('data');
   }
 
   deleteEntry(entryId: string): string | null {
@@ -338,11 +361,11 @@ export class OmniRepository {
         detachedSources: deleted.detachedSources,
       });
     });
-    this.notify();
+    this.notify('data');
     return snapshotId;
   }
 
-  commitOmniDrafts(drafts: DraftEntryItem[], snapshotNote?: string): string[] {
+  commitOmniDrafts(drafts: readonly CommitDraftEntryItem[], snapshotNote?: string): string[] {
     let createdIds: string[] = [];
     this.driver.withTransactionSync(() => {
       createdIds = this.entriesStore.commitOmniDraftsInternal(drafts);
@@ -353,7 +376,7 @@ export class OmniRepository {
         });
       }
     });
-    this.notify();
+    this.notify('data');
     return createdIds;
   }
 
@@ -416,26 +439,28 @@ export class OmniRepository {
 
   saveDashboardWidget(w: DashboardWidget, librarySlug: string | null = null): void {
     this.driver.queryReadOnlySync(w.readonlySql);
+    let viewsChanged = false;
     this.driver.withTransactionSync(() => {
-      this.widgetsStore.saveDashboardWidgetInternal(w, librarySlug);
+      const saved = this.widgetsStore.saveDashboardWidgetInternal(w, librarySlug);
+      viewsChanged = saved.viewsChanged;
     });
-    this.notify();
+    this.notify(viewsChanged ? 'all' : 'widgets');
   }
 
   setWidgetPinnedOverview(widgetId: string, pinned: boolean): void {
     this.widgetsStore.setWidgetPinnedOverviewInternal(widgetId, pinned);
-    this.notify();
+    this.notify('widgets');
   }
 
   moveDashboardWidget(widgetId: string, direction: 'up' | 'down', scopeIds: string[]): void {
     if (this.widgetsStore.moveDashboardWidgetInternal(widgetId, direction, scopeIds)) {
-      this.notify();
+      this.notify('widgets');
     }
   }
 
   deleteDashboardWidget(widgetId: string): void {
     this.widgetsStore.deleteDashboardWidgetInternal(widgetId);
-    this.notify();
+    this.notify('widgets');
   }
 
   executeReadOnlyQuery(sql: string): Array<Record<string, unknown>> {

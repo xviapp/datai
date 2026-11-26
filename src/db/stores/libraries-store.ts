@@ -525,17 +525,17 @@ export class LibrariesStore {
     }
   }
 
-  ensureStatsViewForLibrary(libSlug: string): void {
+  ensureStatsViewForLibrary(libSlug: string): boolean {
     const libRow = this.driver.getFirstSync<{ id: string }>(
       'SELECT id FROM libraries WHERE slug = ?',
       [libSlug]
     );
-    if (!libRow) return;
+    if (!libRow) return false;
     const existing = this.driver.getFirstSync<{ id: string }>(
       "SELECT id FROM library_views WHERE library_id = ? AND view_type = 'stats'",
       [libRow.id]
     );
-    if (existing) return;
+    if (existing) return false;
 
     const maxRow = this.driver.getFirstSync<{ max_order: number | null }>(
       'SELECT MAX(sort_order) AS max_order FROM library_views WHERE library_id = ?',
@@ -557,6 +557,7 @@ export class LibrariesStore {
         now,
       ]
     );
+    return true;
   }
 
   saveLibraryViewsInternal(librarySlug: string, nextViews: LibraryViewInput[]): void {

@@ -22,7 +22,7 @@ import {
 import { TabPageHeader } from '@/components/layout/TabPageHeader';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Palette } from '@/constants/design-tokens';
-import { useRepository } from '@/context/omni-context';
+import { useRepository, useWidgetRevision } from '@/context/omni-context';
 import type { SnapshotUndoImpact } from '@/db/models';
 import {
   exportBackupBundleToDevice,
@@ -40,6 +40,7 @@ const EFFORT_LABELS: Record<ReasoningEffort, string> = {
 
 export default function SettingsScreen() {
   const { repo, libraries, revision, hasApiKey, refreshApiKeyState } = useRepository();
+  const widgetRevision = useWidgetRevision();
 
   const [apiKey, setApiKey] = useState('');
   const [showKey, setShowKey] = useState(false);
@@ -82,8 +83,8 @@ export default function SettingsScreen() {
     [repo, revision]
   );
   const widgetCount = useMemo(
-    () => (!repo || revision < 0 ? 0 : repo.listAllDashboardWidgets().length),
-    [repo, revision]
+    () => (!repo || widgetRevision < 0 ? 0 : repo.listAllDashboardWidgets().length),
+    [repo, widgetRevision]
   );
   const totalEntryCount = useMemo(
     () => libraries.reduce((sum, l) => sum + l.entryCount, 0),

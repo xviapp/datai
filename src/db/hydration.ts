@@ -1,4 +1,5 @@
 import { evaluateFormula, evaluateHighlightRules } from '@/engine/formula';
+import { sortEntriesByCardConfigInPlace } from '@/engine/library-view-rules';
 import type { CardViewConfig } from '@/schema/view-dsl';
 import type {
   BackRelRow,
@@ -219,19 +220,5 @@ export function sortHydratedEntries(
   entries: HydratedEntry[],
   cardConfig: Pick<CardViewConfig, 'sortFieldKey' | 'sortDir'>
 ): HydratedEntry[] {
-  const sortKey = cardConfig.sortFieldKey;
-  const sortDir = cardConfig.sortDir ?? 'desc';
-  if (!sortKey) return entries;
-
-  entries.sort((a, b) => {
-    const va = a.computedData[sortKey];
-    const vb = b.computedData[sortKey];
-    if (va === vb) return b.createdAt - a.createdAt;
-    if (typeof va === 'number' && typeof vb === 'number') {
-      return sortDir === 'asc' ? va - vb : vb - va;
-    }
-    const cmp = String(va ?? '').localeCompare(String(vb ?? ''));
-    return sortDir === 'asc' ? cmp : -cmp;
-  });
-  return entries;
+  return sortEntriesByCardConfigInPlace(entries, cardConfig);
 }

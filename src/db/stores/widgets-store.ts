@@ -84,7 +84,7 @@ export class WidgetsStore {
     librarySlug: string | null = null,
     sortOrder?: number,
     pinnedOverview = true
-  ): string {
+  ): { id: string; viewsChanged: boolean } {
     const id = w.id || createId('wdg');
     let order = sortOrder;
     if (order === undefined) {
@@ -115,13 +115,16 @@ export class WidgetsStore {
       ]
     );
     // 图表落盘后，自动为相关记录本在 library_views 表中按需点亮「统计」视图
+    let viewsChanged = false;
     const allLibSlugs = this.driver.getAllSync<{ slug: string }>('SELECT slug FROM libraries');
     for (const row of allLibSlugs) {
       if (row.slug === librarySlug || sqlReferencesLibraryView(w.readonlySql, row.slug)) {
-        this.libraries.ensureStatsViewForLibrary(row.slug);
+        if (this.libraries.ensureStatsViewForLibrary(row.slug)) {
+          viewsChanged = true;
+        }
       }
     }
-    return id;
+    return { id, viewsChanged };
   }
 
   setWidgetPinnedOverviewInternal(widgetId: string, pinned: boolean): void {

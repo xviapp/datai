@@ -13,18 +13,22 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { runArchitectAgent } from '@/ai/agents';
 import { isAbortError } from '@/ai/deepseek-client';
 import { BasicSettingsTab } from '@/components/schema-editor/BasicSettingsTab';
+import {
+  buildInitialSchemaDraft,
+  buildSchemaSavePayload,
+  type SchemaDraftState,
+} from '@/components/schema-editor/config';
 import { FieldsTab } from '@/components/schema-editor/FieldsTab';
-import { buildInitialSchemaDraft, type SchemaDraftState } from '@/components/schema-editor/types';
 import { ViewsTab } from '@/components/schema-editor/ViewsTab';
 import { BottomSheetModal } from '@/components/ui/BottomSheetModal';
 import { SlidingSegmentedBar } from '@/components/ui/SlidingSegmentedBar';
 import { Palette, ToneMap } from '@/constants/design-tokens';
 import { VIEW_TYPE_META } from '@/constants/schema-meta';
 import { useRepository } from '@/context/omni-context';
-import type { LibraryRecord, LibraryViewInput } from '@/db/models';
+import type { LibraryRecord } from '@/db/models';
 import { useSwipeablePager } from '@/hooks/useSwipeablePager';
 import type { FieldDef } from '@/schema/field-defs';
-import type { LibraryBlueprint, LibraryViewType } from '@/schema/view-dsl';
+import type { LibraryViewType } from '@/schema/view-dsl';
 
 interface SchemaEditorModalProps {
   visible: boolean;
@@ -324,91 +328,15 @@ function SchemaEditorBody({
     if (!repo) return;
     try {
       setErrorMsg(null);
-      const cleanSlug = draft.slug.trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
-      if (!/^[a-z][a-z0-9_]*$/.test(cleanSlug)) {
-        throw new Error('英文标识（slug）必须以小写字母开头，仅含字母、数字与下划线');
-      }
       if (!draft.name.trim()) {
         selectPage(0);
-        throw new Error('请先在「基础」页填写记录本名称');
       }
-
-      const validTitleKey = draft.fields.some((f) => f.key === draft.titleFieldKey)
-        ? draft.titleFieldKey
-        : draft.fields[0].key;
-      const dateField = draft.fields.find((f) => f.type === 'date');
-      const imgField = draft.fields.find((f) => f.type === 'image');
-      const ratingField = draft.fields.find((f) => f.type === 'rating');
-
-      const cardConfig = {
-        titleFieldKey: validTitleKey,
-        subtitleFieldKey: draft.subtitleFieldKey || undefined,
-        coverImageFieldKey: imgField?.key,
-        rightBadgeFieldKey: draft.rightBadgeFieldKey || undefined,
-        footerMetricKeys: draft.footerMetricKeys.filter((k) =>
-          draft.fields.some((f) => f.key === k)
-        ),
-        sortFieldKey: dateField?.key,
-        sortDir: 'desc' as const,
-        highlightRules: existingLibrary?.views.card.highlightRules ?? [],
-      };
-      const galleryConfig = {
-        titleFieldKey: validTitleKey,
-        subtitleFieldKey: draft.subtitleFieldKey || undefined,
-        coverImageFieldKey: imgField?.key,
-        badgeFieldKey: draft.rightBadgeFieldKey || undefined,
-        ratingFieldKey: ratingField?.key,
-      };
-      const calendarConfig = {
-        dateFieldKey: dateField?.key ?? '',
-        titleFieldKey: validTitleKey,
-        metricFieldKey: draft.footerMetricKeys[0],
-      };
-
-      const normalizedViews =
-        draft.viewDrafts.length > 0
-          ? draft.viewDrafts
-          : [{ name: '列表', viewType: 'card' as LibraryViewType }];
-      const hasGallery = normalizedViews.some((v) => v.viewType === 'gallery');
-      const hasCalendar = normalizedViews.some((v) => v.viewType === 'calendar');
-
-      const blueprint: LibraryBlueprint = {
-        slug: cleanSlug,
-        name: draft.name.trim(),
-        description: draft.description.trim(),
-        icon: draft.icon.trim() || '📦',
-        color: draft.color,
-        parentLibrarySlug:
-          draft.parentLibrarySlug && draft.parentLibrarySlug !== cleanSlug
-            ? draft.parentLibrarySlug
-            : undefined,
-        showOnHome: draft.showOnHome,
-        fields: draft.fields,
-        views: {
-          card: cardConfig,
-          gallery: hasGallery ? galleryConfig : undefined,
-          calendar: hasCalendar ? calendarConfig : undefined,
-        },
-      };
-
-      const viewInputs: LibraryViewInput[] = normalizedViews.map((v) => ({
-        id: v.id,
-        name: v.name.trim() || VIEW_TYPE_META[v.viewType].label,
-        viewType: v.viewType,
-        config:
-          v.viewType === 'card'
-            ? (cardConfig as unknown as Record<string, unknown>)
-            : v.viewType === 'gallery'
-              ? (galleryConfig as unknown as Record<string, unknown>)
-              : v.viewType === 'calendar'
-                ? (calendarConfig as unknown as Record<string, unknown>)
-                : {},
-      }));
+      const { slug, blueprint, viewInputs } = buildSchemaSavePayload(draft, existingLibrary);
 
       // 单事务原子落盘结构与视图配置（只触发一次 notify 与一次持久化导出）
       repo.upsertLibrary(blueprint, viewInputs);
 
-      onSaved?.(cleanSlug);
+      onSaved?.(slug);
       onClose();
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : String(err));

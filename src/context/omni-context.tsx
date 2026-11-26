@@ -50,6 +50,8 @@ const RepositoryContext = createContext<RepositoryContextValue>({
   refreshApiKeyState: async () => {},
 });
 
+const WidgetRevisionContext = createContext<number>(0);
+
 const OmniModalStateContext = createContext<OmniModalStateValue>({
   omniModalVisible: false,
   omniScene: 'home',
@@ -75,6 +77,7 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [persistWarning, setPersistWarning] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
+  const [widgetRevision, setWidgetRevision] = useState(0);
   const [hasApiKey, setHasApiKey] = useState(false);
 
   const [modalState, setModalState] = useState<OmniModalStateValue>({
@@ -96,6 +99,7 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let unsub: (() => void) | undefined;
+    let unsubWidgets: (() => void) | undefined;
     let unsubPersist: (() => void) | undefined;
     (async () => {
       try {
@@ -112,6 +116,9 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
           setLibraries(instance.listLibraries());
           setRevision((r) => r + 1);
         });
+        unsubWidgets = instance.subscribeWidgets(() => {
+          setWidgetRevision((r) => r + 1);
+        });
         setRepo(instance);
         await refreshApiKeyState();
         setReady(true);
@@ -122,6 +129,7 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       unsub?.();
+      unsubWidgets?.();
       unsubPersist?.();
     };
   }, [refreshApiKeyState]);
@@ -204,17 +212,23 @@ export function OmniProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <RepositoryContext.Provider value={repoValue}>
-      <OmniModalActionsContext.Provider value={modalActions}>
-        <OmniModalStateContext.Provider value={modalState}>
-          {children}
-        </OmniModalStateContext.Provider>
-      </OmniModalActionsContext.Provider>
+      <WidgetRevisionContext.Provider value={widgetRevision}>
+        <OmniModalActionsContext.Provider value={modalActions}>
+          <OmniModalStateContext.Provider value={modalState}>
+            {children}
+          </OmniModalStateContext.Provider>
+        </OmniModalActionsContext.Provider>
+      </WidgetRevisionContext.Provider>
     </RepositoryContext.Provider>
   );
 }
 
 export function useRepository(): RepositoryContextValue {
   return useContext(RepositoryContext);
+}
+
+export function useWidgetRevision(): number {
+  return useContext(WidgetRevisionContext);
 }
 
 export function useOmniModalState(): OmniModalStateValue {

@@ -6,7 +6,7 @@ import { SqlWidgetCard } from '@/components/charts/SqlWidgetCard';
 import { TabPageHeader } from '@/components/layout/TabPageHeader';
 import { FloatingAssistantButton } from '@/components/ui/FloatingAssistantButton';
 import { Palette, ToneMap } from '@/constants/design-tokens';
-import { useOmniModalActions, useRepository } from '@/context/omni-context';
+import { useOmniModalActions, useRepository, useWidgetRevision } from '@/context/omni-context';
 import type { LibraryRecord, SavedDashboardWidget } from '@/db/models';
 import { sqlReferencesLibraryView } from '@/db/types';
 import { useSwipeablePager } from '@/hooks/useSwipeablePager';
@@ -31,7 +31,8 @@ type StatsTabItem =
 
 export default function StatsScreen() {
   const nav = useSafeNavigation();
-  const { repo, libraries, revision } = useRepository();
+  const { repo, libraries } = useRepository();
+  const widgetRevision = useWidgetRevision();
   const { openOmniCapture } = useOmniModalActions();
 
   const [isFocused, setIsFocused] = useState(false);
@@ -45,14 +46,14 @@ export default function StatsScreen() {
     }, [])
   );
 
-  const [syncedRevision, setSyncedRevision] = useState(revision);
-  if (isFocused && syncedRevision !== revision) {
-    setSyncedRevision(revision);
+  const [syncedWidgetRevision, setSyncedWidgetRevision] = useState(widgetRevision);
+  if (isFocused && syncedWidgetRevision !== widgetRevision) {
+    setSyncedWidgetRevision(widgetRevision);
   }
 
   const allWidgets = useMemo(
-    () => (!repo || syncedRevision < 0 ? [] : repo.listAllDashboardWidgets()),
-    [repo, syncedRevision]
+    () => (!repo || syncedWidgetRevision < 0 ? [] : repo.listAllDashboardWidgets()),
+    [repo, syncedWidgetRevision]
   );
   const overviewWidgets = useMemo(
     () => allWidgets.filter((w) => w.pinnedOverview),
