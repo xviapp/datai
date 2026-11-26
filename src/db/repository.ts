@@ -208,12 +208,32 @@ export class OmniRepository {
   }
 
   /**
-   * 原子创建或更新库结构；支持在同一事务内同步写入显式 viewInputs，避免双重事务与双重重绘
+   * 原子创建或更新库结构；支持在同一事务内同步写入显式 viewInputs，并在 relation 字段发生演进时自动补建 entry_relations 索引
    */
   upsertLibrary(bp: LibraryBlueprint, viewInputs?: LibraryViewInput[]): string {
-    const id = this.runWriteTransaction(() =>
-      this.librariesStore.upsertLibraryInternal(bp, { viewInputs })
-    );
+    const id = this.runWriteTransaction(() => {
+      const prevLib = this.librariesStore.getLibraryBySlug(bp.slug);
+      const prevRelSig = prevLib
+        ? JSON.stringify(
+            prevLib.fields
+              .filter((f) => f.type === 'relation')
+              .map((f) => [f.key, f.relationConfig?.targetLibrarySlug ?? '', f.relationConfig?.allowMultiple ?? true])
+          )
+        : null;
+      const libId = this.librariesStore.upsertLibraryInternal(bp, { viewInputs });
+      const nextLib = this.librariesStore.getLibraryById(libId);
+      const nextRelSig = nextLib
+        ? JSON.stringify(
+            nextLib.fields
+              .filter((f) => f.type === 'relation')
+              .map((f) => [f.key, f.relationConfig?.targetLibrarySlug ?? '', f.relationConfig?.allowMultiple ?? true])
+          )
+        : null;
+      if (prevLib && prevRelSig !== nextRelSig) {
+        this.entriesStore.syncLibraryEntryRelationsInternal(libId);
+      }
+      return libId;
+    });
     this.notify('data');
     return id;
   }
@@ -334,7 +354,9 @@ export class OmniRepository {
             sqlReferencesLibraryView(String(w.readonly_sql ?? ''), slug)
         );
 
-        const detachedSources = this.entriesStore.detachReferencesToLibraryInternal(slug);
+        const detachedSources = this.entriesStore.detachReferencesToLibraryInternal(slug, {
+          clearDangling: true,
+        });
 
         this.snapshotsStore.saveSnapshotInternal(`删除记录本「${libName}」`, {
           kind: 'library_deleted',

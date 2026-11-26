@@ -102,4 +102,11 @@ export function importBackupBundleInternal(
 
   libraries.syncAllLibraryRelations();
   libraries.ensureViewsCompiled();
+  libraries.invalidateCache();
+  // 导入后按库字段定义补齐可能缺失的 entry_relations 索引，确保按索引解绑与反向查询一致
+  for (const lib of libraries.listLibraries()) {
+    if (lib.fields.some((f) => f.type === 'relation')) {
+      entries.syncLibraryEntryRelationsInternal(lib.id);
+    }
+  }
 }

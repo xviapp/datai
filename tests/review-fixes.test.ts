@@ -782,6 +782,237 @@ describe('1. Quick-capture draft stable IDs, shared validation & strict relation
     const loaded = repo.getHydratedEntryById(entryId);
     assert.deepEqual(loaded?.entry.rawData.cities, ['Washington, D.C.', 'New York']);
   });
+
+  it('respects later single-select rebinding and field-type changes on undo, and preserves multi-select order & index consistency', () => {
+    const { repo } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    assert.ok(books.length >= 2);
+    const [bookA, bookB] = books;
+
+    // 1. 单选改绑保护：删书 A -> 将阅读记录改绑到书 B -> 撤销删书 A -> 必须保持 [bookB] 且可继续编辑
+    const logId = repo.createEntry('reading_logs', {
+      book: [bookA.id],
+      read_date: '2026-11-26',
+      note: '原书摘',
+    });
+    const delBookASnap = repo.deleteEntry(bookA.id);
+    assert.ok(delBookASnap);
+    repo.updateEntry(logId, {
+      book: [bookB.id],
+      read_date: '2026-11-26',
+      note: '改绑书 B',
+    });
+    repo.undoSnapshot(delBookASnap);
+
+    const afterUndoLog = repo.getHydratedEntryById(logId);
+    assert.deepEqual(afterUndoLog?.entry.rawData.book, [bookB.id]);
+    assert.deepEqual(
+      afterUndoLog?.entry.forwardLinks.book?.map((x) => x.id),
+      [bookB.id]
+    );
+    repo.updateEntry(logId, {
+      ...(afterUndoLog?.entry.rawData ?? {}),
+      note: '撤销后继续改书摘',
+    });
+    assert.equal(repo.getHydratedEntryById(logId)?.entry.rawData.note, '撤销后继续改书摘');
+
+    // 2. 字段改为 text 后撤销删除，不得把用户文本改写成数组
+    const delBookBSnap = repo.deleteEntry(bookB.id);
+    assert.ok(delBookBSnap);
+    const logsLib = repo.getLibraryBySlug('reading_logs');
+    assert.ok(logsLib);
+    repo.upsertLibrary({
+      slug: logsLib.slug,
+      name: logsLib.name,
+      description: logsLib.description,
+      icon: logsLib.icon,
+      color: logsLib.color,
+      parentLibrarySlug: logsLib.parentLibrarySlug ?? undefined,
+      showOnHome: logsLib.showOnHome,
+      fields: logsLib.fields.map((f) =>
+        f.key === 'book' ? { key: 'book', label: '所属书籍', type: 'text', required: false } : f
+      ),
+      views: logsLib.views,
+    });
+    repo.updateEntry(logId, {
+      book: '手写书名文本',
+      read_date: '2026-11-26',
+      note: '已转文本',
+    });
+    repo.undoSnapshot(delBookBSnap);
+    assert.equal(repo.getHydratedEntryById(logId)?.entry.rawData.book, '手写书名文本');
+
+    // 3. 多选顺序与关联表严格一致：[medA, medB] 删 medA 后立即撤销，data_json 与 forwardLinks 均为 [medA, medB]
+    const meds = repo.listHydratedEntries('med_cabinet');
+    assert.ok(meds.length >= 2);
+    const [medA, medB] = meds;
+    const healthId = repo.createEntry('health_logs', {
+      log_title: '双药顺序测试',
+      log_date: '2026-11-26',
+      medicines: [medA.id, medB.id],
+    });
+    const delMedASnap = repo.deleteEntry(medA.id);
+    assert.ok(delMedASnap);
+    repo.undoSnapshot(delMedASnap);
+
+    const restoredHealth = repo.getHydratedEntryById(healthId);
+    assert.deepEqual(restoredHealth?.entry.rawData.medicines, [medA.id, medB.id]);
+    assert.deepEqual(
+      restoredHealth?.entry.forwardLinks.medicines?.map((x) => x.id),
+      [medA.id, medB.id]
+    );
+  });
+
+  it('safely restores legacy snapshots (without removedByField) without overwriting post-delete title edits and rebuilds relation index', () => {
+    const { repo, driver } = createSeededRepo();
+    const book = repo.listHydratedEntries('books')[0];
+    assert.ok(book);
+
+    repo.upsertLibrary({
+      slug: 'legacy_notes',
+      name: '旧快照兼容笔记',
+      description: '',
+      icon: '📜',
+      color: 'teal',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'ref_book',
+          label: '关联书',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: false },
+        },
+      ],
+      views: {
+        card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+      },
+    });
+    const noteId = repo.createEntry('legacy_notes', { title: '旧标题', ref_book: [book.id] });
+    // 模拟 9080eb3 文本转关联后尚无 entry_relations 边的状态
+    driver.runSync('DELETE FROM entry_relations WHERE source_entry_id = ?', [noteId]);
+
+    repo.deleteLibrary('books');
+    // 将快照改写为旧格式（去掉 detachedSources[].removedByField）
+    const snapRow = driver.getFirstSync<{ id: string; snapshot_json: string }>(
+      "SELECT id, snapshot_json FROM ai_snapshots WHERE action_summary LIKE '%阅读书架%' ORDER BY created_at DESC LIMIT 1"
+    );
+    assert.ok(snapRow);
+    const parsedSnap = JSON.parse(snapRow.snapshot_json) as {
+      detachedSources?: Array<{ id: string; prevDataJson: string; removedByField?: unknown }>;
+    };
+    if (parsedSnap.detachedSources) {
+      for (const s of parsedSnap.detachedSources) {
+        delete s.removedByField;
+      }
+    }
+    driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
+      JSON.stringify(parsedSnap),
+      snapRow.id,
+    ]);
+
+    const afterDel = repo.getHydratedEntryById(noteId);
+    assert.ok(afterDel);
+    repo.updateEntry(noteId, { ...afterDel.entry.rawData, title: '删库后新标题' });
+
+    repo.undoSnapshot(snapRow.id);
+
+    const restored = repo.getHydratedEntryById(noteId);
+    assert.equal(restored?.entry.titleSummary, '删库后新标题');
+    assert.equal(restored?.entry.rawData.title, '删库后新标题');
+    assert.deepEqual(restored?.entry.rawData.ref_book, [book.id]);
+    assert.deepEqual(
+      restored?.entry.forwardLinks.ref_book?.map((x) => x.id),
+      [book.id],
+      'Restored relation must also be indexed in entry_relations'
+    );
+  });
+
+  it('blocks undoing an Architect plan if a surviving library still has a required relation to a created library', () => {
+    const { repo } = createSeededRepo();
+    const planSnapId = repo.applyArchitectPlan({
+      summary: '新建项目库',
+      libraries: [
+        {
+          slug: 'projects',
+          name: '项目',
+          description: '',
+          icon: '🗂️',
+          color: 'blue',
+          fields: [{ key: 'title', label: '项目名', type: 'text', required: true }],
+          views: {
+            card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+          },
+        },
+      ],
+      dashboardWidgets: [],
+    });
+
+    // 随后单独创建「任务」并必填关联到「项目」
+    repo.upsertLibrary({
+      slug: 'tasks',
+      name: '任务',
+      description: '',
+      icon: '✅',
+      color: 'emerald',
+      fields: [
+        { key: 'title', label: '任务名', type: 'text', required: true },
+        {
+          key: 'project',
+          label: '所属项目',
+          type: 'relation',
+          required: true,
+          relationConfig: { targetLibrarySlug: 'projects', allowMultiple: false },
+        },
+      ],
+      views: {
+        card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+      },
+    });
+
+    assert.throws(() => repo.undoSnapshot(planSnapId), /任务.*所属项目/);
+    assert.ok(repo.getLibraryBySlug('projects'), 'projects must not be deleted while tasks requires it');
+  });
+
+  it('cleans historical dangling references when manually deleting an empty library and avoids scanning unrelated libraries on single entry delete', () => {
+    const { repo, queries, clearQueries } = createSeededRepo();
+
+    // 1. 删除空库时清理历史失效引用：删笔记 -> 删光书架 -> 只撤销删笔记 -> 手动删空书架 -> 编辑笔记仍可保存
+    const books = repo.listHydratedEntries('books');
+    const logId = repo.createEntry('reading_logs', {
+      book: [books[0].id],
+      read_date: '2026-11-26',
+      note: '待测笔记',
+    });
+    const delLogSnap = repo.deleteEntry(logId);
+    assert.ok(delLogSnap);
+    for (const b of books) {
+      repo.deleteEntry(b.id);
+    }
+    assert.equal(repo.listHydratedEntries('books').length, 0);
+    repo.undoSnapshot(delLogSnap);
+    assert.deepEqual(repo.getHydratedEntryById(logId)?.entry.rawData.book, [books[0].id]);
+
+    repo.deleteLibrary('books');
+    const afterDelEmptyBooks = repo.getHydratedEntryById(logId);
+    assert.ok(afterDelEmptyBooks);
+    assert.deepEqual(afterDelEmptyBooks.entry.rawData.book, []);
+    repo.updateEntry(logId, { ...afterDelEmptyBooks.entry.rawData, note: '删空库后修改成功' });
+    assert.equal(repo.getHydratedEntryById(logId)?.entry.rawData.note, '删空库后修改成功');
+
+    // 2. 删除单条资产记录时，不得读取无关库（如 reading_logs）的 entries
+    const logsLibId = repo.getLibraryBySlug('reading_logs')?.id;
+    assert.ok(logsLibId);
+    const assetId = repo.listHydratedEntries('my_assets')[0].id;
+    // 记录 SQL 参数需要靠检查全表扫描语句：验证 deleteEntry 不执行无条件 SELECT id, data_json FROM entries WHERE library_id = ?
+    clearQueries();
+    repo.deleteEntry(assetId);
+    assert.equal(
+      queries.some((q) => q.trim() === 'SELECT id, data_json FROM entries WHERE library_id = ?'),
+      false,
+      'Deleting a single entry must not full-scan unrelated libraries'
+    );
+  });
 });
 
 describe('2. Schema editor config read/write helpers', () => {
