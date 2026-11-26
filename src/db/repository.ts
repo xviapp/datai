@@ -312,6 +312,8 @@ export class OmniRepository {
             sqlReferencesLibraryView(String(w.readonly_sql ?? ''), slug)
         );
 
+        const detachedSources = this.entriesStore.detachReferencesToLibraryInternal(slug);
+
         this.snapshotsStore.saveSnapshotInternal(`删除记录本「${libName}」`, {
           kind: 'library_deleted',
           library: rawLib,
@@ -320,6 +322,7 @@ export class OmniRepository {
           relations: libRelations,
           widgets: matchedWidgets,
           detachedChildLibraries,
+          detachedSources,
         });
 
         for (const w of matchedWidgets) {

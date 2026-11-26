@@ -192,6 +192,7 @@ export type SnapshotPayload =
         parent_slug: string | null;
         show_on_home: number;
       }>;
+      detachedSources?: Array<{ id: string; prevDataJson: string }>;
     }
   | {
       kind: 'architect_plan';

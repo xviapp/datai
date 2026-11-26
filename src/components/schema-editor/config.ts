@@ -63,10 +63,12 @@ export function buildInitialSchemaDraft(
       parentLibrarySlug: existingLibrary.parentLibrarySlug ?? '',
       showOnHome: existingLibrary.showOnHome,
       fields: existingLibrary.fields.map((f) => ({ ...f })),
-      titleFieldKey: existingLibrary.views.card.titleFieldKey,
+      titleFieldKey: existingLibrary.views.card.titleFieldKey || existingLibrary.fields[0]?.key || '',
       subtitleFieldKey: existingLibrary.views.card.subtitleFieldKey ?? '',
       rightBadgeFieldKey: existingLibrary.views.card.rightBadgeFieldKey ?? '',
-      footerMetricKeys: [...existingLibrary.views.card.footerMetricKeys],
+      footerMetricKeys: Array.isArray(existingLibrary.views.card.footerMetricKeys)
+        ? [...existingLibrary.views.card.footerMetricKeys]
+        : [],
       viewDrafts:
         existingLibrary.viewList.length > 0
           ? existingLibrary.viewList.map((v) => ({
@@ -202,7 +204,9 @@ export function buildSchemaSavePayload(
   const initialCard = existingLibrary?.views.card;
   const initialSubtitleKey = initialCard?.subtitleFieldKey ?? '';
   const initialRightBadgeKey = initialCard?.rightBadgeFieldKey ?? '';
-  const initialFooterKeys = initialCard?.footerMetricKeys ?? [];
+  const initialFooterKeys = Array.isArray(initialCard?.footerMetricKeys)
+    ? initialCard.footerMetricKeys
+    : [];
 
   const titleChanged = !existingLibrary || draft.titleFieldKey !== (initialCard?.titleFieldKey ?? '');
   const subtitleChanged = !existingLibrary || draft.subtitleFieldKey !== initialSubtitleKey;
@@ -240,14 +244,18 @@ export function buildSchemaSavePayload(
 
     const baseRules = Array.isArray(baseCard.highlightRules)
       ? baseCard.highlightRules
-      : fallbackBundle.highlightRules;
+      : Array.isArray(fallbackBundle.highlightRules)
+        ? fallbackBundle.highlightRules
+        : [];
     const validRules = baseRules.filter(
       (rule) => Boolean(rule && typeof rule.fieldKey === 'string' && fieldKeySet.has(rule.fieldKey))
     );
 
     const baseFooters = Array.isArray(baseCard.footerMetricKeys)
       ? baseCard.footerMetricKeys.filter((k) => typeof k === 'string' && fieldKeySet.has(k))
-      : validFooterMetricKeys;
+      : Array.isArray(fallbackBundle.footerMetricKeys)
+        ? fallbackBundle.footerMetricKeys.filter((k) => typeof k === 'string' && fieldKeySet.has(k))
+        : validFooterMetricKeys;
 
     const sortDir: 'asc' | 'desc' = baseCard.sortDir === 'asc' ? 'asc' : 'desc';
 
@@ -432,27 +440,70 @@ export function buildSchemaSavePayload(
       )
     : buildDefaultCardConfig();
 
-  const resolvedBundleCard: CardViewConfig = primaryCardInput
-    ? {
-        ...fallbackBundleCard,
-        ...(primaryCardInput.config as Partial<CardViewConfig>),
-      }
-    : fallbackBundleCard;
+  const resolvedBundleCard: CardViewConfig = (() => {
+    const mergedCardRaw = primaryCardInput
+      ? {
+          ...fallbackBundleCard,
+          ...(primaryCardInput.config as Partial<CardViewConfig>),
+        }
+      : fallbackBundleCard;
+    const pruned = preserveSecondaryExistingCardConfig(
+      mergedCardRaw as unknown as Record<string, unknown>
+    ) as Partial<CardViewConfig>;
+    return {
+      ...pruned,
+      titleFieldKey: keepValidKey(pruned.titleFieldKey) ?? validTitleKey,
+      footerMetricKeys: Array.isArray(pruned.footerMetricKeys) ? pruned.footerMetricKeys : [],
+      sortDir: pruned.sortDir === 'asc' ? 'asc' : 'desc',
+      highlightRules: Array.isArray(pruned.highlightRules) ? pruned.highlightRules : [],
+    };
+  })();
 
   const resolvedBundleGallery: GalleryViewConfig | undefined = firstGalleryInput
-    ? {
-        ...buildDefaultGalleryConfig(),
-        ...(existingLibrary?.views.gallery ?? {}),
-        ...(firstGalleryInput.config as Partial<GalleryViewConfig>),
-      }
+    ? (() => {
+        const sanitizedExistingGallery = existingLibrary?.views.gallery
+          ? preserveExistingGalleryConfig(
+              existingLibrary.views.gallery as unknown as Record<string, unknown>
+            )
+          : {};
+        const fromExistingGalleryView = Boolean(
+          firstGalleryInput.id && existingViewById.has(firstGalleryInput.id)
+        );
+        const mergedGallery = fromExistingGalleryView
+          ? preserveExistingGalleryConfig(firstGalleryInput.config ?? {})
+          : preserveExistingGalleryConfig({
+              ...sanitizedExistingGallery,
+              ...(firstGalleryInput.config ?? {}),
+            });
+        return {
+          ...(mergedGallery as Partial<GalleryViewConfig>),
+          titleFieldKey: keepValidKey(mergedGallery.titleFieldKey) ?? validTitleKey,
+        };
+      })()
     : undefined;
 
   const resolvedBundleCalendar: CalendarViewConfig | undefined = firstCalendarInput
-    ? {
-        ...buildDefaultCalendarConfig(),
-        ...(existingLibrary?.views.calendar ?? {}),
-        ...(firstCalendarInput.config as Partial<CalendarViewConfig>),
-      }
+    ? (() => {
+        const sanitizedExistingCalendar = existingLibrary?.views.calendar
+          ? preserveExistingCalendarConfig(
+              existingLibrary.views.calendar as unknown as Record<string, unknown>
+            )
+          : {};
+        const fromExistingCalendarView = Boolean(
+          firstCalendarInput.id && existingViewById.has(firstCalendarInput.id)
+        );
+        const mergedCalendar = fromExistingCalendarView
+          ? preserveExistingCalendarConfig(firstCalendarInput.config ?? {})
+          : preserveExistingCalendarConfig({
+              ...sanitizedExistingCalendar,
+              ...(firstCalendarInput.config ?? {}),
+            });
+        return {
+          ...(mergedCalendar as Partial<CalendarViewConfig>),
+          dateFieldKey: keepValidKey(mergedCalendar.dateFieldKey) ?? firstDateKey ?? '',
+          titleFieldKey: keepValidKey(mergedCalendar.titleFieldKey) ?? validTitleKey,
+        };
+      })()
     : undefined;
 
   const blueprint: LibraryBlueprint = {

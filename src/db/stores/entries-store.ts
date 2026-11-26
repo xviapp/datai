@@ -5,7 +5,12 @@ import {
   type PriorDraftTarget,
 } from '@/engine/capture-drafts';
 import { createId } from '@/engine/id';
-import { buildEntryPayloadValidator, type FieldDef, type FieldType } from '@/schema/field-defs';
+import {
+  buildEntryPayloadValidator,
+  normalizeRelationValueList,
+  type FieldDef,
+  type FieldType,
+} from '@/schema/field-defs';
 import {
   hydrateRowWithRelations,
   loadRelationsBatch,
@@ -108,12 +113,11 @@ export class EntriesStore {
 
     for (const f of fields) {
       if (f.type !== 'relation') continue;
-      const rawTargets = data[f.key];
-      const targets = Array.isArray(rawTargets)
-        ? rawTargets.map(String).filter(Boolean)
-        : typeof rawTargets === 'string' && rawTargets.trim()
-          ? [rawTargets.trim()]
-          : [];
+      const targets = Array.from(new Set(normalizeRelationValueList(data[f.key])));
+
+      if (f.relationConfig?.allowMultiple === false && targets.length > 1) {
+        throw new Error(`关联字段「${f.label}」仅支持关联 1 条记录`);
+      }
 
       const targetSlug = f.relationConfig?.targetLibrarySlug;
       const targetLib = targetSlug ? this.libraries.getLibraryBySlug(targetSlug) : null;
@@ -121,8 +125,7 @@ export class EntriesStore {
         throw new Error(`关联字段「${f.label}」指向的目标记录本不存在: ${targetSlug}`);
       }
 
-      const uniqueTargets = Array.from(new Set(targets));
-      uniqueTargets.forEach((targetId, idx) => {
+      targets.forEach((targetId, idx) => {
         if (isBatchRefToken(targetId)) {
           throw new Error(`关联字段「${f.label}」包含未解析的草稿引用（${targetId}），请重新选择后再保存`);
         }
@@ -197,6 +200,123 @@ export class EntriesStore {
   }
 
   /**
+   * 批量清理存活条目 data_json 中指向待删条目的关联引用（避免删条目/删库/撤销快记后存活记录残留死 ID 导致无法编辑）。
+   */
+  detachReferencesToEntriesInternal(
+    targetEntryIds: readonly string[],
+    options?: { deletedLibrarySlug?: string }
+  ): Array<{ id: string; prevDataJson: string }> {
+    const targetIdSet = new Set(targetEntryIds.filter(Boolean));
+    const fieldsBySourceId = new Map<string, Set<string>>();
+
+    const addFieldForSource = (srcId: string, fieldKey: string) => {
+      if (targetIdSet.has(srcId)) return;
+      let keys = fieldsBySourceId.get(srcId);
+      if (!keys) {
+        keys = new Set<string>();
+        fieldsBySourceId.set(srcId, keys);
+      }
+      keys.add(fieldKey);
+    };
+
+    const uniqueTargets = Array.from(targetIdSet);
+    for (let i = 0; i < uniqueTargets.length; i += ENTRY_QUERY_CHUNK_SIZE) {
+      const chunk = uniqueTargets.slice(i, i + ENTRY_QUERY_CHUNK_SIZE);
+      const placeholders = chunk.map(() => '?').join(', ');
+      const relRows = this.driver.getAllSync<{ source_entry_id: string; field_key: string }>(
+        `SELECT source_entry_id, field_key FROM entry_relations WHERE target_entry_id IN (${placeholders})`,
+        chunk
+      );
+      for (const r of relRows) {
+        addFieldForSource(r.source_entry_id, r.field_key);
+      }
+    }
+
+    // 删库场景下，额外扫描所有包含指向该库 relation 字段的存活库条目，确保未建边或空库的残留 ID 也全部清净
+    const deletedSlug = options?.deletedLibrarySlug;
+    if (deletedSlug) {
+      const allLibs = this.libraries.listLibraries();
+      for (const lib of allLibs) {
+        if (lib.slug === deletedSlug) continue;
+        const matchingFields = lib.fields.filter(
+          (f) => f.type === 'relation' && f.relationConfig?.targetLibrarySlug === deletedSlug
+        );
+        if (matchingFields.length === 0) continue;
+        const rows = this.driver.getAllSync<{ id: string; data_json: string }>(
+          'SELECT id, data_json FROM entries WHERE library_id = ?',
+          [lib.id]
+        );
+        for (const r of rows) {
+          if (targetIdSet.has(r.id)) continue;
+          try {
+            const parsed = JSON.parse(r.data_json) as Record<string, unknown>;
+            for (const f of matchingFields) {
+              if (normalizeRelationValueList(parsed[f.key]).length > 0) {
+                addFieldForSource(r.id, f.key);
+              }
+            }
+          } catch {
+            // ignore malformed payload
+          }
+        }
+      }
+    }
+
+    const detachedSources: Array<{ id: string; prevDataJson: string }> = [];
+    for (const [srcId, fieldKeys] of fieldsBySourceId.entries()) {
+      const srcRow = this.driver.getFirstSync<{ id: string; data_json: string }>(
+        'SELECT id, data_json FROM entries WHERE id = ?',
+        [srcId]
+      );
+      if (!srcRow) continue;
+      try {
+        const parsedData = JSON.parse(srcRow.data_json) as Record<string, unknown>;
+        let changed = false;
+        for (const fk of fieldKeys) {
+          const curTokens = normalizeRelationValueList(parsedData[fk]);
+          if (curTokens.length === 0) continue;
+          const nextTokens = deletedSlug
+            ? []
+            : curTokens.filter((id) => !targetIdSet.has(id));
+          if (nextTokens.length !== curTokens.length || !Array.isArray(parsedData[fk])) {
+            parsedData[fk] = nextTokens;
+            changed = true;
+          }
+        }
+        if (changed) {
+          detachedSources.push({ id: srcRow.id, prevDataJson: srcRow.data_json });
+          this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+            JSON.stringify(parsedData),
+            srcRow.id,
+          ]);
+        }
+      } catch {
+        // ignore malformed payload
+      }
+    }
+
+    return detachedSources;
+  }
+
+  /**
+   * 清理存活记录中指向指定记录本全部条目的引用（用于删库与撤销新建库）。
+   */
+  detachReferencesToLibraryInternal(
+    librarySlug: string
+  ): Array<{ id: string; prevDataJson: string }> {
+    const libRow = this.driver.getFirstSync<{ id: string }>(
+      'SELECT id FROM libraries WHERE slug = ?',
+      [librarySlug]
+    );
+    const entryIds = libRow
+      ? this.driver
+          .getAllSync<{ id: string }>('SELECT id FROM entries WHERE library_id = ?', [libRow.id])
+          .map((r) => r.id)
+      : [];
+    return this.detachReferencesToEntriesInternal(entryIds, { deletedLibrarySlug: librarySlug });
+  }
+
+  /**
    * 解绑所有反向引用并删除单条记录，返回用于增量撤销的上下文负载
    */
   deleteEntryWithDetachInternal(entryId: string): {
@@ -215,46 +335,7 @@ export class EntriesStore {
       [entryId, entryId]
     );
 
-    const fieldsBySourceId = new Map<string, Set<string>>();
-    for (const r of relRows) {
-      if (String(r.target_entry_id) === entryId) {
-        const srcId = String(r.source_entry_id);
-        let keys = fieldsBySourceId.get(srcId);
-        if (!keys) {
-          keys = new Set<string>();
-          fieldsBySourceId.set(srcId, keys);
-        }
-        keys.add(String(r.field_key));
-      }
-    }
-
-    const detachedSources: Array<{ id: string; prevDataJson: string }> = [];
-    for (const [srcId, fieldKeys] of fieldsBySourceId.entries()) {
-      const srcRow = this.driver.getFirstSync<{ id: string; data_json: string }>(
-        'SELECT id, data_json FROM entries WHERE id = ?',
-        [srcId]
-      );
-      if (!srcRow) continue;
-      detachedSources.push({ id: srcRow.id, prevDataJson: srcRow.data_json });
-      try {
-        const parsedData = JSON.parse(srcRow.data_json) as Record<string, unknown>;
-        for (const fk of fieldKeys) {
-          const cur = parsedData[fk];
-          if (Array.isArray(cur)) {
-            parsedData[fk] = cur.map(String).filter((id) => id !== entryId);
-          } else if (cur === entryId) {
-            parsedData[fk] = [];
-          }
-        }
-        this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
-          JSON.stringify(parsedData),
-          srcRow.id,
-        ]);
-      } catch {
-        // ignore malformed payload
-      }
-    }
-
+    const detachedSources = this.detachReferencesToEntriesInternal([entryId]);
     this.driver.runSync('DELETE FROM entries WHERE id = ?', [entryId]);
     return { entryRow, relRows, detachedSources };
   }

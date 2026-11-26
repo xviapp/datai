@@ -1,6 +1,7 @@
 import type { DraftEntryItem } from '@/ai/schemas';
 import type { LibraryRecord } from '@/db/models';
 import { createId } from '@/engine/id';
+import { normalizeRelationValueList } from '@/schema/field-defs';
 
 export const PREV_REF_PREFIX = '@prev:';
 export const DRAFT_REF_PREFIX = '@draft:';
@@ -18,7 +19,8 @@ export type RelationIssueReason =
   | 'missing_draft'
   | 'library_mismatch'
   | 'missing_entry'
-  | 'missing_required';
+  | 'missing_required'
+  | 'too_many_targets';
 
 export interface DanglingDraftRelation {
   draftId: string;
@@ -46,7 +48,7 @@ export type RelationTokenResolution =
   | { ok: true; kind: 'batch'; target: PriorDraftTarget }
   | {
       ok: false;
-      reason: Exclude<RelationIssueReason, 'missing_required'>;
+      reason: Exclude<RelationIssueReason, 'missing_required' | 'too_many_targets'>;
       raw: string;
       missingDraftId?: string;
       actualLibrarySlug?: string;
@@ -58,21 +60,22 @@ export function makeDraftRefToken(draftId: string): string {
 }
 
 export function parseBatchRefToken(token: string): ParsedBatchRef | null {
-  if (token.startsWith(DRAFT_REF_PREFIX)) {
-    const id = token.slice(DRAFT_REF_PREFIX.length).trim();
-    if (!id) return { kind: 'malformed', raw: token };
-    return { kind: 'draft', draftId: id, raw: token };
+  const trimmed = token.trim();
+  if (trimmed.startsWith(DRAFT_REF_PREFIX)) {
+    const id = trimmed.slice(DRAFT_REF_PREFIX.length).trim();
+    if (!id) return { kind: 'malformed', raw: trimmed };
+    return { kind: 'draft', draftId: id, raw: trimmed };
   }
-  if (token.startsWith(PREV_REF_PREFIX)) {
-    const rawIdx = token.slice(PREV_REF_PREFIX.length).trim();
+  if (trimmed.startsWith(PREV_REF_PREFIX)) {
+    const rawIdx = trimmed.slice(PREV_REF_PREFIX.length).trim();
     if (!/^\d+$/.test(rawIdx)) {
-      return { kind: 'malformed', raw: token };
+      return { kind: 'malformed', raw: trimmed };
     }
     const index = Number(rawIdx);
     if (!Number.isSafeInteger(index)) {
-      return { kind: 'malformed', raw: token };
+      return { kind: 'malformed', raw: trimmed };
     }
-    return { kind: 'prev', index, raw: token };
+    return { kind: 'prev', index, raw: trimmed };
   }
   return null;
 }
@@ -88,17 +91,15 @@ export function parsePrevRefIndex(token: string): number | null {
 }
 
 export function isBatchRefToken(token: string): boolean {
-  return token.startsWith(DRAFT_REF_PREFIX) || token.startsWith(PREV_REF_PREFIX);
+  const trimmed = token.trim();
+  return trimmed.startsWith(DRAFT_REF_PREFIX) || trimmed.startsWith(PREV_REF_PREFIX);
 }
 
+/**
+ * 与入库校验（`normalizeRelationValueList`）共用同一套拆分与裁剪规则。
+ */
 export function extractRelationTokens(rawVal: unknown): string[] {
-  if (Array.isArray(rawVal)) {
-    return rawVal.map((item) => String(item ?? '').trim()).filter(Boolean);
-  }
-  if (typeof rawVal === 'string' && rawVal.trim()) {
-    return [rawVal.trim()];
-  }
-  return [];
+  return normalizeRelationValueList(rawVal);
 }
 
 /**
@@ -116,16 +117,17 @@ export function resolveRelationToken(
   }
 ): RelationTokenResolution {
   const { priorDrafts, expectedLibrarySlug, existingEntryLibraryById } = context;
-  const parsed = parseBatchRefToken(token);
+  const trimmed = token.trim();
+  const parsed = parseBatchRefToken(trimmed);
 
   if (!parsed) {
     if (existingEntryLibraryById) {
-      const actualSlug = existingEntryLibraryById.get(token);
+      const actualSlug = existingEntryLibraryById.get(trimmed);
       if (!actualSlug) {
         return {
           ok: false,
           reason: 'missing_entry',
-          raw: token,
+          raw: trimmed,
           expectedLibrarySlug,
         };
       }
@@ -133,20 +135,20 @@ export function resolveRelationToken(
         return {
           ok: false,
           reason: 'library_mismatch',
-          raw: token,
+          raw: trimmed,
           actualLibrarySlug: actualSlug,
           expectedLibrarySlug,
         };
       }
     }
-    return { ok: true, kind: 'entry', entryId: token };
+    return { ok: true, kind: 'entry', entryId: trimmed };
   }
 
   if (parsed.kind === 'malformed') {
     return {
       ok: false,
       reason: 'malformed',
-      raw: token,
+      raw: trimmed,
       expectedLibrarySlug,
     };
   }
@@ -160,7 +162,7 @@ export function resolveRelationToken(
     return {
       ok: false,
       reason: 'missing_draft',
-      raw: token,
+      raw: trimmed,
       missingDraftId: parsed.kind === 'draft' ? parsed.draftId : undefined,
       expectedLibrarySlug,
     };
@@ -170,7 +172,7 @@ export function resolveRelationToken(
     return {
       ok: false,
       reason: 'library_mismatch',
-      raw: token,
+      raw: trimmed,
       actualLibrarySlug: target.librarySlug,
       expectedLibrarySlug,
     };
@@ -223,8 +225,9 @@ export function getDraftDisplayTitle(draft: DraftEntryItem, lib?: LibraryRecord)
 }
 
 /**
- * 接收 AI 快记草稿后立刻分配稳定 draftId，并将位置耦合的 `@prev:<idx>` 转为 `@draft:<draftId>`。
- * 非法格式如 `@prev:x` 或越界引用保留为显式可检出的失效引用，由统一校验拦截。
+ * 接收 AI 快记草稿后：
+ * 1. 先按统一规则规范化关联值（去空白、拆分逗号分隔字符串）；
+ * 2. 为每条草稿分配稳定 draftId，并将位置耦合的 `@prev:<idx>`（含带空白的 `" @prev:0"`）按原始下标转为 `@draft:<draftId>`。
  */
 export function normalizeCaptureDrafts(
   rawDrafts: readonly CommitDraftEntryItem[],
@@ -237,7 +240,8 @@ export function normalizeCaptureDrafts(
     const fieldByKey = lib ? new Map(lib.fields.map((f) => [f.key, f])) : null;
     const nextData: Record<string, unknown> = { ...draft.data };
 
-    const convertToken = (token: string): string => {
+    const convertToken = (rawToken: string): string => {
+      const token = rawToken.trim();
       const parsed = parseBatchRefToken(token);
       if (!parsed || parsed.kind !== 'prev') return token;
       if (parsed.index >= 0 && parsed.index < currentIdx && assignedIds[parsed.index]) {
@@ -252,22 +256,16 @@ export function normalizeCaptureDrafts(
         continue;
       }
 
-      if (Array.isArray(v)) {
-        let changed = false;
-        const mapped = v.map((item) => {
-          if (typeof item === 'string' && item.startsWith(PREV_REF_PREFIX)) {
-            changed = true;
-            return convertToken(item);
-          }
-          return item;
-        });
-        if (changed) {
-          nextData[k] = mapped;
-        }
-      } else if (typeof v === 'string' && v.startsWith(PREV_REF_PREFIX)) {
-        nextData[k] = [convertToken(v)];
-      } else if (typeof v === 'string' && v.startsWith(DRAFT_REF_PREFIX) && fDef?.type === 'relation') {
-        nextData[k] = [v];
+      if (fDef?.type === 'relation') {
+        const tokens = extractRelationTokens(v);
+        nextData[k] = tokens.map(convertToken);
+        continue;
+      }
+
+      // 未匹配到库定义时，只要值里包含批次引用（如 " @prev:0"），也同样规范化转换
+      const candidateTokens = extractRelationTokens(v);
+      if (candidateTokens.some(isBatchRefToken)) {
+        nextData[k] = candidateTokens.map(convertToken);
       }
     }
 
@@ -328,7 +326,7 @@ export function collectReferencedExistingEntryIds(
 }
 
 /**
- * 扫描当前草稿批次中所有失效、跨库、格式错误或必填为空的关联字段（与入库共用同一解析规则）。
+ * 扫描当前草稿批次中所有失效、跨库、格式错误、超限（单选多值）或必填为空的关联字段（与入库共用同一解析规则）。
  */
 export function findDanglingDraftRelations(
   drafts: readonly ManagedCaptureDraft[],
@@ -353,7 +351,7 @@ export function findDanglingDraftRelations(
       const fDef = fieldByKey?.get(fieldKey);
       if (fDef && fDef.type !== 'relation') return;
 
-      const tokens = extractRelationTokens(rawVal);
+      const tokens = Array.from(new Set(extractRelationTokens(rawVal)));
       const expectedLibrarySlug = fDef?.relationConfig?.targetLibrarySlug;
 
       const missingDraftIds: string[] = [];
@@ -383,7 +381,19 @@ export function findDanglingDraftRelations(
         reasonSet.add('missing_required');
       }
 
-      if (invalidTokens.length > 0 || reasonSet.has('missing_required')) {
+      if (
+        fDef?.type === 'relation' &&
+        fDef.relationConfig?.allowMultiple === false &&
+        tokens.length > 1
+      ) {
+        reasonSet.add('too_many_targets');
+      }
+
+      if (
+        invalidTokens.length > 0 ||
+        reasonSet.has('missing_required') ||
+        reasonSet.has('too_many_targets')
+      ) {
         issues.push({
           draftId: draft.draftId,
           fieldKey,
@@ -452,8 +462,8 @@ export function updateDraftRelationTokens(
 }
 
 /**
- * 入库前解析单条草稿中的关联引用（与预览校验共用 `resolveRelationToken`）。
- * 遇到非法格式、已删除草稿或跨库引用时直接抛出明确异常，由外层事务原子回滚。
+ * 入库前解析单条草稿中的关联引用（与预览校验共用 `extractRelationTokens` + `resolveRelationToken`）。
+ * 遇到非法格式、已删除草稿、跨库引用或单选多值时直接抛出明确异常，由外层事务原子回滚。
  */
 export function resolveDraftDataForCommit(
   draft: CommitDraftEntryItem,
@@ -500,19 +510,31 @@ export function resolveDraftDataForCommit(
     const fieldLabel = fDef?.label ?? k;
     const expectedSlug = fDef?.relationConfig?.targetLibrarySlug;
 
-    if (Array.isArray(v)) {
-      resolved[k] = v
-        .map((item) => {
-          const str = String(item ?? '').trim();
-          if (!str) return '';
-          if (isBatchRefToken(str)) {
-            return resolveSingleToken(str, fieldLabel, expectedSlug);
-          }
-          return str;
-        })
-        .filter(Boolean);
-    } else if (typeof v === 'string' && isBatchRefToken(v.trim())) {
-      resolved[k] = [resolveSingleToken(v.trim(), fieldLabel, expectedSlug)];
+    const tokens = extractRelationTokens(v);
+    if (fDef?.type === 'relation') {
+      const nextIds = Array.from(
+        new Set(
+          tokens
+            .map((tok) =>
+              isBatchRefToken(tok) ? resolveSingleToken(tok, fieldLabel, expectedSlug) : tok
+            )
+            .filter(Boolean)
+        )
+      );
+      if (fDef.relationConfig?.allowMultiple === false && nextIds.length > 1) {
+        throw new Error(`关联字段「${fieldLabel}」仅支持关联 1 条记录`);
+      }
+      resolved[k] = nextIds;
+    } else if (tokens.some(isBatchRefToken)) {
+      resolved[k] = Array.from(
+        new Set(
+          tokens
+            .map((tok) =>
+              isBatchRefToken(tok) ? resolveSingleToken(tok, fieldLabel, expectedSlug) : tok
+            )
+            .filter(Boolean)
+        )
+      );
     }
   }
 

@@ -195,7 +195,11 @@ export function CaptureResultView({
                     if (tokens.length === 0) {
                       return fDef?.required ? '请选择必填关联' : '未关联';
                     }
-                    return tokens.map(formatTokenLabel).join('、');
+                    const joined = tokens.map(formatTokenLabel).join('、');
+                    if (dangling?.reasons.includes('too_many_targets')) {
+                      return `${joined}（仅支持单选，请重选）`;
+                    }
+                    return joined;
                   }
                   if (Array.isArray(rawVal)) {
                     return rawVal.map((item) => formatTokenLabel(String(item))).join('、');

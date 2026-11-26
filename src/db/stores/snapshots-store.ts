@@ -326,6 +326,7 @@ export class SnapshotsStore {
 
     if ('kind' in payload) {
       if (payload.kind === 'entries_created') {
+        this.entries.detachReferencesToEntriesInternal(payload.entryIds);
         for (const entryId of payload.entryIds) {
           this.driver.runSync('DELETE FROM entries WHERE id = ?', [entryId]);
         }
@@ -380,6 +381,49 @@ export class SnapshotsStore {
         for (const e of payload.entries) {
           this.entries.insertRawEntry(e);
         }
+        if (payload.detachedSources && payload.detachedSources.length > 0) {
+          const restoredFieldsBySource = new Map<string, Set<string>>();
+          for (const r of payload.relations) {
+            const srcId = String(r.source_entry_id ?? '');
+            const fk = String(r.field_key ?? '');
+            if (!srcId || !fk) continue;
+            let keys = restoredFieldsBySource.get(srcId);
+            if (!keys) {
+              keys = new Set<string>();
+              restoredFieldsBySource.set(srcId, keys);
+            }
+            keys.add(fk);
+          }
+
+          for (const src of payload.detachedSources) {
+            const currentRow = this.driver.getFirstSync<{ id: string; data_json: string }>(
+              'SELECT id, data_json FROM entries WHERE id = ?',
+              [src.id]
+            );
+            if (!currentRow) continue;
+            try {
+              const prevData = JSON.parse(src.prevDataJson) as Record<string, unknown>;
+              const curData = JSON.parse(currentRow.data_json) as Record<string, unknown>;
+              const relKeys = restoredFieldsBySource.get(src.id);
+              if (relKeys && relKeys.size > 0) {
+                for (const fk of relKeys) {
+                  curData[fk] = prevData[fk];
+                }
+                this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+                  JSON.stringify(curData),
+                  src.id,
+                ]);
+              } else {
+                this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+                  src.prevDataJson,
+                  src.id,
+                ]);
+              }
+            } catch {
+              // ignore malformed payload
+            }
+          }
+        }
         this.entries.insertRawRelationsSafe(payload.relations);
         for (const w of payload.widgets) {
           this.widgets.insertRawWidget(w);
@@ -395,6 +439,7 @@ export class SnapshotsStore {
         this.libraries.syncAllLibraryRelations();
       } else if (payload.kind === 'architect_plan') {
         for (const slug of payload.createdLibrarySlugs) {
+          this.entries.detachReferencesToLibraryInternal(slug);
           dropLibrarySqlView(this.driver, slug);
           const allRawWidgets = this.driver.getAllSync<{
             id: string;

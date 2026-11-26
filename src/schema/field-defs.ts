@@ -73,6 +73,30 @@ export const FieldDefSchema = z.object({
 export type FieldDef = z.infer<typeof FieldDefSchema>;
 
 /**
+ * 统一规范化关联与多选字段值：支持数组与逗号分隔字符串，统一去除首尾空白并过滤空项。
+ * 供草稿初始化、预览校验、Zod 校验与关联表同步共用，消除各处解析分歧。
+ */
+export function normalizeRelationValueList(rawVal: unknown): string[] {
+  if (Array.isArray(rawVal)) {
+    return rawVal
+      .flatMap((item) => {
+        if (typeof item === 'string') {
+          return item.split(',').map((s) => s.trim());
+        }
+        return [String(item ?? '').trim()];
+      })
+      .filter(Boolean);
+  }
+  if (typeof rawVal === 'string') {
+    return rawVal
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+/**
  * 根据库的动态字段定义生成运行时 Zod 校验器，用于表单提交与 AI 快记数据清洗
  */
 export function buildEntryPayloadValidator(fields: FieldDef[]) {
@@ -103,18 +127,25 @@ export function buildEntryPayloadValidator(fields: FieldDef[]) {
         }, z.boolean());
         break;
       case 'multi_select':
-      case 'relation':
-        validator = z.preprocess((val) => {
-          if (Array.isArray(val)) return val.map((item) => String(item ?? '').trim()).filter(Boolean);
-          if (typeof val === 'string' && val.trim()) {
-            return val
-              .split(',')
-              .map((s) => s.trim())
-              .filter(Boolean);
-          }
-          return [];
-        }, field.required && field.type === 'relation' ? z.array(z.string()).min(1, `请至少选择一项${field.label}`) : z.array(z.string()));
+        validator = z.preprocess(
+          (val) => normalizeRelationValueList(val),
+          z.array(z.string())
+        );
         break;
+      case 'relation': {
+        let relArraySchema = z.array(z.string());
+        if (field.required) {
+          relArraySchema = relArraySchema.min(1, `请至少选择一项${field.label}`);
+        }
+        if (field.relationConfig?.allowMultiple === false) {
+          relArraySchema = relArraySchema.max(1, `${field.label}仅支持关联 1 条记录`);
+        }
+        validator = z.preprocess(
+          (val) => Array.from(new Set(normalizeRelationValueList(val))),
+          relArraySchema
+        );
+        break;
+      }
       case 'date':
       case 'text':
       case 'select':

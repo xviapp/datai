@@ -134,29 +134,19 @@ export class LibrariesStore {
       const galleryRow = viewList.find((v) => v.viewType === 'gallery');
       const calendarRow = viewList.find((v) => v.viewType === 'calendar');
 
-      const mergedViews: LibraryLayoutBundle = {
-        card: {
-          ...legacyBundle.card,
-          ...(cardRow?.config as Partial<CardViewConfig> | undefined),
+      const mergedViews = this.buildCompleteLayoutBundle(
+        legacyBundle,
+        {
+          card: cardRow?.config as Partial<CardViewConfig> | undefined,
+          gallery: galleryRow?.config as Partial<GalleryViewConfig> | undefined,
+          calendar: calendarRow?.config as Partial<CalendarViewConfig> | undefined,
         },
-        gallery: galleryRow
-          ? ({
-              ...(legacyBundle.gallery ?? {
-                titleFieldKey: legacyBundle.card.titleFieldKey || fields[0]?.key || '',
-              }),
-              ...(galleryRow.config as Partial<GalleryViewConfig>),
-            } as GalleryViewConfig)
-          : undefined,
-        calendar: calendarRow
-          ? ({
-              ...(legacyBundle.calendar ?? {
-                dateFieldKey: fields.find((f) => f.type === 'date')?.key || '',
-                titleFieldKey: legacyBundle.card.titleFieldKey || fields[0]?.key || '',
-              }),
-              ...(calendarRow.config as Partial<CalendarViewConfig>),
-            } as CalendarViewConfig)
-          : undefined,
-      };
+        fields,
+        {
+          hasGallery: Boolean(galleryRow),
+          hasCalendar: Boolean(calendarRow),
+        }
+      );
 
       return {
         id: r.id,
@@ -297,6 +287,63 @@ export class LibrariesStore {
     rebuildLibraryRelationsTable(this.driver, { clearFirst: true });
   }
 
+  /**
+   * 统一构建完整的 LibraryLayoutBundle（供缓存水合、upsertLibrary 与 saveLibraryViews 共用）：
+   * 仅补齐 schema 必需键（如 card.footerMetricKeys / sortDir / highlightRules），绝不凭空注入已删除的可选字段。
+   */
+  private buildCompleteLayoutBundle(
+    baseBundle: Partial<LibraryLayoutBundle> | undefined,
+    overrides: {
+      card?: Partial<CardViewConfig>;
+      gallery?: Partial<GalleryViewConfig>;
+      calendar?: Partial<CalendarViewConfig>;
+    },
+    fields: readonly FieldDef[],
+    flags: { hasGallery: boolean; hasCalendar: boolean }
+  ): LibraryLayoutBundle {
+    const fallbackTitleKey = baseBundle?.card?.titleFieldKey || fields[0]?.key || '';
+    const rawCard: Partial<CardViewConfig> = {
+      ...(baseBundle?.card ?? {}),
+      ...(overrides.card ?? {}),
+    };
+    const card: CardViewConfig = {
+      ...rawCard,
+      titleFieldKey: rawCard.titleFieldKey || fallbackTitleKey,
+      footerMetricKeys: Array.isArray(rawCard.footerMetricKeys) ? rawCard.footerMetricKeys : [],
+      sortDir: rawCard.sortDir === 'asc' ? 'asc' : 'desc',
+      highlightRules: Array.isArray(rawCard.highlightRules) ? rawCard.highlightRules : [],
+    };
+
+    const gallery: GalleryViewConfig | undefined = flags.hasGallery
+      ? {
+          ...(baseBundle?.gallery ?? {}),
+          ...(overrides.gallery ?? {}),
+          titleFieldKey:
+            overrides.gallery?.titleFieldKey ||
+            baseBundle?.gallery?.titleFieldKey ||
+            card.titleFieldKey,
+        }
+      : undefined;
+
+    const calendar: CalendarViewConfig | undefined = flags.hasCalendar
+      ? {
+          ...(baseBundle?.calendar ?? {}),
+          ...(overrides.calendar ?? {}),
+          dateFieldKey:
+            overrides.calendar?.dateFieldKey ??
+            baseBundle?.calendar?.dateFieldKey ??
+            fields.find((f) => f.type === 'date')?.key ??
+            '',
+          titleFieldKey:
+            overrides.calendar?.titleFieldKey ||
+            baseBundle?.calendar?.titleFieldKey ||
+            card.titleFieldKey,
+        }
+      : undefined;
+
+    return { card, gallery, calendar };
+  }
+
   buildDefaultConfigForViewType(
     lib: LibraryRecord,
     viewType: LibraryViewType
@@ -424,24 +471,20 @@ export class LibrariesStore {
 
       const hasGallery = explicitViewList.some((v) => v.viewType === 'gallery');
       const hasCalendar = explicitViewList.some((v) => v.viewType === 'calendar');
-      const syncedBundle: LibraryLayoutBundle = {
-        card: {
-          ...viewsBundle.card,
-          ...((resolvedConfigs.get('card') as Partial<CardViewConfig> | undefined) ?? {}),
+      const syncedBundle = this.buildCompleteLayoutBundle(
+        {
+          card: viewsBundle.card,
+          gallery: hasGallery ? resolvedGallery : undefined,
+          calendar: hasCalendar ? resolvedCalendar : undefined,
         },
-        gallery: hasGallery
-          ? {
-              ...resolvedGallery,
-              ...((resolvedConfigs.get('gallery') as Partial<GalleryViewConfig> | undefined) ?? {}),
-            }
-          : undefined,
-        calendar: hasCalendar
-          ? {
-              ...resolvedCalendar,
-              ...((resolvedConfigs.get('calendar') as Partial<CalendarViewConfig> | undefined) ?? {}),
-            }
-          : undefined,
-      };
+        {
+          card: resolvedConfigs.get('card') as Partial<CardViewConfig> | undefined,
+          gallery: resolvedConfigs.get('gallery') as Partial<GalleryViewConfig> | undefined,
+          calendar: resolvedConfigs.get('calendar') as Partial<CalendarViewConfig> | undefined,
+        },
+        fieldsForDefaults ?? [],
+        { hasGallery, hasCalendar }
+      );
       this.driver.runSync('UPDATE libraries SET views_json = ?, updated_at = ? WHERE id = ?', [
         JSON.stringify(syncedBundle),
         now,
@@ -607,15 +650,19 @@ export class LibrariesStore {
       );
     });
 
-    const syncedBundle: LibraryLayoutBundle = {
-      card: (resolvedConfigs.get('card') as unknown as CardViewConfig) ?? lib.views.card,
-      gallery: resolvedConfigs.has('gallery')
-        ? (resolvedConfigs.get('gallery') as unknown as GalleryViewConfig)
-        : undefined,
-      calendar: resolvedConfigs.has('calendar')
-        ? (resolvedConfigs.get('calendar') as unknown as CalendarViewConfig)
-        : undefined,
-    };
+    const syncedBundle = this.buildCompleteLayoutBundle(
+      lib.views,
+      {
+        card: resolvedConfigs.get('card') as Partial<CardViewConfig> | undefined,
+        gallery: resolvedConfigs.get('gallery') as Partial<GalleryViewConfig> | undefined,
+        calendar: resolvedConfigs.get('calendar') as Partial<CalendarViewConfig> | undefined,
+      },
+      lib.fields,
+      {
+        hasGallery: resolvedConfigs.has('gallery'),
+        hasCalendar: resolvedConfigs.has('calendar'),
+      }
+    );
     this.driver.runSync('UPDATE libraries SET views_json = ?, updated_at = ? WHERE id = ?', [
       JSON.stringify(syncedBundle),
       now,

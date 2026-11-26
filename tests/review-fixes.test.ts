@@ -8,6 +8,7 @@ import {
 import { OmniRepository } from '../src/db/repository';
 import { sanitizeReadOnlySql, type SqlParam, type SyncSqlDriver } from '../src/db/types';
 import {
+  collectReferencedExistingEntryIds,
   findDanglingDraftRelations,
   makeDraftRefToken,
   normalizeCaptureDrafts,
@@ -345,6 +346,181 @@ describe('1. Quick-capture draft stable IDs, shared validation & strict relation
     assert.equal(searchHit.length, 1);
     assert.equal(searchHit[0].title, '候选书籍-01');
   });
+
+  it('normalizes leading-whitespace " @prev:0" before assigning stable IDs and matches comma-separated multi-select in preview & commit', () => {
+    const { repo } = createSeededRepo();
+    const libMap = new Map(repo.listLibraries().map((l) => [l.slug, l]));
+    const booksCountBefore = repo.listHydratedEntries('books').length;
+
+    // 1. 带前导空格的 " @prev:0" 必须在初始化阶段转换为稳定 draftId，删除书 A 后不可错绑书 B
+    const spaced = normalizeCaptureDrafts(
+      [
+        {
+          librarySlug: 'books',
+          reason: '书 A',
+          data: { book_title: '空格测试书 A', author: '作者 A', status: '在读' },
+        },
+        {
+          librarySlug: 'books',
+          reason: '书 B',
+          data: { book_title: '空格测试书 B', author: '作者 B', status: '想读' },
+        },
+        {
+          librarySlug: 'reading_logs',
+          reason: '引用书 A（带前导空格）',
+          data: { book: [' @prev:0'], read_date: '2026-11-26', note: '第一天' },
+        },
+      ],
+      libMap
+    );
+    assert.deepEqual(spaced[2].data.book, [makeDraftRefToken(spaced[0].draftId)]);
+
+    const { nextDrafts } = removeCaptureDraftById(spaced, spaced[0].draftId, libMap);
+    const issues = findDanglingDraftRelations(nextDrafts, libMap);
+    assert.equal(issues.length, 1);
+    assert.deepEqual(issues[0].reasons, ['missing_draft']);
+    assert.throws(() => repo.commitOmniDrafts(nextDrafts), /已被删除|重新选择/);
+    assert.equal(repo.listHydratedEntries('books').length, booksCountBefore);
+
+    // 2. 逗号分隔的多选关联 ID：预览校验与入库提交共用拆分规则
+    const meds = repo.listHydratedEntries('med_cabinet');
+    assert.ok(meds.length >= 2);
+    const commaDrafts = normalizeCaptureDrafts(
+      [
+        {
+          librarySlug: 'health_logs',
+          reason: '同时服用两种药',
+          data: {
+            log_title: '联合用药测试',
+            log_date: '2026-11-26',
+            medicines: `${meds[0].id}, ${meds[1].id}`,
+          },
+        },
+      ],
+      libMap
+    );
+    const refIds = collectReferencedExistingEntryIds(commaDrafts, libMap);
+    assert.deepEqual(refIds, [meds[0].id, meds[1].id]);
+    const summaryMap = repo.getEntrySummaryMap(refIds);
+    const existingLibById = new Map<string, string>();
+    for (const [id, info] of summaryMap.entries()) {
+      existingLibById.set(id, info.librarySlug);
+    }
+    assert.equal(
+      findDanglingDraftRelations(commaDrafts, libMap, { existingEntryLibraryById: existingLibById })
+        .length,
+      0
+    );
+    const [healthLogId] = repo.commitOmniDrafts(commaDrafts);
+    const savedHealthLog = repo.getHydratedEntryById(healthLogId);
+    assert.equal(savedHealthLog?.entry.forwardLinks.medicines?.length, 2);
+  });
+
+  it('rejects multiple targets on single-select relation fields in both preview and repository writes', () => {
+    const { repo } = createSeededRepo();
+    const libMap = new Map(repo.listLibraries().map((l) => [l.slug, l]));
+    const books = repo.listHydratedEntries('books');
+    assert.ok(books.length >= 2);
+    const logsBefore = repo.listHydratedEntries('reading_logs').length;
+
+    const twoBookDrafts = normalizeCaptureDrafts(
+      [
+        {
+          librarySlug: 'reading_logs',
+          reason: '误填两本书',
+          data: {
+            book: [books[0].id, books[1].id],
+            read_date: '2026-11-26',
+            note: '测试单选校验',
+          },
+        },
+      ],
+      libMap
+    );
+    const previewIssues = findDanglingDraftRelations(twoBookDrafts, libMap);
+    assert.equal(previewIssues.length, 1);
+    assert.ok(previewIssues[0].reasons.includes('too_many_targets'));
+
+    assert.throws(() => repo.commitOmniDrafts(twoBookDrafts), /仅支持关联 1 条记录/);
+    assert.throws(
+      () =>
+        repo.createEntry('reading_logs', {
+          book: [books[0].id, books[1].id],
+          read_date: '2026-11-26',
+        }),
+      /仅支持关联 1 条记录/
+    );
+    assert.equal(repo.listHydratedEntries('reading_logs').length, logsBefore);
+  });
+
+  it('detaches surviving references on deleteLibrary and entries_created undo so surviving entries stay editable', () => {
+    const { repo } = createSeededRepo();
+
+    // 1. 删除「阅读书架」后，存活的「阅读记录」仍可正常编辑保存，且撤销删库可恢复关联并保留新编辑内容
+    const origLog = repo
+      .listHydratedEntries('reading_logs')
+      .find((e) => (e.forwardLinks.book?.length ?? 0) > 0);
+    assert.ok(origLog);
+    const origBookId = origLog.forwardLinks.book[0].id;
+
+    repo.deleteLibrary('books');
+    const afterDeleteLog = repo.getHydratedEntryById(origLog.id);
+    assert.ok(afterDeleteLog);
+    assert.deepEqual(afterDeleteLog.entry.rawData.book, []);
+
+    repo.updateEntry(origLog.id, {
+      ...afterDeleteLog.entry.rawData,
+      note: '删库后成功修改的书摘',
+    });
+    assert.equal(
+      repo.getHydratedEntryById(origLog.id)?.entry.rawData.note,
+      '删库后成功修改的书摘'
+    );
+
+    const deleteLibSnap = repo
+      .listSnapshots()
+      .find((s) => !s.undone && s.actionSummary.includes('阅读书架'));
+    assert.ok(deleteLibSnap);
+    repo.undoSnapshot(deleteLibSnap.id);
+
+    const afterUndoDeleteLog = repo.getHydratedEntryById(origLog.id);
+    assert.equal(afterUndoDeleteLog?.entry.rawData.note, '删库后成功修改的书摘');
+    assert.equal(afterUndoDeleteLog?.entry.forwardLinks.book?.[0]?.id, origBookId);
+
+    // 2. 撤销快记创建的书籍后，后来关联它的阅读记录引用被同步解绑且可继续编辑
+    const [createdBookId] = repo.commitOmniDrafts(
+      [
+        {
+          librarySlug: 'books',
+          reason: '快记新建书',
+          data: { book_title: '将被撤销的书', author: '作者', status: '在读' },
+        },
+      ],
+      '快记：新建待撤销书'
+    );
+    const linkedLogId = repo.createEntry('reading_logs', {
+      book: [createdBookId],
+      read_date: '2026-11-26',
+      note: '关联到快记新书',
+    });
+    const captureSnap = repo
+      .listSnapshots()
+      .find((s) => !s.undone && s.actionSummary.includes('待撤销书'));
+    assert.ok(captureSnap);
+    repo.undoSnapshot(captureSnap.id);
+
+    const detachedLog = repo.getHydratedEntryById(linkedLogId);
+    assert.ok(detachedLog);
+    assert.deepEqual(detachedLog.entry.rawData.book, []);
+    repo.updateEntry(linkedLogId, {
+      ...detachedLog.entry.rawData,
+      note: '撤销快记后仍可顺利编辑',
+    });
+    assert.equal(
+      repo.getHydratedEntryById(linkedLogId)?.entry.rawData.note,
+      '撤销快记后仍可顺利编辑'
+    );
+  });
 });
 
 describe('2. Schema editor config read/write helpers', () => {
@@ -461,6 +637,76 @@ describe('2. Schema editor config read/write helpers', () => {
     assert.equal(saved.views.card.highlightRules[0].fieldKey, 'stock_count');
     assert.equal(saved.views.gallery?.titleFieldKey, 'med_name');
     assert.equal(saved.views.gallery?.badgeFieldKey, 'purpose');
+  });
+
+  it('does not resurrect deleted fields in effective gallery or calendar views', () => {
+    const { repo } = createSeededRepo();
+
+    // 1. 删除 reading_logs 的 duration_min 后，日历有效配置不再指向 duration_min
+    const readingLogs = repo.getLibraryBySlug('reading_logs');
+    assert.ok(readingLogs);
+    assert.equal(readingLogs.views.calendar?.metricFieldKey, 'duration_min');
+    const logDraft = buildInitialSchemaDraft(repo.listLibraries(), readingLogs);
+    logDraft.fields = logDraft.fields.filter((f) => f.key !== 'duration_min');
+    const logPayload = buildSchemaSavePayload(logDraft, readingLogs);
+    repo.upsertLibrary(logPayload.blueprint, logPayload.viewInputs);
+
+    const savedLogs = repo.getLibraryBySlug('reading_logs');
+    assert.ok(savedLogs);
+    assert.equal(savedLogs.views.calendar?.metricFieldKey, undefined);
+    assert.equal(
+      savedLogs.viewList.find((v) => v.viewType === 'calendar')?.config.metricFieldKey,
+      undefined
+    );
+
+    // 2. 替换 books 的 cover_image 字段后，画廊有效配置不再指向旧的 cover_image
+    const books = repo.getLibraryBySlug('books');
+    assert.ok(books);
+    assert.equal(books.views.gallery?.coverImageFieldKey, 'cover_image');
+    const bookDraft = buildInitialSchemaDraft(repo.listLibraries(), books);
+    bookDraft.fields = [
+      ...bookDraft.fields.filter((f) => f.key !== 'cover_image'),
+      { key: 'book_cover_v2', label: '新封面', type: 'image', required: false },
+    ];
+    const bookPayload = buildSchemaSavePayload(bookDraft, books);
+    repo.upsertLibrary(bookPayload.blueprint, bookPayload.viewInputs);
+
+    const savedBooks = repo.getLibraryBySlug('books');
+    assert.ok(savedBooks);
+    assert.equal(savedBooks.views.gallery?.coverImageFieldKey, undefined);
+    assert.equal(
+      savedBooks.viewList.find((v) => v.viewType === 'gallery')?.config.coverImageFieldKey,
+      undefined
+    );
+  });
+
+  it('saves library rename cleanly after adding a minimal card view and deleting the original primary card view', () => {
+    const { repo } = createSeededRepo();
+    const medBefore = repo.getLibraryBySlug('med_cabinet');
+    assert.ok(medBefore);
+    const origPrimaryCard = medBefore.viewList.find((v) => v.viewType === 'card');
+    assert.ok(origPrimaryCard);
+
+    // 添加仅含标题和底部指标的极简卡片，再删掉原主卡片
+    repo.addLibraryView('med_cabinet', 'card', '极简卡片', {
+      titleFieldKey: 'med_name',
+      footerMetricKeys: ['stock_count'],
+    });
+    repo.deleteLibraryView(origPrimaryCard.id);
+
+    const medAfterDel = repo.getLibraryBySlug('med_cabinet');
+    assert.ok(medAfterDel);
+    assert.ok(Array.isArray(medAfterDel.views.card.highlightRules));
+
+    const draft = buildInitialSchemaDraft(repo.listLibraries(), medAfterDel);
+    draft.name = '家庭药箱（删主卡片后改名）';
+    const payload = buildSchemaSavePayload(draft, medAfterDel);
+    repo.upsertLibrary(payload.blueprint, payload.viewInputs);
+
+    const saved = repo.getLibraryBySlug('med_cabinet');
+    assert.ok(saved);
+    assert.equal(saved.name, '家庭药箱（删主卡片后改名）');
+    assert.ok(Array.isArray(saved.views.card.highlightRules));
   });
 });
 
