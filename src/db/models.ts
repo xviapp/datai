@@ -169,6 +169,13 @@ export interface LibraryCatalogItem {
   recentEntries?: Array<{ id: string; title: string }>;
 }
 
+export interface DetachedSourceRecord {
+  id: string;
+  prevDataJson: string;
+  /** 按字段记录本次解绑实际移除的目标 ID，用于撤销时仅恢复被移除的关联而不覆盖其他字段的新编辑 */
+  removedByField?: Record<string, string[]>;
+}
+
 export type SnapshotPayload =
   | {
       kind: 'entries_created';
@@ -178,7 +185,7 @@ export type SnapshotPayload =
       kind: 'entry_deleted';
       entry: Record<string, unknown>;
       relations: Array<Record<string, unknown>>;
-      detachedSources?: Array<{ id: string; prevDataJson: string }>;
+      detachedSources?: DetachedSourceRecord[];
     }
   | {
       kind: 'library_deleted';
@@ -192,7 +199,7 @@ export type SnapshotPayload =
         parent_slug: string | null;
         show_on_home: number;
       }>;
-      detachedSources?: Array<{ id: string; prevDataJson: string }>;
+      detachedSources?: DetachedSourceRecord[];
     }
   | {
       kind: 'architect_plan';

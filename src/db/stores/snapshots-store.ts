@@ -1,12 +1,17 @@
 import type { ArchitectPlan } from '@/ai/schemas';
 import { createId } from '@/engine/id';
-import type { FieldDef, FieldType } from '@/schema/field-defs';
+import {
+  normalizeRelationValueList,
+  type FieldDef,
+  type FieldType,
+} from '@/schema/field-defs';
 import type { LibraryLayoutBundle } from '@/schema/view-dsl';
 import { MAX_AI_SNAPSHOTS } from '../migrations';
 import type {
   AiSnapshotItem,
   ArchitectFieldTypeChange,
   ArchitectLibraryDiff,
+  DetachedSourceRecord,
   SnapshotPayload,
   SnapshotUndoImpact,
 } from '../models';
@@ -313,6 +318,95 @@ export class SnapshotsStore {
     };
   }
 
+  /**
+   * 恢复删除记录或删库时解绑的反向关联：
+   * 优先按 `removedByField` 精确合并回被移除的 ID，避免覆盖删除期间用户对其他字段（如标题/备注）的新编辑。
+   */
+  private restoreDetachedSourcesInternal(
+    detachedSources: readonly DetachedSourceRecord[] | undefined,
+    relations: readonly Array<Record<string, unknown>>[number][]
+  ): void {
+    if (!detachedSources || detachedSources.length === 0) return;
+
+    const restoredFieldsBySource = new Map<string, Set<string>>();
+    for (const r of relations) {
+      const srcId = String(r.source_entry_id ?? '');
+      const fk = String(r.field_key ?? '');
+      if (!srcId || !fk) continue;
+      let keys = restoredFieldsBySource.get(srcId);
+      if (!keys) {
+        keys = new Set<string>();
+        restoredFieldsBySource.set(srcId, keys);
+      }
+      keys.add(fk);
+    }
+
+    for (const src of detachedSources) {
+      const currentRow = this.driver.getFirstSync<{ id: string; data_json: string }>(
+        'SELECT id, data_json FROM entries WHERE id = ?',
+        [src.id]
+      );
+      if (!currentRow) continue;
+
+      if (src.removedByField && Object.keys(src.removedByField).length > 0) {
+        let curData: Record<string, unknown> | null = null;
+        try {
+          const parsed = JSON.parse(currentRow.data_json);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            curData = parsed as Record<string, unknown>;
+          }
+        } catch {
+          curData = null;
+        }
+        if (!curData) continue;
+
+        for (const [fk, removedIds] of Object.entries(src.removedByField)) {
+          if (!Array.isArray(removedIds) || removedIds.length === 0) continue;
+          const existingTokens = normalizeRelationValueList(curData[fk]);
+          curData[fk] = Array.from(new Set([...existingTokens, ...removedIds]));
+        }
+        this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+          JSON.stringify(curData),
+          src.id,
+        ]);
+        continue;
+      }
+
+      // 兼容旧版快照（未记录 removedByField）
+      const relKeys = restoredFieldsBySource.get(src.id);
+      if (relKeys && relKeys.size > 0) {
+        let prevData: Record<string, unknown> | null = null;
+        let curData: Record<string, unknown> | null = null;
+        try {
+          const p = JSON.parse(src.prevDataJson);
+          const c = JSON.parse(currentRow.data_json);
+          if (p && typeof p === 'object' && !Array.isArray(p) && c && typeof c === 'object' && !Array.isArray(c)) {
+            prevData = p as Record<string, unknown>;
+            curData = c as Record<string, unknown>;
+          }
+        } catch {
+          prevData = null;
+          curData = null;
+        }
+        if (prevData && curData) {
+          for (const fk of relKeys) {
+            curData[fk] = prevData[fk];
+          }
+          this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+            JSON.stringify(curData),
+            src.id,
+          ]);
+          continue;
+        }
+      }
+
+      this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+        src.prevDataJson,
+        src.id,
+      ]);
+    }
+  }
+
   undoSnapshotInternal(snapshotId: string): void {
     const row = this.driver.getFirstSync<{ snapshot_json: string; undone: number }>(
       'SELECT snapshot_json, undone FROM ai_snapshots WHERE id = ?',
@@ -340,20 +434,7 @@ export class SnapshotsStore {
           throw new Error('所属记录本已被删除，请先撤销删除记录本的操作');
         }
         this.entries.insertRawEntry(e);
-        if (payload.detachedSources) {
-          for (const src of payload.detachedSources) {
-            const srcExists = this.driver.getFirstSync<{ id: string }>(
-              'SELECT id FROM entries WHERE id = ?',
-              [src.id]
-            );
-            if (srcExists) {
-              this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
-                src.prevDataJson,
-                src.id,
-              ]);
-            }
-          }
-        }
+        this.restoreDetachedSourcesInternal(payload.detachedSources, payload.relations);
         this.entries.insertRawRelationsSafe(payload.relations);
       } else if (payload.kind === 'library_deleted') {
         const l = payload.library;
@@ -381,49 +462,7 @@ export class SnapshotsStore {
         for (const e of payload.entries) {
           this.entries.insertRawEntry(e);
         }
-        if (payload.detachedSources && payload.detachedSources.length > 0) {
-          const restoredFieldsBySource = new Map<string, Set<string>>();
-          for (const r of payload.relations) {
-            const srcId = String(r.source_entry_id ?? '');
-            const fk = String(r.field_key ?? '');
-            if (!srcId || !fk) continue;
-            let keys = restoredFieldsBySource.get(srcId);
-            if (!keys) {
-              keys = new Set<string>();
-              restoredFieldsBySource.set(srcId, keys);
-            }
-            keys.add(fk);
-          }
-
-          for (const src of payload.detachedSources) {
-            const currentRow = this.driver.getFirstSync<{ id: string; data_json: string }>(
-              'SELECT id, data_json FROM entries WHERE id = ?',
-              [src.id]
-            );
-            if (!currentRow) continue;
-            try {
-              const prevData = JSON.parse(src.prevDataJson) as Record<string, unknown>;
-              const curData = JSON.parse(currentRow.data_json) as Record<string, unknown>;
-              const relKeys = restoredFieldsBySource.get(src.id);
-              if (relKeys && relKeys.size > 0) {
-                for (const fk of relKeys) {
-                  curData[fk] = prevData[fk];
-                }
-                this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
-                  JSON.stringify(curData),
-                  src.id,
-                ]);
-              } else {
-                this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
-                  src.prevDataJson,
-                  src.id,
-                ]);
-              }
-            } catch {
-              // ignore malformed payload
-            }
-          }
-        }
+        this.restoreDetachedSourcesInternal(payload.detachedSources, payload.relations);
         this.entries.insertRawRelationsSafe(payload.relations);
         for (const w of payload.widgets) {
           this.widgets.insertRawWidget(w);

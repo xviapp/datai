@@ -73,7 +73,24 @@ export const FieldDefSchema = z.object({
 export type FieldDef = z.infer<typeof FieldDefSchema>;
 
 /**
- * 统一规范化关联与多选字段值：支持数组与逗号分隔字符串，统一去除首尾空白并过滤空项。
+ * 规范化多选字段值：数组输入保留每个选项的元素边界（避免把 "Washington, D.C." 按逗号拆坏），
+ * 仅对单个字符串输入按逗号拆分。
+ */
+export function normalizeMultiSelectValueList(rawVal: unknown): string[] {
+  if (Array.isArray(rawVal)) {
+    return rawVal.map((item) => String(item ?? '').trim()).filter(Boolean);
+  }
+  if (typeof rawVal === 'string') {
+    return rawVal
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+/**
+ * 统一规范化关联字段值：支持数组与逗号分隔字符串，统一去除首尾空白并过滤空项。
  * 供草稿初始化、预览校验、Zod 校验与关联表同步共用，消除各处解析分歧。
  */
 export function normalizeRelationValueList(rawVal: unknown): string[] {
@@ -128,7 +145,7 @@ export function buildEntryPayloadValidator(fields: FieldDef[]) {
         break;
       case 'multi_select':
         validator = z.preprocess(
-          (val) => normalizeRelationValueList(val),
+          (val) => normalizeMultiSelectValueList(val),
           z.array(z.string())
         );
         break;

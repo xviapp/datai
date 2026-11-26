@@ -279,6 +279,28 @@ export class OmniRepository {
       [slug]
     );
 
+    if (rawLib) {
+      const libName = String(rawLib.name ?? slug);
+      const blockingDeps: string[] = [];
+      for (const otherLib of this.librariesStore.listLibraries()) {
+        if (otherLib.slug === slug) continue;
+        for (const f of otherLib.fields) {
+          if (
+            f.type === 'relation' &&
+            f.required &&
+            f.relationConfig?.targetLibrarySlug === slug
+          ) {
+            blockingDeps.push(`「${otherLib.name}」的「${f.label}」`);
+          }
+        }
+      }
+      if (blockingDeps.length > 0) {
+        throw new Error(
+          `无法删除「${libName}」：${blockingDeps.join('、')}将其设为必填关联字段，请先修改或取消必填后再删除`
+        );
+      }
+    }
+
     this.runWriteTransaction(() => {
       if (rawLib) {
         const libId = String(rawLib.id);

@@ -521,6 +521,267 @@ describe('1. Quick-capture draft stable IDs, shared validation & strict relation
       '撤销快记后仍可顺利编辑'
     );
   });
+
+  it('preserves original book links when undoing an Architect plan that retargeted to an empty new library', () => {
+    const { repo } = createSeededRepo();
+    const origLog = repo
+      .listHydratedEntries('reading_logs')
+      .find((e) => (e.forwardLinks.book?.length ?? 0) > 0);
+    assert.ok(origLog);
+    const origBookId = origLog.forwardLinks.book[0].id;
+    const origLogsLib = repo.getLibraryBySlug('reading_logs');
+    assert.ok(origLogsLib);
+
+    const planSnapId = repo.applyArchitectPlan({
+      summary: '新建空书架 v2 并把阅读记录改指新库',
+      libraries: [
+        {
+          slug: 'books_v2',
+          name: '新书架',
+          description: '',
+          icon: '📘',
+          color: 'blue',
+          fields: [{ key: 'title', label: '书名', type: 'text', required: true }],
+          views: {
+            card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+          },
+        },
+        {
+          slug: 'reading_logs',
+          name: origLogsLib.name,
+          description: origLogsLib.description,
+          icon: origLogsLib.icon,
+          color: origLogsLib.color,
+          parentLibrarySlug: 'books_v2',
+          showOnHome: false,
+          fields: origLogsLib.fields.map((f) =>
+            f.key === 'book'
+              ? { ...f, relationConfig: { targetLibrarySlug: 'books_v2', allowMultiple: false } }
+              : f
+          ),
+          views: origLogsLib.views,
+        },
+      ],
+      dashboardWidgets: [],
+    });
+
+    repo.undoSnapshot(planSnapId);
+
+    const restoredLog = repo.getHydratedEntryById(origLog.id);
+    assert.ok(restoredLog);
+    assert.deepEqual(
+      restoredLog.entry.rawData.book,
+      [origBookId],
+      'Undoing empty books_v2 plan must NOT wipe original books IDs in reading_logs'
+    );
+    repo.updateEntry(origLog.id, { ...restoredLog.entry.rawData, note: '撤销建库后更新书摘' });
+    assert.equal(repo.getHydratedEntryById(origLog.id)?.entry.forwardLinks.book?.[0]?.id, origBookId);
+  });
+
+  it('restores only removed relation IDs on library delete undo without overwriting post-delete edits, and detaches unindexed IDs on capture undo', () => {
+    const { repo } = createSeededRepo();
+    const existingBook = repo.listHydratedEntries('books')[0];
+    assert.ok(existingBook);
+
+    // 1. 文本字段存目标书 ID 后转为关联字段（无 entry_relations 边），删库 -> 改标题 -> 撤销删库，标题不应被覆盖
+    repo.upsertLibrary({
+      slug: 'notes_converted',
+      name: '转关联测试笔记',
+      description: '',
+      icon: '🗒️',
+      color: 'teal',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        { key: 'ref_book', label: '关联书籍', type: 'text', required: false },
+      ],
+      views: {
+        card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+      },
+    });
+    const noteId = repo.createEntry('notes_converted', {
+      title: '旧标题',
+      ref_book: existingBook.id,
+    });
+    repo.upsertLibrary({
+      slug: 'notes_converted',
+      name: '转关联测试笔记',
+      description: '',
+      icon: '🗒️',
+      color: 'teal',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'ref_book',
+          label: '关联书籍',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: false },
+        },
+      ],
+      views: {
+        card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+      },
+    });
+
+    repo.deleteLibrary('books');
+    const afterDelNote = repo.getHydratedEntryById(noteId);
+    assert.ok(afterDelNote);
+    assert.deepEqual(afterDelNote.entry.rawData.ref_book, []);
+    repo.updateEntry(noteId, { ...afterDelNote.entry.rawData, title: '删库后新标题' });
+
+    const delBooksSnap = repo
+      .listSnapshots()
+      .find((s) => !s.undone && s.actionSummary.includes('阅读书架'));
+    assert.ok(delBooksSnap);
+    repo.undoSnapshot(delBooksSnap.id);
+
+    const afterUndoNote = repo.getHydratedEntryById(noteId);
+    assert.equal(afterUndoNote?.entry.titleSummary, '删库后新标题');
+    assert.equal(
+      afterUndoNote?.entry.rawData.title,
+      '删库后新标题',
+      'Undo deleteLibrary must NOT overwrite post-delete title edit in data_json'
+    );
+    assert.deepEqual(afterUndoNote?.entry.rawData.ref_book, [existingBook.id]);
+
+    // 2. 撤销快记新书时，也应清理文本转关联后未写入 entry_relations 的引用
+    const [capBookId] = repo.commitOmniDrafts(
+      [
+        {
+          librarySlug: 'books',
+          reason: '快记书',
+          data: { book_title: '未建边撤销测试书', author: '作者', status: '在读' },
+        },
+      ],
+      '快记：未建边撤销测试书'
+    );
+    repo.upsertLibrary({
+      slug: 'notes_unindexed',
+      name: '未建边笔记',
+      description: '',
+      icon: '📌',
+      color: 'amber',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        { key: 'ref_book', label: '关联书籍', type: 'text', required: false },
+      ],
+      views: {
+        card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+      },
+    });
+    const unindexedNoteId = repo.createEntry('notes_unindexed', {
+      title: '初始标题',
+      ref_book: capBookId,
+    });
+    repo.upsertLibrary({
+      slug: 'notes_unindexed',
+      name: '未建边笔记',
+      description: '',
+      icon: '📌',
+      color: 'amber',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'ref_book',
+          label: '关联书籍',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: false },
+        },
+      ],
+      views: {
+        card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+      },
+    });
+    const capSnap = repo
+      .listSnapshots()
+      .find((s) => !s.undone && s.actionSummary.includes('未建边撤销测试书'));
+    assert.ok(capSnap);
+    repo.undoSnapshot(capSnap.id);
+
+    const afterCapUndo = repo.getHydratedEntryById(unindexedNoteId);
+    assert.ok(afterCapUndo);
+    assert.deepEqual(afterCapUndo.entry.rawData.ref_book, []);
+    repo.updateEntry(unindexedNoteId, { ...afterCapUndo.entry.rawData, title: '改标题成功' });
+    assert.equal(repo.getHydratedEntryById(unindexedNoteId)?.entry.rawData.title, '改标题成功');
+  });
+
+  it('blocks deleting a library referenced by a required relation field and rolls back deleteLibrary if detach UPDATE fails', () => {
+    const { repo, driver } = createSeededRepo();
+    const logsLib = repo.getLibraryBySlug('reading_logs');
+    assert.ok(logsLib);
+
+    // 1. 将 reading_logs.book 改为必填后，删除 books 必须被明确拦截
+    repo.upsertLibrary({
+      slug: logsLib.slug,
+      name: logsLib.name,
+      description: logsLib.description,
+      icon: logsLib.icon,
+      color: logsLib.color,
+      parentLibrarySlug: logsLib.parentLibrarySlug ?? undefined,
+      showOnHome: logsLib.showOnHome,
+      fields: logsLib.fields.map((f) => (f.key === 'book' ? { ...f, required: true } : f)),
+      views: logsLib.views,
+    });
+    assert.throws(() => repo.deleteLibrary('books'), /阅读记录.*所属书籍/);
+    assert.ok(repo.getLibraryBySlug('books'), 'books must still exist when blocked by required relation');
+
+    // 取消必填后，测试数据库在解绑 UPDATE 时报错必须回滚整个 deleteLibrary
+    repo.upsertLibrary({
+      slug: logsLib.slug,
+      name: logsLib.name,
+      description: logsLib.description,
+      icon: logsLib.icon,
+      color: logsLib.color,
+      parentLibrarySlug: logsLib.parentLibrarySlug ?? undefined,
+      showOnHome: logsLib.showOnHome,
+      fields: logsLib.fields.map((f) => (f.key === 'book' ? { ...f, required: false } : f)),
+      views: logsLib.views,
+    });
+    driver.execSync(`
+      CREATE TRIGGER block_detach_update
+      BEFORE UPDATE ON entries
+      BEGIN
+        SELECT RAISE(ABORT, 'simulated detach update failure');
+      END;
+    `);
+    assert.throws(() => repo.deleteLibrary('books'), /simulated detach update failure/);
+    assert.ok(
+      repo.getLibraryBySlug('books'),
+      'deleteLibrary must roll back when detach UPDATE fails instead of swallowing DB error'
+    );
+    driver.execSync('DROP TRIGGER block_detach_update;');
+  });
+
+  it('preserves multi_select array options containing English commas', () => {
+    const { repo } = createSeededRepo();
+    repo.upsertLibrary({
+      slug: 'travel_log',
+      name: '旅行记录',
+      description: '',
+      icon: '✈️',
+      color: 'blue',
+      fields: [
+        { key: 'title', label: '行程', type: 'text', required: true },
+        {
+          key: 'cities',
+          label: '城市',
+          type: 'multi_select',
+          required: false,
+          options: [{ value: 'Washington, D.C.' }, { value: 'New York' }],
+        },
+      ],
+      views: {
+        card: { titleFieldKey: 'title', footerMetricKeys: [], sortDir: 'desc', highlightRules: [] },
+      },
+    });
+    const entryId = repo.createEntry('travel_log', {
+      title: '美东行',
+      cities: ['Washington, D.C.', 'New York'],
+    });
+    const loaded = repo.getHydratedEntryById(entryId);
+    assert.deepEqual(loaded?.entry.rawData.cities, ['Washington, D.C.', 'New York']);
+  });
 });
 
 describe('2. Schema editor config read/write helpers', () => {
@@ -707,6 +968,68 @@ describe('2. Schema editor config read/write helpers', () => {
     assert.ok(saved);
     assert.equal(saved.name, '家庭药箱（删主卡片后改名）');
     assert.ok(Array.isArray(saved.views.card.highlightRules));
+  });
+
+  it('preserves inherited calendar metric and gallery cover/subtitle when view row has partial overrides and user only renames library', () => {
+    const { repo, driver } = createSeededRepo();
+
+    // 1. 阅读记录日历行仅显式配置 dateFieldKey，其余（metricFieldKey: duration_min）从库 views_json.calendar 继承
+    const readingLogs = repo.getLibraryBySlug('reading_logs');
+    assert.ok(readingLogs);
+    const calView = readingLogs.viewList.find((v) => v.viewType === 'calendar');
+    assert.ok(calView);
+    driver.runSync('UPDATE library_views SET config_json = ? WHERE id = ?', [
+      JSON.stringify({ dateFieldKey: 'read_date' }),
+      calView.id,
+    ]);
+    const reloadedRepo1 = new OmniRepository(driver);
+    const partialLogLib = reloadedRepo1.getLibraryBySlug('reading_logs');
+    assert.ok(partialLogLib);
+    assert.equal(partialLogLib.views.calendar?.metricFieldKey, 'duration_min');
+    assert.deepEqual(
+      partialLogLib.viewList.find((v) => v.id === calView.id)?.config,
+      { dateFieldKey: 'read_date' }
+    );
+
+    const logDraft = buildInitialSchemaDraft(reloadedRepo1.listLibraries(), partialLogLib);
+    logDraft.name = '阅读记录（已改名）';
+    const logPayload = buildSchemaSavePayload(logDraft, partialLogLib);
+    reloadedRepo1.upsertLibrary(logPayload.blueprint, logPayload.viewInputs);
+
+    const savedLogs = reloadedRepo1.getLibraryBySlug('reading_logs');
+    assert.ok(savedLogs);
+    assert.equal(savedLogs.name, '阅读记录（已改名）');
+    assert.equal(
+      savedLogs.views.calendar?.metricFieldKey,
+      'duration_min',
+      'Renaming library must preserve inherited calendar metricFieldKey'
+    );
+
+    // 2. 书架画廊行仅显式配置 titleFieldKey，封面和副标题从库 views_json.gallery 继承
+    const books = reloadedRepo1.getLibraryBySlug('books');
+    assert.ok(books);
+    const galView = books.viewList.find((v) => v.viewType === 'gallery');
+    assert.ok(galView);
+    driver.runSync('UPDATE library_views SET config_json = ? WHERE id = ?', [
+      JSON.stringify({ titleFieldKey: 'book_title' }),
+      galView.id,
+    ]);
+    const reloadedRepo2 = new OmniRepository(driver);
+    const partialBooksLib = reloadedRepo2.getLibraryBySlug('books');
+    assert.ok(partialBooksLib);
+    assert.equal(partialBooksLib.views.gallery?.coverImageFieldKey, 'cover_image');
+    assert.equal(partialBooksLib.views.gallery?.subtitleFieldKey, 'author');
+
+    const booksDraft = buildInitialSchemaDraft(reloadedRepo2.listLibraries(), partialBooksLib);
+    booksDraft.name = '我的书架';
+    const booksPayload = buildSchemaSavePayload(booksDraft, partialBooksLib);
+    reloadedRepo2.upsertLibrary(booksPayload.blueprint, booksPayload.viewInputs);
+
+    const savedBooks = reloadedRepo2.getLibraryBySlug('books');
+    assert.ok(savedBooks);
+    assert.equal(savedBooks.name, '我的书架');
+    assert.equal(savedBooks.views.gallery?.coverImageFieldKey, 'cover_image');
+    assert.equal(savedBooks.views.gallery?.subtitleFieldKey, 'author');
   });
 });
 

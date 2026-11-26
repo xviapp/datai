@@ -466,15 +466,10 @@ export function buildSchemaSavePayload(
               existingLibrary.views.gallery as unknown as Record<string, unknown>
             )
           : {};
-        const fromExistingGalleryView = Boolean(
-          firstGalleryInput.id && existingViewById.has(firstGalleryInput.id)
-        );
-        const mergedGallery = fromExistingGalleryView
-          ? preserveExistingGalleryConfig(firstGalleryInput.config ?? {})
-          : preserveExistingGalleryConfig({
-              ...sanitizedExistingGallery,
-              ...(firstGalleryInput.config ?? {}),
-            });
+        const mergedGallery = preserveExistingGalleryConfig({
+          ...sanitizedExistingGallery,
+          ...(firstGalleryInput.config ?? {}),
+        });
         return {
           ...(mergedGallery as Partial<GalleryViewConfig>),
           titleFieldKey: keepValidKey(mergedGallery.titleFieldKey) ?? validTitleKey,
@@ -489,15 +484,10 @@ export function buildSchemaSavePayload(
               existingLibrary.views.calendar as unknown as Record<string, unknown>
             )
           : {};
-        const fromExistingCalendarView = Boolean(
-          firstCalendarInput.id && existingViewById.has(firstCalendarInput.id)
-        );
-        const mergedCalendar = fromExistingCalendarView
-          ? preserveExistingCalendarConfig(firstCalendarInput.config ?? {})
-          : preserveExistingCalendarConfig({
-              ...sanitizedExistingCalendar,
-              ...(firstCalendarInput.config ?? {}),
-            });
+        const mergedCalendar = preserveExistingCalendarConfig({
+          ...sanitizedExistingCalendar,
+          ...(firstCalendarInput.config ?? {}),
+        });
         return {
           ...(mergedCalendar as Partial<CalendarViewConfig>),
           dateFieldKey: keepValidKey(mergedCalendar.dateFieldKey) ?? firstDateKey ?? '',
