@@ -83,6 +83,7 @@ export class OmniRepository {
     runCoreMigrations(this.driver);
     this.driver.withTransactionSync(() => {
       this.librariesStore.ensureViewsCompiled();
+      this.snapshotsStore.backfillLegacyArchitectSnapshotsInternal();
     });
   }
 

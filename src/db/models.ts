@@ -209,6 +209,8 @@ export type SnapshotPayload =
       previousLibraries: Array<Record<string, unknown>>;
       previousLibraryViews?: Array<Record<string, unknown>>;
       createdWidgetIds: string[];
+      /** 记录方案变更 relation 字段时从旧记录裁剪/剥离的关联 ID 与原顺序，撤销方案时可无损还原 */
+      trimmedSources?: DetachedSourceRecord[];
     }
   | FullBackupBundle;
 

@@ -975,9 +975,9 @@ describe('1. Quick-capture draft stable IDs, shared validation & strict relation
   });
 
   it('cleans historical dangling references when manually deleting an empty library and avoids scanning unrelated libraries on single entry delete', () => {
-    const { repo, queries, clearQueries } = createSeededRepo();
+    const { repo, driver, queries, clearQueries } = createSeededRepo();
 
-    // 1. 删除空库时清理历史失效引用：删笔记 -> 删光书架 -> 只撤销删笔记 -> 手动删空书架 -> 编辑笔记仍可保存
+    // 1. 删除空库时清理历史失效引用：即使旧数据 data_json 中残留已删除书的 ID，手动删空书架也能清理并保持笔记可编辑
     const books = repo.listHydratedEntries('books');
     const logId = repo.createEntry('reading_logs', {
       book: [books[0].id],
@@ -991,7 +991,13 @@ describe('1. Quick-capture draft stable IDs, shared validation & strict relation
     }
     assert.equal(repo.listHydratedEntries('books').length, 0);
     repo.undoSnapshot(delLogSnap);
-    assert.deepEqual(repo.getHydratedEntryById(logId)?.entry.rawData.book, [books[0].id]);
+    // 新版恢复时已自动剥离已删书 ID 以便立刻编辑；再额外模拟旧版本升级遗留的失效 ID 验证手动删空库兜底清理
+    assert.deepEqual(repo.getHydratedEntryById(logId)?.entry.rawData.book, []);
+    const liveData = repo.getHydratedEntryById(logId)!.entry.rawData;
+    driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+      JSON.stringify({ ...liveData, book: [books[0].id] }),
+      logId,
+    ]);
 
     repo.deleteLibrary('books');
     const afterDelEmptyBooks = repo.getHydratedEntryById(logId);
@@ -1936,6 +1942,604 @@ describe('5. Round-6 review fixes: snapshot identity, backup reconciliation, res
     assert.deepEqual(
       afterLogs.map((e) => e.forwardLinks.book?.map((r) => r.id) ?? []),
       originalBookIds
+    );
+  });
+});
+
+describe('6. Round-7 review fixes: legacy snapshot identity, plan trim undo, legacy delete undo & linear merge', () => {
+  it('verifies legacy pre-upgrade architect_plan snapshot identity both on upgrade backfill and at runtime undo', () => {
+    // 场景 A：用 8eaa8a4 格式创建库与快照（无 createdLibraries），升级重启后删原库、建同 slug 新库并录记录，撤销旧快照不误删新库
+    const ctxA = createSeededRepo();
+    const oldPlanSnapA = ctxA.repo.applyArchitectPlan({
+      summary: '旧版创建 legacy_custom_8',
+      libraries: [
+        {
+          slug: 'legacy_custom_8',
+          name: '旧库A',
+          description: '',
+          icon: '📦',
+          color: 'teal',
+          fields: [{ key: 'title', label: '标题', type: 'text', required: true }],
+          views: {
+            card: {
+              titleFieldKey: 'title',
+              footerMetricKeys: [],
+              sortDir: 'desc',
+              highlightRules: [],
+            },
+          },
+        },
+      ],
+      dashboardWidgets: [],
+    });
+    const oldSnapRowA = ctxA.driver.getFirstSync<{ snapshot_json: string }>(
+      'SELECT snapshot_json FROM ai_snapshots WHERE id = ?',
+      [oldPlanSnapA]
+    );
+    assert.ok(oldSnapRowA);
+    const parsedOldA = JSON.parse(oldSnapRowA.snapshot_json) as Record<string, unknown>;
+    delete parsedOldA.createdLibraries;
+    ctxA.driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
+      JSON.stringify(parsedOldA),
+      oldPlanSnapA,
+    ]);
+
+    // 模拟升级：使用同一 SQLite driver 重新初始化 OmniRepository
+    const upgradedRepoA = new OmniRepository(ctxA.driver);
+    upgradedRepoA.deleteLibrary('legacy_custom_8');
+    const newLibIdA = upgradedRepoA.upsertLibrary({
+      slug: 'legacy_custom_8',
+      name: '新库A',
+      description: '',
+      icon: '✨',
+      color: 'blue',
+      fields: [{ key: 'title', label: '标题', type: 'text', required: true }],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    const keptEntryA = upgradedRepoA.createEntry('legacy_custom_8', { title: '升级后新记录A' });
+
+    assert.equal(upgradedRepoA.describeSnapshotUndoImpact(oldPlanSnapA).affectedEntriesCount, 0);
+    upgradedRepoA.undoSnapshot(oldPlanSnapA);
+    assert.equal(upgradedRepoA.getLibraryBySlug('legacy_custom_8')?.id, newLibIdA);
+    assert.equal(
+      upgradedRepoA.getHydratedEntryById(keptEntryA)?.entry.rawData.title,
+      '升级后新记录A'
+    );
+
+    // 场景 B：即使在运行期直接遇到无 createdLibraries 的旧快照（未经过升级回填，且原库已被删并重建），撤销时仍应核实身份不误删新库
+    const ctxB = createSeededRepo();
+    const oldPlanSnapB = ctxB.repo.applyArchitectPlan({
+      summary: '旧版创建 legacy_custom_9',
+      libraries: [
+        {
+          slug: 'legacy_custom_9',
+          name: '旧库B',
+          description: '',
+          icon: '📦',
+          color: 'teal',
+          fields: [{ key: 'title', label: '标题', type: 'text', required: true }],
+          views: {
+            card: {
+              titleFieldKey: 'title',
+              footerMetricKeys: [],
+              sortDir: 'desc',
+              highlightRules: [],
+            },
+          },
+        },
+      ],
+      dashboardWidgets: [],
+    });
+    ctxB.repo.deleteLibrary('legacy_custom_9');
+    const newLibIdB = ctxB.repo.upsertLibrary({
+      slug: 'legacy_custom_9',
+      name: '新库B',
+      description: '',
+      icon: '✨',
+      color: 'blue',
+      fields: [{ key: 'title', label: '标题', type: 'text', required: true }],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    const keptEntryB = ctxB.repo.createEntry('legacy_custom_9', { title: '新记录B' });
+
+    // 删除 createdLibraries 模拟未回填的旧快照
+    const oldSnapRowB = ctxB.driver.getFirstSync<{ snapshot_json: string }>(
+      'SELECT snapshot_json FROM ai_snapshots WHERE id = ?',
+      [oldPlanSnapB]
+    );
+    const parsedOldB = JSON.parse(oldSnapRowB!.snapshot_json) as Record<string, unknown>;
+    delete parsedOldB.createdLibraries;
+    ctxB.driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
+      JSON.stringify(parsedOldB),
+      oldPlanSnapB,
+    ]);
+
+    assert.equal(ctxB.repo.describeSnapshotUndoImpact(oldPlanSnapB).affectedEntriesCount, 0);
+    ctxB.repo.undoSnapshot(oldPlanSnapB);
+    assert.equal(ctxB.repo.getLibraryBySlug('legacy_custom_9')?.id, newLibIdB);
+    assert.equal(ctxB.repo.getHydratedEntryById(keptEntryB)?.entry.rawData.title, '新记录B');
+  });
+
+  it('restores trimmed multi-select relation items and order when undoing an Architect plan that narrowed to single-select', () => {
+    const { repo } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    assert.ok(books.length >= 2);
+    const [bookA, bookB] = books;
+
+    repo.upsertLibrary({
+      slug: 'booklists_r7',
+      name: '书单',
+      description: '',
+      icon: '📚',
+      color: 'teal',
+      fields: [
+        { key: 'title', label: '书单名', type: 'text', required: true },
+        {
+          key: 'books_ref',
+          label: '收录书籍',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+
+    const listId = repo.createEntry('booklists_r7', {
+      title: '年度书单',
+      books_ref: [bookA.id, bookB.id],
+    });
+
+    const listLib = repo.getLibraryBySlug('booklists_r7')!;
+    const narrowSnapId = repo.applyArchitectPlan({
+      summary: '将书单书籍改为单选',
+      libraries: [
+        {
+          slug: listLib.slug,
+          name: listLib.name,
+          description: listLib.description,
+          icon: listLib.icon,
+          color: listLib.color,
+          fields: listLib.fields.map((f) =>
+            f.key === 'books_ref'
+              ? { ...f, relationConfig: { targetLibrarySlug: 'books', allowMultiple: false } }
+              : f
+          ),
+          views: listLib.views,
+        },
+      ],
+      dashboardWidgets: [],
+    });
+
+    // 改为单选后应只剩 bookA 且可编辑标题
+    const afterNarrow = repo.getHydratedEntryById(listId)!;
+    assert.deepEqual(afterNarrow.entry.rawData.books_ref, [bookA.id]);
+    repo.updateEntry(listId, { ...afterNarrow.entry.rawData, title: '年度书单（已编辑）' });
+
+    // 立即撤销方案：不仅字段恢复多选，第二本书与反向关联也必须完整找回，且不覆盖期间修改的标题
+    repo.undoSnapshot(narrowSnapId);
+    const restoredList = repo.getHydratedEntryById(listId)!;
+    assert.equal(restoredList.entry.rawData.title, '年度书单（已编辑）');
+    assert.deepEqual(restoredList.entry.rawData.books_ref, [bookA.id, bookB.id]);
+    assert.deepEqual(
+      restoredList.entry.forwardLinks.books_ref?.map((r) => r.id),
+      [bookA.id, bookB.id]
+    );
+    assert.ok(
+      repo.getHydratedEntryById(bookB.id)?.entry.backlinks.some((r) => r.id === listId),
+      'Book B backlinks must be restored after undoing single-select conversion'
+    );
+  });
+
+  it('recovers valid relations stored only in payload.relations when undoing a legacy 9080eb3 entry_deleted snapshot', () => {
+    const { repo, driver } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    const book = books[0];
+    const logId = repo.createEntry('reading_logs', {
+      book: [book.id],
+      read_date: '2026-11-26',
+      note: '旧版删记录快照测试',
+    });
+    const delSnapId = repo.deleteEntry(logId);
+    assert.ok(delSnapId);
+
+    // 模拟 9080eb3 生成的删记录快照：payload.entry.data_json.book 为 []，有效关联仅存在于 payload.relations 中
+    const snapRow = driver.getFirstSync<{ snapshot_json: string }>(
+      'SELECT snapshot_json FROM ai_snapshots WHERE id = ?',
+      [delSnapId]
+    );
+    assert.ok(snapRow);
+    const payload = JSON.parse(snapRow.snapshot_json) as {
+      entry: { data_json: string };
+      relations: Array<Record<string, unknown>>;
+    };
+    const entryData = JSON.parse(payload.entry.data_json) as Record<string, unknown>;
+    entryData.book = [];
+    payload.entry.data_json = JSON.stringify(entryData);
+    assert.ok(payload.relations.length > 0);
+    driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
+      JSON.stringify(payload),
+      delSnapId,
+    ]);
+
+    repo.undoSnapshot(delSnapId);
+    const restoredLog = repo.getHydratedEntryById(logId);
+    const restoredBook = repo.getHydratedEntryById(book.id);
+    assert.ok(restoredLog && restoredBook);
+    assert.deepEqual(restoredLog.entry.rawData.book, [book.id]);
+    assert.deepEqual(
+      restoredLog.entry.forwardLinks.book?.map((r) => r.id),
+      [book.id]
+    );
+    assert.ok(restoredBook.entry.backlinks.some((r) => r.id === logId));
+  });
+
+  it('keeps optional relations editable after cross-library single-select conversion and partial delete/restore, while restoring links when target returns', () => {
+    const { repo } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    assert.ok(books.length >= 2);
+    const [bookA, bookB] = books;
+
+    // 场景 A：多选书籍改为单选资产（无有效资产时必须清空旧书 ID，不得残留第一本书阻断保存）
+    repo.upsertLibrary({
+      slug: 'convert_target_notes',
+      name: '转换测试笔记',
+      description: '',
+      icon: '📝',
+      color: 'teal',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'ref_items',
+          label: '关联项',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    const convNoteId = repo.createEntry('convert_target_notes', {
+      title: '原双书笔记',
+      ref_items: [bookA.id, bookB.id],
+    });
+    const convLib = repo.getLibraryBySlug('convert_target_notes')!;
+    const convSnap = repo.applyArchitectPlan({
+      summary: '多选书籍改单选资产',
+      libraries: [
+        {
+          slug: convLib.slug,
+          name: convLib.name,
+          description: convLib.description,
+          icon: convLib.icon,
+          color: convLib.color,
+          fields: convLib.fields.map((f) =>
+            f.key === 'ref_items'
+              ? {
+                  ...f,
+                  relationConfig: { targetLibrarySlug: 'my_assets', allowMultiple: false },
+                }
+              : f
+          ),
+          views: convLib.views,
+        },
+      ],
+      dashboardWidgets: [],
+    });
+    const afterConv = repo.getHydratedEntryById(convNoteId)!;
+    assert.deepEqual(afterConv.entry.rawData.ref_items, []);
+    repo.updateEntry(convNoteId, { ...afterConv.entry.rawData, title: '改标题成功' });
+    assert.equal(repo.getHydratedEntryById(convNoteId)?.entry.rawData.title, '改标题成功');
+
+    // 撤销方案时，原双书关联无损还原，且保留新标题
+    repo.undoSnapshot(convSnap);
+    const afterUndoConv = repo.getHydratedEntryById(convNoteId)!;
+    assert.equal(afterUndoConv.entry.rawData.title, '改标题成功');
+    assert.deepEqual(afterUndoConv.entry.rawData.ref_items, [bookA.id, bookB.id]);
+
+    // 场景 B：先删笔记、再删书架，只恢复笔记 -> 笔记立即可编辑改标题 -> 再恢复书架 -> 关联自动无损恢复且保留新标题
+    const logId = repo.createEntry('reading_logs', {
+      book: [bookA.id],
+      read_date: '2026-11-26',
+      note: '原书摘标题',
+    });
+    const delLogSnap = repo.deleteEntry(logId);
+    assert.ok(delLogSnap);
+    repo.deleteLibrary('books');
+    const delBooksSnap = repo.listSnapshots().find((s) => s.actionSummary.includes('阅读书架'));
+    assert.ok(delBooksSnap);
+
+    // 只恢复笔记：已删书 ID 移入书架快照等待恢复，当前笔记 data_json.book 清空且立即可改标题保存
+    repo.undoSnapshot(delLogSnap);
+    const logAfterPartialRestore = repo.getHydratedEntryById(logId)!;
+    assert.deepEqual(logAfterPartialRestore.entry.rawData.book, []);
+    repo.updateEntry(logId, {
+      ...logAfterPartialRestore.entry.rawData,
+      note: '仅恢复笔记后修改的标题',
+    });
+    assert.equal(
+      repo.getHydratedEntryById(logId)?.entry.rawData.note,
+      '仅恢复笔记后修改的标题'
+    );
+
+    // 随后恢复书架：笔记自动恢复关联到 bookA，并保留期间编辑的新标题
+    repo.undoSnapshot(delBooksSnap.id);
+    const logAfterBothRestored = repo.getHydratedEntryById(logId)!;
+    assert.equal(logAfterBothRestored.entry.rawData.note, '仅恢复笔记后修改的标题');
+    assert.deepEqual(logAfterBothRestored.entry.rawData.book, [bookA.id]);
+    assert.deepEqual(
+      logAfterBothRestored.entry.forwardLinks.book?.map((r) => r.id),
+      [bookA.id]
+    );
+  });
+
+  it('reindexes surviving references for untargeted relation fields (without targetLibrarySlug) when restoring targets', () => {
+    const { repo, driver } = createSeededRepo();
+    const book = repo.listHydratedEntries('books')[0];
+
+    repo.upsertLibrary({
+      slug: 'any_ref_notes',
+      name: '自由关联笔记',
+      description: '',
+      icon: '🔗',
+      color: 'blue',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'any_target',
+          label: '任意关联',
+          type: 'relation',
+          required: false,
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+
+    const noteId = repo.createEntry('any_ref_notes', {
+      title: '自由引用书',
+      any_target: [book.id],
+    });
+    assert.deepEqual(
+      repo.getHydratedEntryById(noteId)?.entry.forwardLinks.any_target?.map((r) => r.id),
+      [book.id]
+    );
+
+    // 路径 1：先删来源、再删目标，同序恢复两者
+    const delNoteSnap = repo.deleteEntry(noteId)!;
+    const delBookSnap = repo.deleteEntry(book.id)!;
+    repo.undoSnapshot(delNoteSnap);
+    repo.undoSnapshot(delBookSnap);
+
+    const restored1 = repo.getHydratedEntryById(noteId)!;
+    assert.deepEqual(restored1.entry.rawData.any_target, [book.id]);
+    assert.deepEqual(
+      restored1.entry.forwardLinks.any_target?.map((r) => r.id),
+      [book.id]
+    );
+    assert.ok(repo.getHydratedEntryById(book.id)?.entry.backlinks.some((r) => r.id === noteId));
+
+    // 路径 2：验证无 detachedSources 时，reindexSurvivingReferencesToEntriesInternal 同样能为未指定目标库的字段补建索引
+    const delBookSnap2 = repo.deleteEntry(book.id)!;
+    // 模拟历史快照无 detachedSources 但存活记录 data_json 保留目标 ID
+    const snap2Row = driver.getFirstSync<{ snapshot_json: string }>(
+      'SELECT snapshot_json FROM ai_snapshots WHERE id = ?',
+      [delBookSnap2]
+    )!;
+    const snap2Payload = JSON.parse(snap2Row.snapshot_json) as Record<string, unknown>;
+    snap2Payload.detachedSources = [];
+    snap2Payload.relations = [];
+    driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
+      JSON.stringify(snap2Payload),
+      delBookSnap2,
+    ]);
+    driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
+      JSON.stringify({ title: '自由引用书', any_target: [book.id] }),
+      noteId,
+    ]);
+
+    repo.undoSnapshot(delBookSnap2);
+    assert.deepEqual(
+      repo.getHydratedEntryById(noteId)?.entry.forwardLinks.any_target?.map((r) => r.id),
+      [book.id]
+    );
+  });
+
+  it('uses entry_relations.sort_order when merging missing multi-select items during legacy backup import', () => {
+    const { repo } = createSeededRepo();
+    const bookA = repo.createEntry('books', { book_title: '导入序A', status: '想读' });
+    const bookB = repo.createEntry('books', { book_title: '导入序B', status: '想读' });
+    const bookC = repo.createEntry('books', { book_title: '导入序C', status: '想读' });
+
+    repo.upsertLibrary({
+      slug: 'import_order_notes',
+      name: '导入顺序测试',
+      description: '',
+      icon: '📑',
+      color: 'amber',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'books_ref',
+          label: '书目',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+
+    const noteOnlyFirstId = repo.createEntry('import_order_notes', {
+      title: 'B为关联表唯一首位项',
+      books_ref: [bookB, bookC, bookA],
+    });
+    const noteFullRelsId = repo.createEntry('import_order_notes', {
+      title: '完整关联表缺首位B',
+      books_ref: [bookB, bookC, bookA],
+    });
+
+    const bundle = repo.exportBackupBundle();
+    // 构造真实旧备份：字段里只剩 [C, A]，而关联表里 B 排在 sort_order = 0
+    bundle.entries = bundle.entries.map((e) => {
+      if (String(e.id) === noteOnlyFirstId || String(e.id) === noteFullRelsId) {
+        const parsed = JSON.parse(String(e.data_json)) as Record<string, unknown>;
+        parsed.books_ref = [bookC, bookA];
+        return { ...e, data_json: JSON.stringify(parsed) };
+      }
+      return e;
+    });
+    bundle.relations = bundle.relations.filter((r) => {
+      if (String(r.source_entry_id) === noteOnlyFirstId) {
+        // 仅保留 B (sort_order = 0)
+        return String(r.target_entry_id) === bookB;
+      }
+      return true;
+    });
+
+    const freshCtx = createInstrumentedSqliteDriver();
+    const freshRepo = new OmniRepository(freshCtx.driver);
+    freshRepo.importBackupBundle(bundle);
+
+    const hydratedOnlyFirst = freshRepo.getHydratedEntryById(noteOnlyFirstId)!;
+    assert.deepEqual(hydratedOnlyFirst.entry.rawData.books_ref, [bookB, bookC, bookA]);
+    assert.deepEqual(
+      hydratedOnlyFirst.entry.forwardLinks.books_ref?.map((r) => r.id),
+      [bookB, bookC, bookA]
+    );
+
+    const hydratedFull = freshRepo.getHydratedEntryById(noteFullRelsId)!;
+    assert.deepEqual(hydratedFull.entry.rawData.books_ref, [bookB, bookC, bookA]);
+    assert.deepEqual(
+      hydratedFull.entry.forwardLinks.books_ref?.map((r) => r.id),
+      [bookB, bookC, bookA]
+    );
+  });
+
+  it('restores 1,600 ordered multi-select relations on library delete undo in linear time without blocking', () => {
+    const { repo, driver } = createSeededRepo();
+    repo.upsertLibrary({
+      slug: 'bulk_books_r7',
+      name: '千书库',
+      description: '',
+      icon: '📚',
+      color: 'teal',
+      fields: [{ key: 'title', label: '书名', type: 'text', required: true }],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    repo.upsertLibrary({
+      slug: 'bulk_shelf_r7',
+      name: '大书单',
+      description: '',
+      icon: '🗂️',
+      color: 'blue',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'books_ref',
+          label: '关联书目',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'bulk_books_r7', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+
+    const bulkLib = repo.getLibraryBySlug('bulk_books_r7')!;
+    const count = 1600;
+    const bookIds: string[] = [];
+    const now = Date.now();
+    driver.withTransactionSync(() => {
+      for (let i = 0; i < count; i++) {
+        const id = `ent_bulk_${String(i).padStart(4, '0')}`;
+        bookIds.push(id);
+        driver.runSync(
+          `INSERT INTO entries (id, library_id, title_summary, search_text, data_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [id, bulkLib.id, `书${i}`, `书${i}`, JSON.stringify({ title: `书${i}` }), now + i, now + i]
+        );
+      }
+    });
+
+    const shelfId = repo.createEntry('bulk_shelf_r7', {
+      title: '1600本书单',
+      books_ref: bookIds,
+    });
+
+    repo.deleteLibrary('bulk_books_r7');
+    const delSnap = repo.listSnapshots().find((s) => s.actionSummary.includes('千书库'));
+    assert.ok(delSnap);
+    assert.deepEqual(repo.getHydratedEntryById(shelfId)?.entry.rawData.books_ref, []);
+
+    const startMs = performance.now();
+    repo.undoSnapshot(delSnap.id);
+    const elapsedMs = performance.now() - startMs;
+
+    const restoredShelf = repo.getHydratedEntryById(shelfId)!;
+    assert.deepEqual(restoredShelf.entry.rawData.books_ref, bookIds);
+    assert.deepEqual(
+      restoredShelf.entry.forwardLinks.books_ref?.map((r) => r.id),
+      bookIds
+    );
+    assert.ok(
+      elapsedMs < 1000,
+      `Restoring 1,600 ordered relations should complete well under 1s, took ${elapsedMs.toFixed(1)}ms`
     );
   });
 });

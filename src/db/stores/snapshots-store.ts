@@ -18,7 +18,11 @@ import type {
 import { sqlReferencesLibraryView, type SyncSqlDriver } from '../types';
 import { compileLibrarySqlView, dropLibrarySqlView } from '../view-compiler';
 import { importBackupBundleInternal } from './backup';
-import { getRelationFieldsSignature, type EntriesStore } from './entries-store';
+import {
+  getRelationFieldsSignature,
+  type DeferredMissingSource,
+  type EntriesStore,
+} from './entries-store';
 import type { LibrariesStore } from './libraries-store';
 import type { WidgetsStore } from './widgets-store';
 
@@ -32,77 +36,109 @@ function isCompatibleFieldTypeChange(fromType: FieldType, toType: FieldType): bo
 }
 
 /**
- * 合并撤销恢复的多选关联 ID：严格保持用户现有选择（existingTokens）的相对顺序不变，
- * 并依据删除前顺序（prevOrder）将待恢复 ID 插回其前驱/后继锚点之间。
+ * 线性时间 O(N + M) 合并撤销恢复的多选关联 ID：
+ * - existingTokens 为空时直接按 prevOrder 顺序输出，避免大批量恢复阻塞主线程；
+ * - existingTokens 非空时严格保持用户现有选择的相对顺序不变，
+ *   通过前缀最大位置/最近前驱与后缀最小位置数组将待恢复 ID 一次性分桶插回对应锚点。
  */
 function mergeRestoredRelationOrder(
   existingTokens: readonly string[],
   validToRestore: readonly string[],
   prevOrder: readonly string[]
 ): string[] {
-  const result = Array.from(new Set(existingTokens));
-  const prevIndexById = new Map<string, number>();
-  prevOrder.forEach((id, idx) => {
-    if (!prevIndexById.has(id)) {
-      prevIndexById.set(id, idx);
-    }
-  });
+  const existing = Array.from(new Set(existingTokens));
+  const uniqueRestore = Array.from(new Set(validToRestore));
+  if (uniqueRestore.length === 0) return existing;
 
-  const toInsert = Array.from(new Set(validToRestore))
-    .filter((id) => !result.includes(id))
-    .sort((a, b) => {
-      const ia = prevIndexById.get(a);
-      const ib = prevIndexById.get(b);
-      if (ia === undefined && ib === undefined) return 0;
-      if (ia === undefined) return 1;
-      if (ib === undefined) return -1;
-      return ia - ib;
-    });
-
-  for (const id of toInsert) {
-    const prevIdx = prevIndexById.get(id);
-    if (prevIdx === undefined) {
-      result.push(id);
-      continue;
-    }
-
-    const predPositions: number[] = [];
-    for (let j = 0; j < prevIdx; j++) {
-      const pos = result.indexOf(prevOrder[j]);
-      if (pos !== -1) predPositions.push(pos);
-    }
-
-    const succPositions: number[] = [];
-    for (let j = prevIdx + 1; j < prevOrder.length; j++) {
-      const pos = result.indexOf(prevOrder[j]);
-      if (pos !== -1) succPositions.push(pos);
-    }
-
-    let insertAt = result.length;
-    if (predPositions.length > 0 && succPositions.length === 0) {
-      insertAt = Math.max(...predPositions) + 1;
-    } else if (predPositions.length === 0 && succPositions.length > 0) {
-      insertAt = Math.min(...succPositions);
-    } else if (predPositions.length > 0 && succPositions.length > 0) {
-      const maxPred = Math.max(...predPositions);
-      const minSucc = Math.min(...succPositions);
-      if (maxPred < minSucc) {
-        insertAt = maxPred + 1;
-      } else {
-        for (let j = prevIdx - 1; j >= 0; j--) {
-          const pos = result.indexOf(prevOrder[j]);
-          if (pos !== -1) {
-            insertAt = pos + 1;
-            break;
-          }
-        }
+  const uniquePrev = Array.from(new Set(prevOrder));
+  if (existing.length === 0) {
+    const restoreSet = new Set(uniqueRestore);
+    const out: string[] = [];
+    const seen = new Set<string>();
+    for (const id of uniquePrev) {
+      if (restoreSet.has(id) && !seen.has(id)) {
+        seen.add(id);
+        out.push(id);
       }
     }
-
-    result.splice(insertAt, 0, id);
+    for (const id of uniqueRestore) {
+      if (!seen.has(id)) {
+        seen.add(id);
+        out.push(id);
+      }
+    }
+    return out;
   }
 
-  return result;
+  const existingPos = new Map<string, number>();
+  existing.forEach((id, idx) => existingPos.set(id, idx));
+
+  const toInsertSet = new Set<string>();
+  for (const id of uniqueRestore) {
+    if (!existingPos.has(id)) {
+      toInsertSet.add(id);
+    }
+  }
+  if (toInsertSet.size === 0) return existing;
+
+  const len = uniquePrev.length;
+  const prefixMaxPos = new Array<number>(len).fill(-1);
+  const nearestPredPos = new Array<number>(len).fill(-1);
+  let runningMax = -1;
+  let lastPred = -1;
+  for (let i = 0; i < len; i++) {
+    prefixMaxPos[i] = runningMax;
+    nearestPredPos[i] = lastPred;
+    const pos = existingPos.get(uniquePrev[i]);
+    if (pos !== undefined) {
+      if (pos > runningMax) runningMax = pos;
+      lastPred = pos;
+    }
+  }
+
+  const suffixMinPos = new Array<number>(len).fill(Infinity);
+  let runningMin = Infinity;
+  for (let i = len - 1; i >= 0; i--) {
+    suffixMinPos[i] = runningMin;
+    const pos = existingPos.get(uniquePrev[i]);
+    if (pos !== undefined && pos < runningMin) {
+      runningMin = pos;
+    }
+  }
+
+  const buckets: string[][] = Array.from({ length: existing.length + 1 }, () => []);
+  const placed = new Set<string>();
+  for (let i = 0; i < len; i++) {
+    const id = uniquePrev[i];
+    if (!toInsertSet.has(id)) continue;
+    placed.add(id);
+
+    const hasPred = prefixMaxPos[i] !== -1;
+    const hasSucc = suffixMinPos[i] !== Infinity;
+    let bucket = existing.length;
+    if (hasPred && !hasSucc) {
+      bucket = prefixMaxPos[i] + 1;
+    } else if (!hasPred && hasSucc) {
+      bucket = suffixMinPos[i];
+    } else if (hasPred && hasSucc) {
+      bucket = prefixMaxPos[i] < suffixMinPos[i] ? prefixMaxPos[i] + 1 : nearestPredPos[i] + 1;
+    }
+    buckets[bucket].push(id);
+  }
+
+  for (const id of uniqueRestore) {
+    if (toInsertSet.has(id) && !placed.has(id)) {
+      buckets[existing.length].push(id);
+    }
+  }
+
+  const out: string[] = [];
+  for (let slot = 0; slot < existing.length; slot++) {
+    for (const id of buckets[slot]) out.push(id);
+    out.push(existing[slot]);
+  }
+  for (const id of buckets[existing.length]) out.push(id);
+  return out;
 }
 
 export class SnapshotsStore {
@@ -242,6 +278,7 @@ export class SnapshotsStore {
     const createdLibraries: Array<{ id: string; slug: string }> = [];
     const previousLibraries: Array<Record<string, unknown>> = [];
     const previousLibraryViews: Array<Record<string, unknown>> = [];
+    const trimmedSources: DetachedSourceRecord[] = [];
     let snapshotId = '';
 
     // 先提交表结构与视图变更（批量末尾统一同步一次 library_relations），再校验并保存看板图表
@@ -288,6 +325,11 @@ export class SnapshotsStore {
         }
       }
 
+      this.libraries.syncAllLibraryRelations();
+      for (const libId of updatedRelLibIds) {
+        trimmedSources.push(...this.entries.syncLibraryEntryRelationsInternal(libId));
+      }
+
       snapshotId = this.saveSnapshotInternal(plan.summary || '更新记录本与样式', {
         kind: 'architect_plan',
         createdLibrarySlugs,
@@ -295,12 +337,8 @@ export class SnapshotsStore {
         previousLibraries,
         previousLibraryViews,
         createdWidgetIds: [],
+        ...(trimmedSources.length > 0 ? { trimmedSources } : {}),
       });
-
-      this.libraries.syncAllLibraryRelations();
-      for (const libId of updatedRelLibIds) {
-        this.entries.syncLibraryEntryRelationsInternal(libId);
-      }
     });
 
     const createdWidgetIds: string[] = [];
@@ -325,6 +363,7 @@ export class SnapshotsStore {
           previousLibraries,
           previousLibraryViews,
           createdWidgetIds,
+          ...(trimmedSources.length > 0 ? { trimmedSources } : {}),
         } satisfies SnapshotPayload),
         snapshotId,
       ]);
@@ -334,12 +373,200 @@ export class SnapshotsStore {
   }
 
   /**
+   * 升级启动时为历史 architect_plan 快照回填 createdLibraries 精确 ID：
+   * 在用户删库重建同 slug 新库之前即固化原库 ID；若原库已被删除但存在 library_deleted 快照，则固化原被删库 ID。
+   */
+  backfillLegacyArchitectSnapshotsInternal(): void {
+    const legacyRows = this.driver.getAllSync<{
+      id: string;
+      snapshot_json: string;
+      created_at: number;
+    }>(
+      `SELECT id, snapshot_json, created_at
+       FROM ai_snapshots
+       WHERE undone = 0 AND snapshot_json LIKE '%"architect_plan"%'`
+    );
+    if (legacyRows.length === 0) return;
+
+    for (const row of legacyRows) {
+      let payload: SnapshotPayload | null = null;
+      try {
+        payload = JSON.parse(row.snapshot_json) as SnapshotPayload;
+      } catch {
+        payload = null;
+      }
+      if (!payload || !('kind' in payload) || payload.kind !== 'architect_plan') continue;
+      if (Array.isArray(payload.createdLibraries)) continue;
+
+      const resolved = this.resolveLegacyCreatedLibraries(
+        payload.createdLibrarySlugs,
+        row.id,
+        row.created_at,
+        { includeDeletedHistory: true }
+      );
+      const nextPayload: SnapshotPayload = {
+        ...payload,
+        createdLibraries: resolved,
+      };
+      this.driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
+        JSON.stringify(nextPayload),
+        row.id,
+      ]);
+    }
+  }
+
+  /**
+   * 针对不含 createdLibraries 的历史 architect_plan 快照，核验每个 slug 对应的当前库是否确为当年创建的原库：
+   * 1) 若存在晚于该方案的 library_deleted 快照删除了同 slug 的另一个库（id 不同且创建时间早于等于当前库），说明当前库是后来新建的，拒绝匹配；
+   * 2) 若存在更新的 architect_plan 快照认领了当前库，拒绝匹配；
+   * 3) 校验当前库 created_at 处于该快照创建的同一事务时间窗内，超出则拒绝匹配。
+   */
+  private resolveLegacyCreatedLibraries(
+    createdLibrarySlugs: readonly string[],
+    snapshotId: string,
+    snapshotCreatedAt: number,
+    options?: { includeDeletedHistory?: boolean }
+  ): Array<{ id: string; slug: string }> {
+    const matched: Array<{ id: string; slug: string }> = [];
+    const seenIds = new Set<string>();
+    if (createdLibrarySlugs.length === 0) return matched;
+
+    const deletedLibRecords: Array<{
+      snapCreatedAt: number;
+      libId: string;
+      libSlug: string;
+      libCreatedAt: number;
+    }> = [];
+    const delSnapRows = this.driver.getAllSync<{ snapshot_json: string; created_at: number }>(
+      `SELECT snapshot_json, created_at FROM ai_snapshots WHERE snapshot_json LIKE '%"library_deleted"%'`
+    );
+    for (const dr of delSnapRows) {
+      try {
+        const dp = JSON.parse(dr.snapshot_json) as SnapshotPayload;
+        if ('kind' in dp && dp.kind === 'library_deleted' && dp.library) {
+          deletedLibRecords.push({
+            snapCreatedAt: dr.created_at,
+            libId: String(dp.library.id ?? ''),
+            libSlug: String(dp.library.slug ?? ''),
+            libCreatedAt: Number(dp.library.created_at ?? 0),
+          });
+        }
+      } catch {
+        // ignore malformed snapshot
+      }
+    }
+
+    const otherPlanRows = this.driver.getAllSync<{
+      id: string;
+      snapshot_json: string;
+      created_at: number;
+    }>(
+      `SELECT id, snapshot_json, created_at
+       FROM ai_snapshots
+       WHERE id != ? AND snapshot_json LIKE '%"architect_plan"%'`,
+      [snapshotId]
+    );
+    const otherPlans: Array<{
+      id: string;
+      createdAt: number;
+      createdLibrarySlugs: string[];
+      createdLibraries?: Array<{ id: string; slug: string }>;
+    }> = [];
+    for (const opr of otherPlanRows) {
+      try {
+        const op = JSON.parse(opr.snapshot_json) as SnapshotPayload;
+        if ('kind' in op && op.kind === 'architect_plan') {
+          otherPlans.push({
+            id: opr.id,
+            createdAt: opr.created_at,
+            createdLibrarySlugs: op.createdLibrarySlugs ?? [],
+            createdLibraries: op.createdLibraries,
+          });
+        }
+      } catch {
+        // ignore malformed snapshot
+      }
+    }
+
+    for (const slug of createdLibrarySlugs) {
+      const curRow = this.driver.getFirstSync<{ id: string; slug: string; created_at: number }>(
+        'SELECT id, slug, created_at FROM libraries WHERE slug = ?',
+        [slug]
+      );
+
+      let isOriginalLiveLib = Boolean(curRow);
+      if (curRow) {
+        const replacedAfterPlan = deletedLibRecords.some(
+          (d) =>
+            d.libSlug === slug &&
+            d.libId &&
+            d.libId !== curRow.id &&
+            d.snapCreatedAt >= snapshotCreatedAt - 1000 &&
+            d.libCreatedAt <= curRow.created_at
+        );
+        if (replacedAfterPlan) {
+          isOriginalLiveLib = false;
+        }
+
+        if (isOriginalLiveLib) {
+          const claimedByNewerPlan = otherPlans.some((op) => {
+            if (op.createdLibraries?.some((item) => item.id === curRow.id)) {
+              return true;
+            }
+            const isNewer =
+              op.createdAt > snapshotCreatedAt ||
+              (op.createdAt === snapshotCreatedAt && op.id > snapshotId);
+            return (
+              isNewer &&
+              op.createdLibrarySlugs.includes(slug) &&
+              Math.abs(curRow.created_at - op.createdAt) <= 5000
+            );
+          });
+          if (claimedByNewerPlan) {
+            isOriginalLiveLib = false;
+          }
+        }
+
+        if (isOriginalLiveLib) {
+          if (
+            curRow.created_at < snapshotCreatedAt - 2000 ||
+            curRow.created_at > snapshotCreatedAt + 5000
+          ) {
+            isOriginalLiveLib = false;
+          }
+        }
+      }
+
+      if (curRow && isOriginalLiveLib && !seenIds.has(curRow.id)) {
+        seenIds.add(curRow.id);
+        matched.push({ id: curRow.id, slug: curRow.slug });
+      } else if (options?.includeDeletedHistory) {
+        const deletedOriginal = deletedLibRecords.find(
+          (d) =>
+            d.libSlug === slug &&
+            d.libId &&
+            d.libCreatedAt >= snapshotCreatedAt - 2000 &&
+            d.libCreatedAt <= snapshotCreatedAt + 5000
+        );
+        if (deletedOriginal && !seenIds.has(deletedOriginal.libId)) {
+          seenIds.add(deletedOriginal.libId);
+          matched.push({ id: deletedOriginal.libId, slug });
+        }
+      }
+    }
+
+    return matched;
+  }
+
+  /**
    * 核对 architect_plan 快照中待删除的新建库身份：
    * - 新快照严格按创建时的 library.id 匹配，避免误删后来复用同 slug 新建的记录本；
-   * - 兼容未保存 createdLibraries 的历史快照，按 slug 回退匹配。
+   * - 历史快照回退前先通过 library_deleted、其他方案归属与创建时间戳核实原库身份。
    */
   private resolveArchitectCreatedLibrariesToDelete(
-    payload: Extract<SnapshotPayload, { kind: 'architect_plan' }>
+    payload: Extract<SnapshotPayload, { kind: 'architect_plan' }>,
+    snapshotId: string,
+    snapshotCreatedAt: number
   ): Array<{ id: string; slug: string }> {
     const matched: Array<{ id: string; slug: string }> = [];
     const seenIds = new Set<string>();
@@ -359,17 +586,11 @@ export class SnapshotsStore {
       return matched;
     }
 
-    for (const slug of payload.createdLibrarySlugs) {
-      const row = this.driver.getFirstSync<{ id: string; slug: string }>(
-        'SELECT id, slug FROM libraries WHERE slug = ?',
-        [slug]
-      );
-      if (row && !seenIds.has(row.id)) {
-        seenIds.add(row.id);
-        matched.push(row);
-      }
-    }
-    return matched;
+    return this.resolveLegacyCreatedLibraries(
+      payload.createdLibrarySlugs,
+      snapshotId,
+      snapshotCreatedAt
+    );
   }
 
   describeSnapshotUndoImpact(snapshotId: string): SnapshotUndoImpact {
@@ -425,7 +646,11 @@ export class SnapshotsStore {
       }
 
       if (payload.kind === 'architect_plan') {
-        const targetLibs = this.resolveArchitectCreatedLibrariesToDelete(payload);
+        const targetLibs = this.resolveArchitectCreatedLibrariesToDelete(
+          payload,
+          snapshotId,
+          row.created_at
+        );
         let newLibEntryCount = 0;
         for (const target of targetLibs) {
           const lib = this.libraries.getLibraryById(target.id);
@@ -673,11 +898,112 @@ export class SnapshotsStore {
     }
   }
 
-  undoSnapshotInternal(snapshotId: string): void {
-    const row = this.driver.getFirstSync<{ snapshot_json: string; undone: number }>(
-      'SELECT snapshot_json, undone FROM ai_snapshots WHERE id = ?',
-      [snapshotId]
+  /**
+   * 将恢复来源条目时因目标仍处于已删除状态而被暂时剥离的关联引用，
+   * 挂接到尚未撤销且包含这些目标条目的 entry_deleted / library_deleted 快照中，
+   * 使当前活记录立即可编辑，待后续恢复目标记录或目标记录本时自动无损还原关联。
+   */
+  private attachDeferredDetachedSourcesToSnapshotsInternal(
+    deferredSources: readonly DeferredMissingSource[]
+  ): void {
+    if (deferredSources.length === 0) return;
+
+    const pendingSnapRows = this.driver.getAllSync<{ id: string; snapshot_json: string }>(
+      `SELECT id, snapshot_json
+       FROM ai_snapshots
+       WHERE undone = 0
+         AND (snapshot_json LIKE '%"entry_deleted"%' OR snapshot_json LIKE '%"library_deleted"%')`
     );
+    if (pendingSnapRows.length === 0) return;
+
+    for (const snapRow of pendingSnapRows) {
+      let payload: SnapshotPayload | null = null;
+      try {
+        payload = JSON.parse(snapRow.snapshot_json) as SnapshotPayload;
+      } catch {
+        payload = null;
+      }
+      if (
+        !payload ||
+        !('kind' in payload) ||
+        (payload.kind !== 'entry_deleted' && payload.kind !== 'library_deleted')
+      ) {
+        continue;
+      }
+
+      const targetEntryIdSet = new Set<string>();
+      if (payload.kind === 'entry_deleted') {
+        const eid = String(payload.entry?.id ?? '');
+        if (eid) targetEntryIdSet.add(eid);
+      } else {
+        for (const e of payload.entries) {
+          const eid = String(e.id ?? '');
+          if (eid) targetEntryIdSet.add(eid);
+        }
+      }
+      if (targetEntryIdSet.size === 0) continue;
+
+      let snapChanged = false;
+      const nextDetached: DetachedSourceRecord[] = payload.detachedSources
+        ? payload.detachedSources.map((s) => ({
+            ...s,
+            removedByField: s.removedByField ? { ...s.removedByField } : undefined,
+          }))
+        : [];
+      const existingById = new Map<string, DetachedSourceRecord>();
+      for (const item of nextDetached) {
+        existingById.set(item.id, item);
+      }
+
+      for (const src of deferredSources) {
+        const matchedByField: Record<string, string[]> = {};
+        for (const [fk, ids] of Object.entries(src.missingByField)) {
+          const hit = ids.filter((id) => targetEntryIdSet.has(id));
+          if (hit.length > 0) {
+            matchedByField[fk] = hit;
+          }
+        }
+        if (Object.keys(matchedByField).length === 0) continue;
+
+        const existing = existingById.get(src.id);
+        if (existing) {
+          const mergedRemoved: Record<string, string[]> = { ...(existing.removedByField ?? {}) };
+          for (const [fk, ids] of Object.entries(matchedByField)) {
+            const cur = mergedRemoved[fk] ?? [];
+            mergedRemoved[fk] = Array.from(new Set([...cur, ...ids]));
+          }
+          existing.removedByField = mergedRemoved;
+        } else {
+          const added: DetachedSourceRecord = {
+            id: src.id,
+            prevDataJson: src.prevDataJson,
+            removedByField: matchedByField,
+          };
+          nextDetached.push(added);
+          existingById.set(added.id, added);
+        }
+        snapChanged = true;
+      }
+
+      if (snapChanged) {
+        const nextPayload: SnapshotPayload = {
+          ...payload,
+          detachedSources: nextDetached,
+        };
+        this.driver.runSync('UPDATE ai_snapshots SET snapshot_json = ? WHERE id = ?', [
+          JSON.stringify(nextPayload),
+          snapRow.id,
+        ]);
+      }
+    }
+  }
+
+  undoSnapshotInternal(snapshotId: string): void {
+    const row = this.driver.getFirstSync<{
+      snapshot_json: string;
+      undone: number;
+      created_at: number;
+    }>('SELECT snapshot_json, undone, created_at FROM ai_snapshots WHERE id = ?', [snapshotId]);
     if (!row || row.undone) {
       throw new Error('该快照不存在或已撤销');
     }
@@ -701,11 +1027,35 @@ export class SnapshotsStore {
         }
         const restoredEntryId = String(e.id);
         this.entries.insertRawEntry(e);
-        this.entries.sanitizeRestoredEntryRelationsInternal([restoredEntryId]);
+        this.libraries.invalidateCache();
+        // 兼容旧版删记录快照（有效关联仅保存在 payload.relations 中而 data_json 为空）
+        const outgoingRels = payload.relations.filter(
+          (r) => String(r.source_entry_id) === restoredEntryId
+        );
+        if (outgoingRels.length > 0) {
+          this.entries.reconcileRelationRowsIntoEntriesInternal(outgoingRels);
+        }
+        const deferredSources = this.entries.sanitizeRestoredEntryRelationsInternal([
+          restoredEntryId,
+        ]);
+        this.attachDeferredDetachedSourcesToSnapshotsInternal(deferredSources);
         const handledEntrySources = this.restoreDetachedSourcesInternal(
           payload.detachedSources,
           [restoredEntryId]
         );
+        const incomingRels = payload.relations.filter(
+          (r) =>
+            String(r.target_entry_id) === restoredEntryId &&
+            String(r.source_entry_id) !== restoredEntryId &&
+            !handledEntrySources.has(String(r.source_entry_id))
+        );
+        if (incomingRels.length > 0) {
+          const reconciledIds = this.entries.reconcileRelationRowsIntoEntriesInternal(
+            incomingRels,
+            { syncRelations: true }
+          );
+          for (const sid of reconciledIds) handledEntrySources.add(sid);
+        }
         this.entries.reindexSurvivingReferencesToEntriesInternal(
           [restoredEntryId],
           handledEntrySources
@@ -738,11 +1088,34 @@ export class SnapshotsStore {
           this.entries.insertRawEntry(e);
           restoredEntryIds.push(String(e.id));
         }
-        this.entries.sanitizeRestoredEntryRelationsInternal(restoredEntryIds);
+        const restoredEntryIdSet = new Set(restoredEntryIds);
+        this.libraries.invalidateCache();
+        const outgoingLibRels = payload.relations.filter((r) =>
+          restoredEntryIdSet.has(String(r.source_entry_id))
+        );
+        if (outgoingLibRels.length > 0) {
+          this.entries.reconcileRelationRowsIntoEntriesInternal(outgoingLibRels);
+        }
+        const deferredLibSources =
+          this.entries.sanitizeRestoredEntryRelationsInternal(restoredEntryIds);
+        this.attachDeferredDetachedSourcesToSnapshotsInternal(deferredLibSources);
         const handledLibSources = this.restoreDetachedSourcesInternal(
           payload.detachedSources,
           restoredEntryIds
         );
+        const incomingLibRels = payload.relations.filter(
+          (r) =>
+            restoredEntryIdSet.has(String(r.target_entry_id)) &&
+            !restoredEntryIdSet.has(String(r.source_entry_id)) &&
+            !handledLibSources.has(String(r.source_entry_id))
+        );
+        if (incomingLibRels.length > 0) {
+          const reconciledIds = this.entries.reconcileRelationRowsIntoEntriesInternal(
+            incomingLibRels,
+            { syncRelations: true }
+          );
+          for (const sid of reconciledIds) handledLibSources.add(sid);
+        }
         this.entries.reindexSurvivingReferencesToEntriesInternal(
           restoredEntryIds,
           handledLibSources
@@ -760,7 +1133,11 @@ export class SnapshotsStore {
         }
         this.libraries.syncAllLibraryRelations();
       } else if (payload.kind === 'architect_plan') {
-        const libsToDelete = this.resolveArchitectCreatedLibrariesToDelete(payload);
+        const libsToDelete = this.resolveArchitectCreatedLibrariesToDelete(
+          payload,
+          snapshotId,
+          row.created_at
+        );
         this.assertNoSurvivingRequiredDepsForUndo(libsToDelete, payload.previousLibraries);
         for (const target of libsToDelete) {
           this.entries.detachReferencesToLibraryInternal(target.slug, { clearDangling: false });
@@ -860,6 +1237,16 @@ export class SnapshotsStore {
         this.libraries.invalidateCache();
         for (const libId of relChangedLibIds) {
           this.entries.syncLibraryEntryRelationsInternal(libId);
+        }
+        if (payload.trimmedSources && payload.trimmedSources.length > 0) {
+          const candidateTargetIds: string[] = [];
+          for (const src of payload.trimmedSources) {
+            if (!src.removedByField) continue;
+            for (const ids of Object.values(src.removedByField)) {
+              candidateTargetIds.push(...ids);
+            }
+          }
+          this.restoreDetachedSourcesInternal(payload.trimmedSources, candidateTargetIds);
         }
       }
     } else {
