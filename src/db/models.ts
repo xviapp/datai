@@ -204,6 +204,8 @@ export type SnapshotPayload =
   | {
       kind: 'architect_plan';
       createdLibrarySlugs: string[];
+      /** 记录本次方案实际新建记录本的精确 ID，撤销时按 ID 核对身份，避免误删后来复用同 slug 新建的库 */
+      createdLibraries?: Array<{ id: string; slug: string }>;
       previousLibraries: Array<Record<string, unknown>>;
       previousLibraryViews?: Array<Record<string, unknown>>;
       createdWidgetIds: string[];

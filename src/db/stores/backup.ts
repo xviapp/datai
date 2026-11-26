@@ -103,10 +103,10 @@ export function importBackupBundleInternal(
   libraries.syncAllLibraryRelations();
   libraries.ensureViewsCompiled();
   libraries.invalidateCache();
-  // 导入后按库字段定义补齐可能缺失的 entry_relations 索引，确保按索引解绑与反向查询一致
+  // 先核对旧版备份中仍符合字段定义的 entry_relations 并补回 data_json，避免重建索引时丢失有效关联
+  entries.reconcileImportedRelationsInternal();
+  // 导入后按库字段定义同步 entry_relations 索引（同时清理不再属于 relation 字段的失效关联行）
   for (const lib of libraries.listLibraries()) {
-    if (lib.fields.some((f) => f.type === 'relation')) {
-      entries.syncLibraryEntryRelationsInternal(lib.id);
-    }
+    entries.syncLibraryEntryRelationsInternal(lib.id);
   }
 }

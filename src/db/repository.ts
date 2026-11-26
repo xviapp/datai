@@ -25,7 +25,7 @@ import type {
 } from './models';
 import { buildDefaultSeedBundle } from './seed-templates';
 import { exportBackupBundleFromDriver, importBackupBundleInternal } from './stores/backup';
-import { EntriesStore } from './stores/entries-store';
+import { EntriesStore, getRelationFieldsSignature } from './stores/entries-store';
 import { LibrariesStore } from './stores/libraries-store';
 import { SnapshotsStore } from './stores/snapshots-store';
 import { WidgetsStore } from './stores/widgets-store';
@@ -213,22 +213,10 @@ export class OmniRepository {
   upsertLibrary(bp: LibraryBlueprint, viewInputs?: LibraryViewInput[]): string {
     const id = this.runWriteTransaction(() => {
       const prevLib = this.librariesStore.getLibraryBySlug(bp.slug);
-      const prevRelSig = prevLib
-        ? JSON.stringify(
-            prevLib.fields
-              .filter((f) => f.type === 'relation')
-              .map((f) => [f.key, f.relationConfig?.targetLibrarySlug ?? '', f.relationConfig?.allowMultiple ?? true])
-          )
-        : null;
+      const prevRelSig = prevLib ? getRelationFieldsSignature(prevLib.fields) : null;
       const libId = this.librariesStore.upsertLibraryInternal(bp, { viewInputs });
       const nextLib = this.librariesStore.getLibraryById(libId);
-      const nextRelSig = nextLib
-        ? JSON.stringify(
-            nextLib.fields
-              .filter((f) => f.type === 'relation')
-              .map((f) => [f.key, f.relationConfig?.targetLibrarySlug ?? '', f.relationConfig?.allowMultiple ?? true])
-          )
-        : null;
+      const nextRelSig = nextLib ? getRelationFieldsSignature(nextLib.fields) : null;
       if (prevLib && prevRelSig !== nextRelSig) {
         this.entriesStore.syncLibraryEntryRelationsInternal(libId);
       }

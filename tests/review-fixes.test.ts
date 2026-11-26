@@ -1501,3 +1501,441 @@ describe('4. Library filter and sort rules', () => {
     );
   });
 });
+
+describe('5. Round-6 review fixes: snapshot identity, backup reconciliation, restore & schema evolution', () => {
+  it('verifies library identity by ID when undoing an old Architect plan so a recreated same-slug library survives', () => {
+    const { repo } = createSeededRepo();
+    const oldPlanSnapId = repo.applyArchitectPlan({
+      summary: '创建 custom_8',
+      libraries: [
+        {
+          slug: 'custom_8',
+          name: '旧自定义库',
+          description: '',
+          icon: '📦',
+          color: 'teal',
+          fields: [{ key: 'title', label: '标题', type: 'text', required: true }],
+          views: {
+            card: {
+              titleFieldKey: 'title',
+              footerMetricKeys: [],
+              sortDir: 'desc',
+              highlightRules: [],
+            },
+          },
+        },
+      ],
+      dashboardWidgets: [],
+    });
+
+    const oldLib = repo.getLibraryBySlug('custom_8');
+    assert.ok(oldLib);
+    repo.deleteLibrary('custom_8');
+    assert.equal(repo.getLibraryBySlug('custom_8'), null);
+
+    // 之后以相同 slug 重新创建新库并写入一条记录
+    const newLibId = repo.upsertLibrary({
+      slug: 'custom_8',
+      name: '新自定义库',
+      description: '',
+      icon: '✨',
+      color: 'blue',
+      fields: [{ key: 'title', label: '标题', type: 'text', required: true }],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    assert.notEqual(newLibId, oldLib.id);
+    const keptEntryId = repo.createEntry('custom_8', { title: '新库珍贵记录' });
+
+    // 预览影响也不应把后来新建的库算作受影响记录
+    const impact = repo.describeSnapshotUndoImpact(oldPlanSnapId);
+    assert.equal(impact.affectedEntriesCount, 0);
+
+    // 撤销旧建库方案，新库与记录都应完好保留
+    repo.undoSnapshot(oldPlanSnapId);
+    const survivingLib = repo.getLibraryBySlug('custom_8');
+    assert.ok(survivingLib);
+    assert.equal(survivingLib.id, newLibId);
+    assert.equal(survivingLib.name, '新自定义库');
+    const survivingEntry = repo.getHydratedEntryById(keptEntryId);
+    assert.equal(survivingEntry?.entry.rawData.title, '新库珍贵记录');
+  });
+
+  it('reconciles valid entry_relations from legacy backups whose data_json relation array was emptied', () => {
+    const { repo } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    const logs = repo.listHydratedEntries('reading_logs');
+    assert.ok(books.length > 0 && logs.length > 0);
+    const targetLog = logs[0];
+    const expectedBookIds = targetLog.forwardLinks.book?.map((r) => r.id) ?? [];
+    assert.ok(expectedBookIds.length > 0);
+
+    // 构造类似 9080eb3 导出的真实备份：entry_relations 保留有效关联，但 entries.data_json.book 为空数组
+    const legacyBundle = repo.exportBackupBundle();
+    legacyBundle.entries = legacyBundle.entries.map((entryRow) => {
+      if (String(entryRow.id) !== targetLog.id) return entryRow;
+      const parsed = JSON.parse(String(entryRow.data_json)) as Record<string, unknown>;
+      parsed.book = [];
+      return { ...entryRow, data_json: JSON.stringify(parsed) };
+    });
+
+    // 在全新数据库中导入该旧版备份
+    const freshCtx = createInstrumentedSqliteDriver();
+    const freshRepo = new OmniRepository(freshCtx.driver);
+    freshRepo.importBackupBundle(legacyBundle);
+
+    const hydrated = freshRepo.getHydratedEntryById(targetLog.id);
+    assert.ok(hydrated);
+    assert.deepEqual(hydrated.entry.rawData.book, expectedBookIds);
+    assert.deepEqual(
+      hydrated.entry.forwardLinks.book?.map((r) => r.id),
+      expectedBookIds
+    );
+
+    // 再次导出备份时，entries 与 relations 都应保持该有效关联
+    const reExported = freshRepo.exportBackupBundle();
+    assert.ok(
+      reExported.relations.some(
+        (r) =>
+          String(r.source_entry_id) === targetLog.id &&
+          String(r.target_entry_id) === expectedBookIds[0] &&
+          String(r.field_key) === 'book'
+      ),
+      'Re-exported backup must preserve reconciled valid relations'
+    );
+  });
+
+  it('sanitizes restored entry relations against current schema and reindexes surviving references to newly restored targets', () => {
+    const { repo } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    assert.ok(books.length >= 2);
+    const bookA = books[0];
+    const bookB = books[1];
+
+    // 场景 A：删笔记 -> 把关联目标从 books 改为 my_assets -> 恢复笔记
+    const noteAId = repo.createEntry('reading_logs', {
+      book: [bookA.id],
+      read_date: '2026-11-26',
+      note: '场景A笔记',
+    });
+    const delNoteASnap = repo.deleteEntry(noteAId);
+    assert.ok(delNoteASnap);
+
+    const logsLib = repo.getLibraryBySlug('reading_logs')!;
+    repo.upsertLibrary({
+      slug: logsLib.slug,
+      name: logsLib.name,
+      description: logsLib.description,
+      icon: logsLib.icon,
+      color: logsLib.color,
+      parentLibrarySlug: logsLib.parentLibrarySlug ?? undefined,
+      showOnHome: logsLib.showOnHome,
+      fields: logsLib.fields.map((f) =>
+        f.key === 'book'
+          ? {
+              ...f,
+              relationConfig: { targetLibrarySlug: 'my_assets', allowMultiple: false },
+            }
+          : f
+      ),
+      views: logsLib.views,
+    });
+
+    repo.undoSnapshot(delNoteASnap);
+    const restoredNoteA = repo.getHydratedEntryById(noteAId);
+    assert.ok(restoredNoteA);
+    assert.deepEqual(restoredNoteA.entry.rawData.book, []);
+    assert.equal(restoredNoteA.entry.forwardLinks.book?.length ?? 0, 0);
+    // 修改笔记正文必须能够正常保存，不再报目标库不匹配
+    repo.updateEntry(noteAId, { ...restoredNoteA.entry.rawData, note: '场景A改后笔记' });
+    assert.equal(repo.getHydratedEntryById(noteAId)?.entry.rawData.note, '场景A改后笔记');
+
+    // 切回 books 准备场景 B
+    const logsLibAfterA = repo.getLibraryBySlug('reading_logs')!;
+    repo.upsertLibrary({
+      slug: logsLibAfterA.slug,
+      name: logsLibAfterA.name,
+      description: logsLibAfterA.description,
+      icon: logsLibAfterA.icon,
+      color: logsLibAfterA.color,
+      parentLibrarySlug: logsLibAfterA.parentLibrarySlug ?? undefined,
+      showOnHome: logsLibAfterA.showOnHome,
+      fields: logsLibAfterA.fields.map((f) =>
+        f.key === 'book'
+          ? {
+              ...f,
+              relationConfig: { targetLibrarySlug: 'books', allowMultiple: false },
+            }
+          : f
+      ),
+      views: logsLibAfterA.views,
+    });
+
+    // 场景 B：先删笔记、再删书，然后按相同顺序先恢复笔记、再恢复书
+    const noteBId = repo.createEntry('reading_logs', {
+      book: [bookB.id],
+      read_date: '2026-11-26',
+      note: '场景B笔记',
+    });
+    const delNoteBSnap = repo.deleteEntry(noteBId);
+    const delBookBSnap = repo.deleteEntry(bookB.id);
+    assert.ok(delNoteBSnap && delBookBSnap);
+
+    repo.undoSnapshot(delNoteBSnap);
+    repo.undoSnapshot(delBookBSnap);
+
+    const restoredNoteB = repo.getHydratedEntryById(noteBId);
+    const restoredBookB = repo.getHydratedEntryById(bookB.id);
+    assert.ok(restoredNoteB && restoredBookB);
+    assert.deepEqual(restoredNoteB.entry.rawData.book, [bookB.id]);
+    assert.deepEqual(
+      restoredNoteB.entry.forwardLinks.book?.map((r) => r.id),
+      [bookB.id]
+    );
+    assert.ok(
+      restoredBookB.entry.backlinks.some((r) => r.id === noteBId),
+      'Restored book must show backlink from already-restored note'
+    );
+  });
+
+  it('normalizes existing multi-value relation data when switching a relation field from multi-select to single-select', () => {
+    const { repo } = createSeededRepo();
+    const books = repo.listHydratedEntries('books');
+    assert.ok(books.length >= 2);
+
+    repo.upsertLibrary({
+      slug: 'multi_to_single_notes',
+      name: '读书清单笔记',
+      description: '',
+      icon: '🗒️',
+      color: 'teal',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'books_ref',
+          label: '关联书籍',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+
+    const noteId = repo.createEntry('multi_to_single_notes', {
+      title: '双书笔记',
+      books_ref: [books[0].id, books[1].id],
+    });
+    assert.equal(repo.getHydratedEntryById(noteId)?.entry.forwardLinks.books_ref?.length, 2);
+
+    // 将关联字段从多选改为单选
+    const lib = repo.getLibraryBySlug('multi_to_single_notes')!;
+    repo.upsertLibrary({
+      slug: lib.slug,
+      name: lib.name,
+      description: lib.description,
+      icon: lib.icon,
+      color: lib.color,
+      fields: lib.fields.map((f) =>
+        f.key === 'books_ref'
+          ? { ...f, relationConfig: { targetLibrarySlug: 'books', allowMultiple: false } }
+          : f
+      ),
+      views: lib.views,
+    });
+
+    const afterSwitch = repo.getHydratedEntryById(noteId);
+    assert.ok(afterSwitch);
+    assert.deepEqual(afterSwitch.entry.rawData.books_ref, [books[0].id]);
+    assert.deepEqual(
+      afterSwitch.entry.forwardLinks.books_ref?.map((r) => r.id),
+      [books[0].id]
+    );
+
+    // 仅修改标题必须能够正常保存，不得再报「仅支持关联 1 条记录」
+    repo.updateEntry(noteId, { ...afterSwitch.entry.rawData, title: '单选后修改标题' });
+    assert.equal(repo.getHydratedEntryById(noteId)?.entry.rawData.title, '单选后修改标题');
+  });
+
+  it('preserves user-reordered multi-select sequence when undoing deletion of an earlier item', () => {
+    const { repo } = createSeededRepo();
+    const bookA = repo.createEntry('books', { book_title: '排序书A', status: '想读' });
+    const bookB = repo.createEntry('books', { book_title: '排序书B', status: '想读' });
+    const bookC = repo.createEntry('books', { book_title: '排序书C', status: '想读' });
+
+    repo.upsertLibrary({
+      slug: 'ordered_multi_notes',
+      name: '有序多选笔记',
+      description: '',
+      icon: '🔖',
+      color: 'amber',
+      fields: [
+        { key: 'title', label: '标题', type: 'text', required: true },
+        {
+          key: 'books_ref',
+          label: '关联书目',
+          type: 'relation',
+          required: false,
+          relationConfig: { targetLibrarySlug: 'books', allowMultiple: true },
+        },
+      ],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+
+    const noteId = repo.createEntry('ordered_multi_notes', {
+      title: '三书顺序测试',
+      books_ref: [bookA, bookB, bookC],
+    });
+
+    const delASnap = repo.deleteEntry(bookA);
+    assert.ok(delASnap);
+
+    // 删除 A 后用户将剩余项重排为 [C, B]
+    repo.updateEntry(noteId, {
+      title: '三书顺序测试',
+      books_ref: [bookC, bookB],
+    });
+    assert.deepEqual(repo.getHydratedEntryById(noteId)?.entry.rawData.books_ref, [bookC, bookB]);
+
+    // 撤销删除 A 后，应恢复 A 且保持 C 在 B 前面 -> [A, C, B]
+    repo.undoSnapshot(delASnap);
+    const restored = repo.getHydratedEntryById(noteId);
+    assert.ok(restored);
+    assert.deepEqual(restored.entry.rawData.books_ref, [bookA, bookC, bookB]);
+    assert.deepEqual(
+      restored.entry.forwardLinks.books_ref?.map((r) => r.id),
+      [bookA, bookC, bookB]
+    );
+  });
+
+  it('detaches child libraries created later when undoing an Architect plan that created their parent library', () => {
+    const { repo } = createSeededRepo();
+    const parentSnapId = repo.applyArchitectPlan({
+      summary: '创建父库项目',
+      libraries: [
+        {
+          slug: 'parent_projects_r6',
+          name: '父项目库',
+          description: '',
+          icon: '📁',
+          color: 'blue',
+          fields: [{ key: 'title', label: '名称', type: 'text', required: true }],
+          views: {
+            card: {
+              titleFieldKey: 'title',
+              footerMetricKeys: [],
+              sortDir: 'desc',
+              highlightRules: [],
+            },
+          },
+        },
+      ],
+      dashboardWidgets: [],
+    });
+
+    // 之后在该父库下创建子库（默认首页隐藏）
+    repo.upsertLibrary({
+      slug: 'child_tasks_r6',
+      name: '子任务库',
+      description: '',
+      icon: '✅',
+      color: 'emerald',
+      parentLibrarySlug: 'parent_projects_r6',
+      showOnHome: false,
+      fields: [{ key: 'title', label: '任务名', type: 'text', required: true }],
+      views: {
+        card: {
+          titleFieldKey: 'title',
+          footerMetricKeys: [],
+          sortDir: 'desc',
+          highlightRules: [],
+        },
+      },
+    });
+    const childBefore = repo.getLibraryBySlug('child_tasks_r6');
+    assert.equal(childBefore?.parentLibrarySlug, 'parent_projects_r6');
+    assert.equal(childBefore?.showOnHome, false);
+
+    // 撤销父库建库方案后，子库应自动解除父级归属并在首页重新可见
+    repo.undoSnapshot(parentSnapId);
+    assert.equal(repo.getLibraryBySlug('parent_projects_r6'), null);
+    const childAfter = repo.getLibraryBySlug('child_tasks_r6');
+    assert.ok(childAfter);
+    assert.equal(childAfter.parentLibrarySlug, null);
+    assert.equal(childAfter.showOnHome, true);
+  });
+
+  it('avoids rewriting entry_relations when an Architect plan or its undo does not change relation fields', () => {
+    const { repo, queries, clearQueries } = createSeededRepo();
+    const logsLib = repo.getLibraryBySlug('reading_logs')!;
+    const beforeLogs = repo.listHydratedEntries('reading_logs');
+    assert.ok(beforeLogs.length > 0);
+    const originalBookIds = beforeLogs.map((e) => e.forwardLinks.book?.map((r) => r.id) ?? []);
+
+    clearQueries();
+    const renameSnapId = repo.applyArchitectPlan({
+      summary: '仅重命名阅读记录',
+      libraries: [
+        {
+          slug: logsLib.slug,
+          name: '阅读打卡日志',
+          description: logsLib.description,
+          icon: logsLib.icon,
+          color: logsLib.color,
+          parentLibrarySlug: logsLib.parentLibrarySlug ?? undefined,
+          showOnHome: logsLib.showOnHome,
+          fields: logsLib.fields,
+          views: logsLib.views,
+        },
+      ],
+      dashboardWidgets: [],
+    });
+
+    const relWritesOnApply = queries.filter((q) =>
+      /DELETE FROM entry_relations|INSERT.*INTO entry_relations/i.test(q)
+    );
+    assert.deepEqual(
+      relWritesOnApply,
+      [],
+      'Renaming a library via Architect plan must not rewrite entry_relations'
+    );
+
+    clearQueries();
+    repo.undoSnapshot(renameSnapId);
+    const relWritesOnUndo = queries.filter((q) =>
+      /DELETE FROM entry_relations|INSERT.*INTO entry_relations/i.test(q)
+    );
+    assert.deepEqual(
+      relWritesOnUndo,
+      [],
+      'Undoing a pure rename Architect plan must not rewrite entry_relations'
+    );
+
+    const afterLogs = repo.listHydratedEntries('reading_logs');
+    assert.equal(repo.getLibraryBySlug('reading_logs')?.name, logsLib.name);
+    assert.deepEqual(
+      afterLogs.map((e) => e.forwardLinks.book?.map((r) => r.id) ?? []),
+      originalBookIds
+    );
+  });
+});
