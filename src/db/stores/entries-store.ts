@@ -16,10 +16,10 @@ import {
   loadRelationsBatch,
   sortHydratedEntries,
 } from '../hydration';
-import { mergeOrderedRelationItems } from '../relations-sync';
 import type {
   BacklinkGroupSection,
   ChildLibrarySection,
+  ConvertedFieldBackup,
   DetachedSourceRecord,
   EntrySearchHit,
   HydratedEntry,
@@ -65,13 +65,6 @@ export interface DeferredMissingSource {
   id: string;
   prevDataJson: string;
   missingByField: Record<string, string[]>;
-}
-
-export interface RawRelationRowLike {
-  source_entry_id?: unknown;
-  target_entry_id?: unknown;
-  field_key?: unknown;
-  sort_order?: unknown;
 }
 
 export class EntriesStore {
@@ -273,10 +266,13 @@ export class EntriesStore {
 
   /**
    * 当记录本新增/修改 relation 字段或导入备份后，按最新字段定义为该库全部条目补建/刷新 entry_relations 索引：
-   * - 自动剥离已失效/归属错误目标库或超出单选上限的 ID，保证字段值与索引严格一致且记录保持可编辑；
-   * - 返回每条实际被裁剪/剥离的记录快照（含原 data_json 与 removedByField），供建库方案撤销时无损还原。
+   * - 自动剥离已失效/归属错误目标库或超出单选上限的 ID，并将非关联字段转换后的标量原值规范化为 []，保证字段值与索引严格一致且记录保持可编辑；
+   * - 返回每条实际被裁剪/剥离或涉及非关联->关联类型转换的记录快照（含原 data_json、removedByField 与 convertedFields），供建库方案撤销时无损还原。
    */
-  syncLibraryEntryRelationsInternal(libraryId: string): DetachedSourceRecord[] {
+  syncLibraryEntryRelationsInternal(
+    libraryId: string,
+    options?: { convertedFromTypeByField?: ReadonlyMap<string, FieldType> }
+  ): DetachedSourceRecord[] {
     const lib = this.libraries.getLibraryById(libraryId);
     if (!lib) return [];
 
@@ -284,23 +280,6 @@ export class EntriesStore {
     if (relationFields.length === 0) {
       this.driver.runSync('DELETE FROM entry_relations WHERE source_library_id = ?', [lib.id]);
       return [];
-    }
-
-    // 重建索引前先合并当前库已有的有效 entry_relations 到 data_json，防止旧数据在新增无关字段时丢失原关联
-    const existingLibRelRows = this.driver.getAllSync<{
-      source_entry_id: string;
-      target_entry_id: string;
-      field_key: string;
-      sort_order: number;
-    }>(
-      `SELECT source_entry_id, target_entry_id, field_key, sort_order
-       FROM entry_relations
-       WHERE source_library_id = ?
-       ORDER BY source_entry_id ASC, field_key ASC, sort_order ASC`,
-      [lib.id]
-    );
-    if (existingLibRelRows.length > 0) {
-      this.reconcileRelationRowsIntoEntriesInternal(existingLibRelRows);
     }
 
     const rows = this.driver.getAllSync<{ id: string; data_json: string }>(
@@ -324,6 +303,7 @@ export class EntriesStore {
       return actualLibId;
     };
 
+    const convertedFromTypeByField = options?.convertedFromTypeByField;
     const modifiedSources: DetachedSourceRecord[] = [];
     for (const row of rows) {
       let parsed: Record<string, unknown> | null = null;
@@ -339,10 +319,34 @@ export class EntriesStore {
 
       let dataChanged = false;
       const removedByField: Record<string, string[]> = {};
+      const convertedFields: Record<string, ConvertedFieldBackup> = {};
+
       for (const f of relationFields) {
-        const rawTokens = normalizeRelationValueList(parsed[f.key]);
+        const convertedFromType = convertedFromTypeByField?.get(f.key);
+        const rawValue = parsed[f.key];
+        if (convertedFromType) {
+          const hadValue = Object.prototype.hasOwnProperty.call(parsed, f.key);
+          convertedFields[f.key] = {
+            fromType: convertedFromType,
+            hadValue,
+            ...(hadValue ? { prevValue: rawValue } : {}),
+          };
+        }
+
+        const rawTokens = normalizeRelationValueList(rawValue);
         const uniqueTargets = Array.from(new Set(rawTokens));
-        if (uniqueTargets.length === 0) continue;
+        if (uniqueTargets.length === 0) {
+          // 字段刚由非关联类型（如 number 42、checkbox true/false、空字符串）转为关联时，将非数组旧值规范化为 []
+          if (
+            rawValue !== undefined &&
+            rawValue !== null &&
+            !(Array.isArray(rawValue) && rawValue.length === 0)
+          ) {
+            parsed[f.key] = [];
+            dataChanged = true;
+          }
+          continue;
+        }
 
         const targetSlug = f.relationConfig?.targetLibrarySlug;
         const targetLib = targetSlug ? (bySlug.get(targetSlug) ?? null) : null;
@@ -363,12 +367,13 @@ export class EntriesStore {
 
         if (
           removed.length > 0 ||
+          !Array.isArray(rawValue) ||
           finalTargets.length !== rawTokens.length ||
           finalTargets.some((id, idx) => id !== rawTokens[idx])
         ) {
           parsed[f.key] = finalTargets;
           dataChanged = true;
-          if (removed.length > 0) {
+          if (removed.length > 0 && !convertedFromType) {
             removedByField[f.key] = removed;
           }
         }
@@ -379,13 +384,17 @@ export class EntriesStore {
           JSON.stringify(parsed),
           row.id,
         ]);
-        if (Object.keys(removedByField).length > 0) {
-          modifiedSources.push({
-            id: row.id,
-            prevDataJson: row.data_json,
-            removedByField,
-          });
-        }
+      }
+
+      const hasRemoved = Object.keys(removedByField).length > 0;
+      const hasConverted = Object.keys(convertedFields).length > 0;
+      if (hasRemoved || hasConverted) {
+        modifiedSources.push({
+          id: row.id,
+          prevDataJson: row.data_json,
+          ...(hasRemoved ? { removedByField } : {}),
+          ...(hasConverted ? { convertedFields } : {}),
+        });
       }
 
       this.syncEntryRelationsNonStrictInternal(row.id, lib.id, lib.fields, parsed);
@@ -503,334 +512,6 @@ export class EntriesStore {
     return deferredSources;
   }
 
-  /**
-   * 当目标条目（或记录本）被撤销恢复后，定向补查当前存活记录中 data_json 已引用这些目标 ID 的条目，
-   * 并按最新字段定义重建其 entry_relations（覆盖未指定 targetLibrarySlug 的关联字段、同序恢复与历史快照）。
-   */
-  reindexSurvivingReferencesToEntriesInternal(
-    restoredTargetEntryIds: readonly string[],
-    excludeSourceIds?: ReadonlySet<string>
-  ): void {
-    const uniqueTargetIds = Array.from(new Set(restoredTargetEntryIds.filter(Boolean)));
-    if (uniqueTargetIds.length === 0) return;
-
-    const targetIdSet = new Set(uniqueTargetIds);
-    const { byId } = this.libraries.ensureCache();
-    const targetLibSlugs = new Set<string>();
-
-    for (let i = 0; i < uniqueTargetIds.length; i += ENTRY_QUERY_CHUNK_SIZE) {
-      const chunk = uniqueTargetIds.slice(i, i + ENTRY_QUERY_CHUNK_SIZE);
-      const placeholders = chunk.map(() => '?').join(', ');
-      const libRows = this.driver.getAllSync<{ library_id: string }>(
-        `SELECT DISTINCT library_id FROM entries WHERE id IN (${placeholders})`,
-        chunk
-      );
-      for (const lr of libRows) {
-        const lib = byId.get(lr.library_id);
-        if (lib) targetLibSlugs.add(lib.slug);
-      }
-    }
-    if (targetLibSlugs.size === 0) return;
-
-    for (const lib of this.libraries.listLibraries()) {
-      const matchingFields = lib.fields.filter(
-        (f) =>
-          f.type === 'relation' &&
-          (!f.relationConfig?.targetLibrarySlug ||
-            targetLibSlugs.has(f.relationConfig.targetLibrarySlug))
-      );
-      if (matchingFields.length === 0) continue;
-
-      let candidateRows: Array<{ id: string; data_json: string }>;
-      if (uniqueTargetIds.length <= 20) {
-        const likeClauses = uniqueTargetIds.map(() => "data_json LIKE ? ESCAPE '\\'").join(' OR ');
-        const likeParams: SqlParam[] = [
-          lib.id,
-          ...uniqueTargetIds.map((id) => `%${escapeLikePattern(id)}%`),
-        ];
-        candidateRows = this.driver.getAllSync<{ id: string; data_json: string }>(
-          `SELECT id, data_json FROM entries WHERE library_id = ? AND (${likeClauses})`,
-          likeParams
-        );
-      } else {
-        candidateRows = this.driver.getAllSync<{ id: string; data_json: string }>(
-          'SELECT id, data_json FROM entries WHERE library_id = ?',
-          [lib.id]
-        );
-      }
-
-      for (const row of candidateRows) {
-        if (targetIdSet.has(row.id) || excludeSourceIds?.has(row.id)) continue;
-        let parsed: Record<string, unknown> | null = null;
-        try {
-          const raw = JSON.parse(row.data_json);
-          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-            parsed = raw as Record<string, unknown>;
-          }
-        } catch {
-          parsed = null;
-        }
-        if (!parsed) continue;
-
-        const referencesRestored = matchingFields.some((f) =>
-          normalizeRelationValueList(parsed[f.key]).some((id) => targetIdSet.has(id))
-        );
-        if (!referencesRestored) continue;
-
-        this.syncEntryRelationsNonStrictInternal(row.id, lib.id, lib.fields, parsed);
-      }
-    }
-  }
-
-  /**
-   * 按当前库字段定义核对一组原始 relation 行（来自导入备份或历史删记录/删库快照），
-   * 将其中仍然有效且缺失于 entries.data_json 的目标 ID 依 sort_order 补回 data_json；
-   * 返回实际修改过的 source_entry_id 列表（可选同步刷新其 entry_relations）。
-   */
-  reconcileRelationRowsIntoEntriesInternal(
-    relRows: readonly RawRelationRowLike[],
-    options?: { syncRelations?: boolean }
-  ): string[] {
-    if (relRows.length === 0) return [];
-
-    const sortedRows = [...relRows].sort(
-      (a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0)
-    );
-
-    const { byId, bySlug } = this.libraries.ensureCache();
-    const relsBySource = new Map<
-      string,
-      Map<string, Array<{ targetId: string; sortOrder: number }>>
-    >();
-    const allTargetIds: string[] = [];
-
-    for (const r of sortedRows) {
-      const sourceEntryId = String(r.source_entry_id ?? '').trim();
-      const targetEntryId = String(r.target_entry_id ?? '').trim();
-      const fieldKey = String(r.field_key ?? '').trim();
-      if (!sourceEntryId || !targetEntryId || !fieldKey) continue;
-
-      let byField = relsBySource.get(sourceEntryId);
-      if (!byField) {
-        byField = new Map();
-        relsBySource.set(sourceEntryId, byField);
-      }
-      let items = byField.get(fieldKey);
-      if (!items) {
-        items = [];
-        byField.set(fieldKey, items);
-      }
-      if (!items.some((it) => it.targetId === targetEntryId)) {
-        items.push({ targetId: targetEntryId, sortOrder: Number(r.sort_order ?? items.length) });
-        allTargetIds.push(targetEntryId);
-      }
-    }
-
-    if (relsBySource.size === 0) return [];
-    const targetLibIdByEntryId = this.loadEntryLibraryIdMap(allTargetIds);
-    const updatedSourceIds: string[] = [];
-
-    for (const [sourceEntryId, byField] of relsBySource.entries()) {
-      const srcRow = this.driver.getFirstSync<{
-        id: string;
-        library_id: string;
-        data_json: string;
-      }>('SELECT id, library_id, data_json FROM entries WHERE id = ?', [sourceEntryId]);
-      if (!srcRow) continue;
-
-      const srcLib = byId.get(srcRow.library_id);
-      if (!srcLib) continue;
-      const fieldByKey = new Map(srcLib.fields.map((f) => [f.key, f]));
-
-      let parsed: Record<string, unknown> | null = null;
-      try {
-        const raw = JSON.parse(srcRow.data_json);
-        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-          parsed = raw as Record<string, unknown>;
-        }
-      } catch {
-        parsed = null;
-      }
-      if (!parsed) continue;
-
-      let dataChanged = false;
-      for (const [fieldKey, relItems] of byField.entries()) {
-        const fDef = fieldByKey.get(fieldKey);
-        if (!fDef || fDef.type !== 'relation') continue;
-
-        const targetSlug = fDef.relationConfig?.targetLibrarySlug;
-        const targetLib = targetSlug ? (bySlug.get(targetSlug) ?? null) : null;
-        if (targetSlug && !targetLib) continue;
-
-        const existingTokens = Array.from(new Set(normalizeRelationValueList(parsed[fieldKey])));
-        const extraToLoad = existingTokens.filter(
-          (id) => !isBatchRefToken(id) && !targetLibIdByEntryId.has(id)
-        );
-        if (extraToLoad.length > 0) {
-          const extraMap = this.loadEntryLibraryIdMap(extraToLoad);
-          for (const [k, v] of extraMap.entries()) {
-            targetLibIdByEntryId.set(k, v);
-          }
-        }
-
-        const isValidTarget = (targetId: string): boolean => {
-          if (isBatchRefToken(targetId)) return false;
-          const targetLibId = targetLibIdByEntryId.get(targetId);
-          if (!targetLibId) return false;
-          if (targetLib && targetLibId !== targetLib.id) return false;
-          return true;
-        };
-
-        const validRelItems = relItems.filter((it) => isValidTarget(it.targetId));
-        if (validRelItems.length === 0) continue;
-
-        const existingValid = existingTokens.filter(isValidTarget);
-
-        if (fDef.relationConfig?.allowMultiple === false) {
-          if (existingValid.length === 0) {
-            parsed[fieldKey] = [validRelItems[0].targetId];
-            dataChanged = true;
-          }
-          continue;
-        }
-
-        const merged = mergeOrderedRelationItems(existingTokens, validRelItems);
-        if (
-          merged.length !== existingTokens.length ||
-          merged.some((id, idx) => id !== existingTokens[idx])
-        ) {
-          parsed[fieldKey] = merged;
-          dataChanged = true;
-        }
-      }
-
-      if (dataChanged) {
-        this.driver.runSync('UPDATE entries SET data_json = ? WHERE id = ?', [
-          JSON.stringify(parsed),
-          srcRow.id,
-        ]);
-        updatedSourceIds.push(srcRow.id);
-        if (options?.syncRelations) {
-          this.syncEntryRelationsNonStrictInternal(srcRow.id, srcLib.id, srcLib.fields, parsed);
-        }
-      }
-    }
-
-    return updatedSourceIds;
-  }
-
-  /**
-   * 从历史删记录/删库快照的 outgoing relation 行中提取当前目标尚未存在于 entries 表的关联，
-   * 生成 DeferredMissingSource 供挂接到尚未撤销的目标快照，确保按「先恢复笔记再恢复书」顺序时旧快照关联不丢失。
-   */
-  collectDeferredMissingFromRelationRowsInternal(
-    relRows: readonly RawRelationRowLike[]
-  ): DeferredMissingSource[] {
-    if (relRows.length === 0) return [];
-
-    const sortedRows = [...relRows].sort(
-      (a, b) => Number(a.sort_order ?? 0) - Number(b.sort_order ?? 0)
-    );
-    const { byId } = this.libraries.ensureCache();
-    const relsBySource = new Map<
-      string,
-      Map<string, Array<{ targetId: string; sortOrder: number }>>
-    >();
-    const allTargetIds: string[] = [];
-
-    for (const r of sortedRows) {
-      const sourceEntryId = String(r.source_entry_id ?? '').trim();
-      const targetEntryId = String(r.target_entry_id ?? '').trim();
-      const fieldKey = String(r.field_key ?? '').trim();
-      if (!sourceEntryId || !targetEntryId || !fieldKey || isBatchRefToken(targetEntryId)) continue;
-
-      let byField = relsBySource.get(sourceEntryId);
-      if (!byField) {
-        byField = new Map();
-        relsBySource.set(sourceEntryId, byField);
-      }
-      let items = byField.get(fieldKey);
-      if (!items) {
-        items = [];
-        byField.set(fieldKey, items);
-      }
-      if (!items.some((it) => it.targetId === targetEntryId)) {
-        items.push({ targetId: targetEntryId, sortOrder: Number(r.sort_order ?? items.length) });
-        allTargetIds.push(targetEntryId);
-      }
-    }
-
-    if (relsBySource.size === 0) return [];
-    const existingTargetLibIds = this.loadEntryLibraryIdMap(allTargetIds);
-    const deferred: DeferredMissingSource[] = [];
-
-    for (const [sourceEntryId, byField] of relsBySource.entries()) {
-      const srcRow = this.driver.getFirstSync<{
-        id: string;
-        library_id: string;
-        data_json: string;
-      }>('SELECT id, library_id, data_json FROM entries WHERE id = ?', [sourceEntryId]);
-      if (!srcRow) continue;
-
-      const srcLib = byId.get(srcRow.library_id);
-      if (!srcLib) continue;
-      const fieldByKey = new Map(srcLib.fields.map((f) => [f.key, f]));
-
-      let parsed: Record<string, unknown> | null = null;
-      try {
-        const raw = JSON.parse(srcRow.data_json);
-        if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
-          parsed = raw as Record<string, unknown>;
-        }
-      } catch {
-        parsed = null;
-      }
-      if (!parsed) continue;
-
-      const missingByField: Record<string, string[]> = {};
-      const syntheticPrev: Record<string, unknown> = { ...parsed };
-      for (const [fieldKey, relItems] of byField.entries()) {
-        const fDef = fieldByKey.get(fieldKey);
-        if (!fDef || fDef.type !== 'relation') continue;
-
-        const missingItems = relItems.filter((it) => !existingTargetLibIds.has(it.targetId));
-        if (missingItems.length === 0) continue;
-
-        missingByField[fieldKey] = missingItems.map((it) => it.targetId);
-        const existingTokens = normalizeRelationValueList(parsed[fieldKey]);
-        syntheticPrev[fieldKey] = mergeOrderedRelationItems(existingTokens, relItems);
-      }
-
-      if (Object.keys(missingByField).length > 0) {
-        deferred.push({
-          id: srcRow.id,
-          prevDataJson: JSON.stringify(syntheticPrev),
-          missingByField,
-        });
-      }
-    }
-
-    return deferred;
-  }
-
-  /**
-   * 导入备份后、按字段重建 entry_relations 前，先核对备份自带的 entry_relations：
-   * 若其中的边仍符合当前字段定义，按备份中的 sort_order 将缺失于 data_json 的有效目标 ID 补回。
-   */
-  reconcileImportedRelationsInternal(): void {
-    const relRows = this.driver.getAllSync<{
-      source_entry_id: string;
-      target_entry_id: string;
-      field_key: string;
-      sort_order: number;
-    }>(
-      `SELECT source_entry_id, target_entry_id, field_key, sort_order
-       FROM entry_relations
-       ORDER BY source_entry_id ASC, field_key ASC, sort_order ASC`
-    );
-    this.reconcileRelationRowsIntoEntriesInternal(relRows);
-  }
-
   createEntryInternal(
     librarySlug: string,
     inputData: Record<string, unknown>,
@@ -886,39 +567,26 @@ export class EntriesStore {
    * 批量清理存活条目 data_json 中指向待删条目的关联引用：
    * - 优先通过 entry_relations 索引精准定位反向引用；
    * - 仅对关联目标指向待删条目所属库的来源库做定向兜底查询（不扫描无关记录本）；
-   * - 手动删库（clearDanglingForDeletedLibrarySlug）时一并清理指向该库的已失效历史 ID（不碰指向其他存活库的有效 ID）；
    * - 仅对 JSON.parse 捕获格式错误，SQLite UPDATE 异常直接抛出以触发事务回滚。
    */
-  detachReferencesToEntriesInternal(
-    targetEntryIds: readonly string[],
-    options?: { clearDanglingForDeletedLibrarySlug?: string }
-  ): DetachedSourceRecord[] {
+  detachReferencesToEntriesInternal(targetEntryIds: readonly string[]): DetachedSourceRecord[] {
     const targetIdSet = new Set(targetEntryIds.filter(Boolean));
-    const clearDeletedSlug = options?.clearDanglingForDeletedLibrarySlug;
-    if (targetIdSet.size === 0 && !clearDeletedSlug) return [];
+    if (targetIdSet.size === 0) return [];
 
     const fieldsBySourceId = new Map<string, Set<string>>();
-    const danglingFieldsBySourceId = new Map<string, Set<string>>();
 
-    const addFieldForSource = (
-      map: Map<string, Set<string>>,
-      srcId: string,
-      fieldKey: string
-    ) => {
+    const addFieldForSource = (srcId: string, fieldKey: string) => {
       if (targetIdSet.has(srcId)) return;
-      let keys = map.get(srcId);
+      let keys = fieldsBySourceId.get(srcId);
       if (!keys) {
         keys = new Set<string>();
-        map.set(srcId, keys);
+        fieldsBySourceId.set(srcId, keys);
       }
       keys.add(fieldKey);
     };
 
     const uniqueTargets = Array.from(targetIdSet);
     const targetLibSlugs = new Set<string>();
-    if (clearDeletedSlug) {
-      targetLibSlugs.add(clearDeletedSlug);
-    }
 
     const { byId } = this.libraries.ensureCache();
     for (let i = 0; i < uniqueTargets.length; i += ENTRY_QUERY_CHUNK_SIZE) {
@@ -929,7 +597,7 @@ export class EntriesStore {
         chunk
       );
       for (const r of relRows) {
-        addFieldForSource(fieldsBySourceId, r.source_entry_id, r.field_key);
+        addFieldForSource(r.source_entry_id, r.field_key);
       }
 
       const libRows = this.driver.getAllSync<{ library_id: string }>(
@@ -942,22 +610,10 @@ export class EntriesStore {
       }
     }
 
-    const entryExistsCache = new Map<string, boolean>();
-    const entryExistsInDb = (entryId: string): boolean => {
-      const cached = entryExistsCache.get(entryId);
-      if (cached !== undefined) return cached;
-      const found = Boolean(
-        this.driver.getFirstSync<{ id: string }>('SELECT id FROM entries WHERE id = ?', [entryId])
-      );
-      entryExistsCache.set(entryId, found);
-      return found;
-    };
-
     // 仅定向检查关联目标属于 targetLibSlugs 的来源库，绝不读取无关记录本
     if (targetLibSlugs.size > 0) {
       const allLibs = this.libraries.listLibraries();
       for (const lib of allLibs) {
-        if (clearDeletedSlug && lib.slug === clearDeletedSlug) continue;
         const matchingFields = lib.fields.filter(
           (f) =>
             f.type === 'relation' &&
@@ -966,13 +622,8 @@ export class EntriesStore {
         );
         if (matchingFields.length === 0) continue;
 
-        const hasClearDeletedField = Boolean(
-          clearDeletedSlug &&
-            matchingFields.some((f) => f.relationConfig?.targetLibrarySlug === clearDeletedSlug)
-        );
-
         let candidateRows: Array<{ id: string; data_json: string }>;
-        if (!hasClearDeletedField && uniqueTargets.length > 0 && uniqueTargets.length <= 20) {
+        if (uniqueTargets.length <= 20) {
           const likeClauses = uniqueTargets.map(() => "data_json LIKE ? ESCAPE '\\'").join(' OR ');
           const likeParams: SqlParam[] = [
             lib.id,
@@ -982,13 +633,11 @@ export class EntriesStore {
             `SELECT id, data_json FROM entries WHERE library_id = ? AND (${likeClauses})`,
             likeParams
           );
-        } else if (hasClearDeletedField || uniqueTargets.length > 20) {
+        } else {
           candidateRows = this.driver.getAllSync<{ id: string; data_json: string }>(
             'SELECT id, data_json FROM entries WHERE library_id = ?',
             [lib.id]
           );
-        } else {
-          candidateRows = [];
         }
 
         for (const r of candidateRows) {
@@ -1005,17 +654,8 @@ export class EntriesStore {
           if (!parsed) continue;
           for (const f of matchingFields) {
             const tokens = normalizeRelationValueList(parsed[f.key]);
-            if (tokens.length === 0) continue;
             if (tokens.some((id) => targetIdSet.has(id))) {
-              addFieldForSource(fieldsBySourceId, r.id, f.key);
-            }
-            if (
-              clearDeletedSlug &&
-              f.relationConfig?.targetLibrarySlug === clearDeletedSlug &&
-              tokens.some((id) => !targetIdSet.has(id) && !entryExistsInDb(id))
-            ) {
-              addFieldForSource(fieldsBySourceId, r.id, f.key);
-              addFieldForSource(danglingFieldsBySourceId, r.id, f.key);
+              addFieldForSource(r.id, f.key);
             }
           }
         }
@@ -1041,19 +681,14 @@ export class EntriesStore {
       }
       if (!parsedData) continue;
 
-      const danglingFieldsForSrc = danglingFieldsBySourceId.get(srcId);
       const removedByField: Record<string, string[]> = {};
       let changed = false;
       for (const fk of fieldKeys) {
         const curTokens = normalizeRelationValueList(parsedData[fk]);
         if (curTokens.length === 0) continue;
-        const allowClearDangling = Boolean(danglingFieldsForSrc?.has(fk));
-        const shouldRemove = (id: string) =>
-          targetIdSet.has(id) || (allowClearDangling && !entryExistsInDb(id));
-        const removed = curTokens.filter(shouldRemove);
+        const removed = curTokens.filter((id) => targetIdSet.has(id));
         if (removed.length === 0) continue;
-        const nextTokens = curTokens.filter((id) => !shouldRemove(id));
-        parsedData[fk] = nextTokens;
+        parsedData[fk] = curTokens.filter((id) => !targetIdSet.has(id));
         removedByField[fk] = removed;
         changed = true;
       }
@@ -1076,25 +711,18 @@ export class EntriesStore {
   }
 
   /**
-   * 清理存活记录中指向指定记录本实际条目的引用；
-   * 手动删库时可开启 `clearDangling` 一并清理指向该库的已失效历史引用（即使该库当前已为空）。
+   * 清理存活记录中指向指定记录本全部条目的引用
    */
-  detachReferencesToLibraryInternal(
-    librarySlug: string,
-    options?: { clearDangling?: boolean }
-  ): DetachedSourceRecord[] {
+  detachReferencesToLibraryInternal(librarySlug: string): DetachedSourceRecord[] {
     const libRow = this.driver.getFirstSync<{ id: string }>(
       'SELECT id FROM libraries WHERE slug = ?',
       [librarySlug]
     );
-    const entryIds = libRow
-      ? this.driver
-          .getAllSync<{ id: string }>('SELECT id FROM entries WHERE library_id = ?', [libRow.id])
-          .map((r) => r.id)
-      : [];
-    return this.detachReferencesToEntriesInternal(entryIds, {
-      clearDanglingForDeletedLibrarySlug: options?.clearDangling ? librarySlug : undefined,
-    });
+    if (!libRow) return [];
+    const entryIds = this.driver
+      .getAllSync<{ id: string }>('SELECT id FROM entries WHERE library_id = ?', [libRow.id])
+      .map((r) => r.id);
+    return this.detachReferencesToEntriesInternal(entryIds);
   }
 
   /**
@@ -1102,7 +730,6 @@ export class EntriesStore {
    */
   deleteEntryWithDetachInternal(entryId: string): {
     entryRow: Record<string, unknown>;
-    relRows: Array<Record<string, unknown>>;
     detachedSources: DetachedSourceRecord[];
   } | null {
     const entryRow = this.driver.getFirstSync<Record<string, unknown>>(
@@ -1111,14 +738,9 @@ export class EntriesStore {
     );
     if (!entryRow) return null;
 
-    const relRows = this.driver.getAllSync<Record<string, unknown>>(
-      'SELECT * FROM entry_relations WHERE source_entry_id = ? OR target_entry_id = ?',
-      [entryId, entryId]
-    );
-
     const detachedSources = this.detachReferencesToEntriesInternal([entryId]);
     this.driver.runSync('DELETE FROM entries WHERE id = ?', [entryId]);
-    return { entryRow, relRows, detachedSources };
+    return { entryRow, detachedSources };
   }
 
   commitOmniDraftsInternal(drafts: readonly CommitDraftEntryItem[]): string[] {

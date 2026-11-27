@@ -260,7 +260,7 @@ function runTests() {
   });
   const omniSnap = repo.listSnapshots()[0];
   const omniImpact = repo.describeSnapshotUndoImpact(omniSnap.id);
-  assert.equal(omniImpact.isFullRestore, false);
+  assert.equal(omniImpact.affectedEntriesCount, 2);
   repo.undoSnapshot(omniSnap.id);
   assert.equal(repo.getHydratedEntryById(createdIds[0]), null, 'Undoing draft should delete draft asset');
   assert.ok(repo.getHydratedEntryById(laterBillId), 'Later manual entry MUST survive incremental undo');
@@ -481,43 +481,9 @@ function runTests() {
   repo.undoSnapshot(libDelSnap.id);
   assert.equal(repo.getLibraryBySlug('reading_logs')?.parentLibrarySlug, 'books');
   assert.equal(repo.getLibraryBySlug('reading_logs')?.showOnHome, false);
-  // Verify v2 -> v3 incremental SQLite migration on legacy database without parent_slug/show_on_home
-  const legacyDriver = createNodeSqliteDriver();
-  legacyDriver.execSync(`
-    CREATE TABLE libraries (
-      id TEXT PRIMARY KEY NOT NULL,
-      slug TEXT UNIQUE NOT NULL,
-      name TEXT NOT NULL,
-      description TEXT NOT NULL DEFAULT '',
-      icon TEXT NOT NULL DEFAULT '📦',
-      color TEXT NOT NULL DEFAULT 'teal',
-      fields_json TEXT NOT NULL,
-      views_json TEXT NOT NULL,
-      sort_order INTEGER NOT NULL DEFAULT 0,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-    INSERT INTO libraries (id, slug, name, description, icon, color, fields_json, views_json, sort_order, created_at, updated_at)
-    VALUES ('lib_old', 'old_notes', '旧版笔记', '', '📒', 'teal', '[{"key":"title","label":"标题","type":"text","required":true}]', '{"card":{"titleFieldKey":"title","footerMetricKeys":[],"sortDir":"desc","highlightRules":[]}}', 0, 1000, 1000);
-    PRAGMA user_version = 2;
-  `);
-  const migratedRepo = new OmniRepository(legacyDriver);
-  const migratedLib = migratedRepo.getLibraryBySlug('old_notes');
-  assert.ok(migratedLib);
-  assert.equal(migratedLib!.parentLibrarySlug, null);
-  assert.equal(migratedLib!.showOnHome, true);
-  assert.equal(
-    legacyDriver.getFirstSync<{ user_version: number }>('PRAGMA user_version')?.user_version,
-    LATEST_SCHEMA_VERSION
-  );
-  console.log('   ✓ Sub-library hierarchy, multiline quotes, detach-on-delete, undo & v2->v3 migration verified');
+  console.log('   ✓ Sub-library hierarchy, multiline quotes, detach-on-delete & undo verified');
 
-  console.log('12. Testing v4 decoupled library_views & library_relations tables + v2 backup...');
-  // Legacy v2 database upgraded all the way to v4 must have backfilled library_views
-  const migratedViews = migratedRepo.listLibraryViews('old_notes');
-  assert.equal(migratedViews.length, 1, 'Minimal library should only have 1 default card view');
-  assert.equal(migratedViews[0].viewType, 'card');
-
+  console.log('12. Testing decoupled library_views & library_relations tables + full backup...');
   // Seeded libraries should have tailored on-demand views in library_views table
   const assetViews = repo.listLibraryViews('my_assets');
   assert.ok(assetViews.some((v) => v.viewType === 'card'));
@@ -545,14 +511,14 @@ function runTests() {
     'library_relations must record reference relation for daily_bills -> my_assets'
   );
 
-  // Full backup v2 round-trip must preserve library_views & library_relations
-  const backupV2 = repo.exportBackupBundle();
-  assert.equal(backupV2.version, 2);
-  assert.ok((backupV2.libraryViews?.length ?? 0) >= 7);
-  assert.ok((backupV2.libraryRelations?.length ?? 0) >= 2);
+  // Full backup round-trip must preserve library_views & library_relations
+  const backupBundle = repo.exportBackupBundle();
+  assert.equal(backupBundle.version, 1);
+  assert.ok(backupBundle.libraryViews.length >= 7);
+  assert.ok(backupBundle.libraryRelations.length >= 2);
   const restoreDriver = createNodeSqliteDriver();
   const restoreRepo = new OmniRepository(restoreDriver);
-  restoreRepo.importBackupBundle(backupV2);
+  restoreRepo.importBackupBundle(backupBundle);
   assert.deepEqual(
     restoreRepo.listLibraryViews('my_assets').map((v) => v.viewType),
     repo.listLibraryViews('my_assets').map((v) => v.viewType)
@@ -598,7 +564,7 @@ function runTests() {
     'Undoing AI Architect view plan must restore previous library_views exactly'
   );
 
-  console.log('   ✓ v4 library_views CRUD, AI view design/undo, library_relations table & v2 backup verified');
+  console.log('   ✓ library_views CRUD, AI view design/undo, library_relations table & full backup verified');
 
   console.log('13. Testing single-tx upsertLibrary+views, getEntryTitleMap, listLatestEntryByLibrary & image ref tracking...');
   let notifyCount = 0;

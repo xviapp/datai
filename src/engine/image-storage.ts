@@ -31,7 +31,7 @@ function isDirectImageUri(val: string): boolean {
 
 /**
  * 将 data_json 中存储的图片值解析为 <Image> 可直接渲染的 URI：
- * - 兼容历史 base64 data URL、网络 URL 或完整 file:// URI
+ * - 直接透传 base64 data URL、网络 URL 或完整 file:// URI
  * - 原生端将相对路径（如 images/img_xxx.jpg）拼接到 Paths.document，避免 iOS 沙盒路径变化失效
  */
 export function resolveImageUri(stored: unknown): string {

@@ -85,7 +85,12 @@ export async function pickBackupBundleFromDevice(): Promise<FullBackupBundle | n
       : await new File(asset.uri).text();
 
   const parsed = JSON.parse(content) as FullBackupBundle;
-  if (!Array.isArray(parsed.libraries) || !Array.isArray(parsed.entries)) {
+  if (
+    !Array.isArray(parsed.libraries) ||
+    !Array.isArray(parsed.libraryViews) ||
+    !Array.isArray(parsed.entries) ||
+    !Array.isArray(parsed.widgets)
+  ) {
     throw new Error('备份文件格式不正确');
   }
   return parsed;

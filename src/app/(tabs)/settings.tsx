@@ -538,7 +538,7 @@ export default function SettingsScreen() {
         title="确认撤销此操作？"
         summary={pendingUndo?.impact.summary}
         description={pendingUndo?.impact.warningText}
-        descriptionTone={pendingUndo?.impact.isFullRestore ? 'danger' : 'warning'}
+        descriptionTone="warning"
         confirmLabel="确认撤销"
         onCancel={() => setPendingUndo(null)}
         onConfirm={handleConfirmUndo}

@@ -119,7 +119,6 @@ export interface AiSnapshotItem {
 
 export interface SnapshotUndoImpact {
   summary: string;
-  isFullRestore: boolean;
   affectedEntriesCount: number;
   warningText: string;
 }
@@ -131,11 +130,11 @@ export interface SavedDashboardWidget extends DashboardWidget {
 }
 
 export interface FullBackupBundle {
-  version: 1 | 2;
+  version: 1;
   exportedAt: string;
   libraries: Array<Record<string, unknown>>;
-  libraryViews?: Array<Record<string, unknown>>;
-  libraryRelations?: Array<Record<string, unknown>>;
+  libraryViews: Array<Record<string, unknown>>;
+  libraryRelations: Array<Record<string, unknown>>;
   entries: Array<Record<string, unknown>>;
   relations: Array<Record<string, unknown>>;
   widgets: Array<Record<string, unknown>>;
@@ -169,11 +168,22 @@ export interface LibraryCatalogItem {
   recentEntries?: Array<{ id: string; title: string }>;
 }
 
+export interface ConvertedFieldBackup {
+  /** 字段在转换为关联字段前的原始类型 */
+  fromType: FieldType;
+  /** 转换前 entries.data_json 中是否存在该键 */
+  hadValue: boolean;
+  /** 转换前的原始值（仅 hadValue=true 时有意义） */
+  prevValue?: unknown;
+}
+
 export interface DetachedSourceRecord {
   id: string;
   prevDataJson: string;
   /** 按字段记录本次解绑实际移除的目标 ID，用于撤销时仅恢复被移除的关联而不覆盖其他字段的新编辑 */
   removedByField?: Record<string, string[]>;
+  /** 按字段记录非关联字段转换为关联字段前的原始类型与值，撤销方案及延迟恢复时据此无损还原 */
+  convertedFields?: Record<string, ConvertedFieldBackup>;
 }
 
 export type SnapshotPayload =
@@ -184,17 +194,15 @@ export type SnapshotPayload =
   | {
       kind: 'entry_deleted';
       entry: Record<string, unknown>;
-      relations: Array<Record<string, unknown>>;
       detachedSources?: DetachedSourceRecord[];
-      /** 当目标条目先于本来源条目被撤销恢复时，暂存待本条目恢复后补回的正向关联 */
+      /** 当目标条目先于本来源条目被撤销恢复时，暂存待本条目恢复后补回的正向关联或字段原值 */
       deferredSelfRestores?: DetachedSourceRecord[];
     }
   | {
       kind: 'library_deleted';
       library: Record<string, unknown>;
-      libraryViews?: Array<Record<string, unknown>>;
+      libraryViews: Array<Record<string, unknown>>;
       entries: Array<Record<string, unknown>>;
-      relations: Array<Record<string, unknown>>;
       widgets: Array<Record<string, unknown>>;
       detachedChildLibraries?: Array<{
         id: string;
@@ -202,21 +210,19 @@ export type SnapshotPayload =
         show_on_home: number;
       }>;
       detachedSources?: DetachedSourceRecord[];
-      /** 当目标条目先于本库条目被撤销恢复时，暂存待本库条目恢复后补回的正向关联 */
+      /** 当目标条目先于本库条目被撤销恢复时，暂存待本库条目恢复后补回的正向关联或字段原值 */
       deferredSelfRestores?: DetachedSourceRecord[];
     }
   | {
       kind: 'architect_plan';
-      createdLibrarySlugs: string[];
       /** 记录本次方案实际新建记录本的精确 ID，撤销时按 ID 核对身份，避免误删后来复用同 slug 新建的库 */
-      createdLibraries?: Array<{ id: string; slug: string }>;
+      createdLibraries: Array<{ id: string; slug: string }>;
       previousLibraries: Array<Record<string, unknown>>;
-      previousLibraryViews?: Array<Record<string, unknown>>;
+      previousLibraryViews: Array<Record<string, unknown>>;
       createdWidgetIds: string[];
-      /** 记录方案变更 relation 字段时从旧记录裁剪/剥离的关联 ID 与原顺序，撤销方案时可无损还原 */
+      /** 记录方案变更 relation 字段时从记录裁剪/转换的原值与顺序，撤销方案时无损还原 */
       trimmedSources?: DetachedSourceRecord[];
-    }
-  | FullBackupBundle;
+    };
 
 export interface RawEntryRow {
   id: string;

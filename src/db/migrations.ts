@@ -1,14 +1,9 @@
-import { DEFAULT_VIEW_LABELS } from '@/schema/view-dsl';
-import {
-  rebuildLibraryRelationsTable,
-  reconcileLegacyEntryRelationsV5,
-} from './relations-sync';
-import { sqlReferencesLibraryView, type SyncSqlDriver } from './types';
+import type { SyncSqlDriver } from './types';
 
-export const LATEST_SCHEMA_VERSION = 5;
+export const LATEST_SCHEMA_VERSION = 1;
 export const MAX_AI_SNAPSHOTS = 20;
 
-export const CORE_MIGRATION_SQL = `
+export const CORE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS libraries (
   id TEXT PRIMARY KEY NOT NULL,
   slug TEXT UNIQUE NOT NULL,
@@ -118,202 +113,14 @@ CREATE TABLE IF NOT EXISTS ai_snapshots (
 );
 `;
 
-function getUserVersion(driver: SyncSqlDriver): number {
-  const row = driver.getFirstSync<{ user_version: number }>('PRAGMA user_version');
-  return Number(row?.user_version ?? 0);
-}
-
-function backfillViewsAndRelationsV4(driver: SyncSqlDriver): void {
-  const now = Date.now();
-  const libs = driver.getAllSync<{
-    id: string;
-    slug: string;
-    views_json: string;
-  }>('SELECT id, slug, views_json FROM libraries');
-
-  const widgets = driver.getAllSync<{ library_slug: string | null; readonly_sql: string }>(
-    'SELECT library_slug, readonly_sql FROM dashboard_widgets'
-  );
-
-  for (const lib of libs) {
-    // 1. 回填 library_views（仅在该库还没有视图记录时）
-    const existingViewCount = driver.getFirstSync<{ cnt: number }>(
-      'SELECT COUNT(*) AS cnt FROM library_views WHERE library_id = ?',
-      [lib.id]
-    );
-    if (!existingViewCount || existingViewCount.cnt === 0) {
-      let parsedViews: {
-        card?: Record<string, unknown>;
-        gallery?: Record<string, unknown>;
-        calendar?: Record<string, unknown>;
-      } = {};
-      try {
-        parsedViews = JSON.parse(lib.views_json);
-      } catch {
-        parsedViews = {};
-      }
-
-      let order = 0;
-      driver.runSync(
-        `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          `vw_${lib.id}_card`,
-          lib.id,
-          DEFAULT_VIEW_LABELS.card,
-          'card',
-          JSON.stringify(parsedViews.card ?? {}),
-          order++,
-          1,
-          now,
-          now,
-        ]
-      );
-
-      if (parsedViews.gallery) {
-        driver.runSync(
-          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            `vw_${lib.id}_gallery`,
-            lib.id,
-            DEFAULT_VIEW_LABELS.gallery,
-            'gallery',
-            JSON.stringify(parsedViews.gallery),
-            order++,
-            0,
-            now,
-            now,
-          ]
-        );
-      }
-
-      if (parsedViews.calendar) {
-        driver.runSync(
-          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            `vw_${lib.id}_calendar`,
-            lib.id,
-            DEFAULT_VIEW_LABELS.calendar,
-            'calendar',
-            JSON.stringify(parsedViews.calendar),
-            order++,
-            0,
-            now,
-            now,
-          ]
-        );
-      }
-
-      const hasWidgets = widgets.some(
-        (w) => w.library_slug === lib.slug || sqlReferencesLibraryView(w.readonly_sql, lib.slug)
-      );
-      if (hasWidgets) {
-        driver.runSync(
-          `INSERT INTO library_views (id, library_id, name, view_type, config_json, sort_order, is_default, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            `vw_${lib.id}_stats`,
-            lib.id,
-            DEFAULT_VIEW_LABELS.stats,
-            'stats',
-            '{}',
-            order++,
-            0,
-            now,
-            now,
-          ]
-        );
-      }
-    }
-  }
-
-  // 2. 回填 library_relations（复用统一关系同步逻辑）
-  rebuildLibraryRelationsTable(driver, { clearFirst: false });
-}
-
 /**
- * 使用 SQLite 原生 PRAGMA user_version 按版本号顺序执行增量迁移
+ * 初始化核心 SQLite 表结构并写入当前 schema 版本号
  */
-export function runCoreMigrations(driver: SyncSqlDriver): void {
+export function initCoreSchema(driver: SyncSqlDriver): void {
   driver.withTransactionSync(() => {
-    driver.execSync(CORE_MIGRATION_SQL);
-
-    let version = getUserVersion(driver);
-
-    if (version < 1) {
-      const cols = driver.getAllSync<{ name: string }>('PRAGMA table_info(dashboard_widgets)');
-      if (!cols.some((c) => c.name === 'pinned_overview')) {
-        driver.execSync(
-          'ALTER TABLE dashboard_widgets ADD COLUMN pinned_overview INTEGER NOT NULL DEFAULT 1;'
-        );
-      }
-
-      driver.runSync(
-        "UPDATE dashboard_widgets SET title = '账单累计支出', subtitle = '全部账单合计' WHERE id = 'w_total_bills' AND subtitle = '实时聚合 v_daily_bills'"
-      );
-      driver.runSync(
-        "UPDATE dashboard_widgets SET title = '装备净投入', subtitle = '购入价减去预估残值' WHERE id = 'w_asset_net' AND subtitle = '购入总价减去预估二手残值'"
-      );
-      driver.runSync(
-        "UPDATE dashboard_widgets SET subtitle = '按分类查看支出占比' WHERE id = 'w_bills_by_cat' AND subtitle = '按分类统计累计开销占比'"
-      );
-      driver.runSync(
-        "UPDATE dashboard_widgets SET title = '装备总投入排行', subtitle = '含本体购入价与相关配件账单' WHERE id = 'w_asset_compare' AND subtitle LIKE '%JOIN%'"
-      );
-
-      driver.execSync('PRAGMA user_version = 1;');
-      version = 1;
-    }
-
-    if (version < 2) {
-      const dirtyEntries = driver.getAllSync<{ id: string; search_text: string }>(
-        "SELECT id, search_text FROM entries WHERE search_text LIKE '%data:image/%'"
-      );
-      for (const row of dirtyEntries) {
-        const cleaned = row.search_text
-          .replace(/data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi, '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        driver.runSync('UPDATE entries SET search_text = ? WHERE id = ?', [cleaned, row.id]);
-      }
-
-      driver.runSync(
-        `DELETE FROM ai_snapshots
-         WHERE id NOT IN (
-           SELECT id FROM ai_snapshots ORDER BY created_at DESC LIMIT ?
-         )`,
-        [MAX_AI_SNAPSHOTS]
-      );
-
-      driver.execSync('PRAGMA user_version = 2;');
-      version = 2;
-    }
-
-    if (version < 3) {
-      const libCols = driver.getAllSync<{ name: string }>('PRAGMA table_info(libraries)');
-      if (!libCols.some((c) => c.name === 'parent_slug')) {
-        driver.execSync('ALTER TABLE libraries ADD COLUMN parent_slug TEXT DEFAULT NULL;');
-      }
-      if (!libCols.some((c) => c.name === 'show_on_home')) {
-        driver.execSync(
-          'ALTER TABLE libraries ADD COLUMN show_on_home INTEGER NOT NULL DEFAULT 1;'
-        );
-      }
-
-      driver.execSync('PRAGMA user_version = 3;');
-      version = 3;
-    }
-
-    if (version < 4) {
-      backfillViewsAndRelationsV4(driver);
-      driver.execSync('PRAGMA user_version = 4;');
-      version = 4;
-    }
-
-    if (version < 5) {
-      reconcileLegacyEntryRelationsV5(driver);
+    driver.execSync(CORE_SCHEMA_SQL);
+    const row = driver.getFirstSync<{ user_version: number }>('PRAGMA user_version');
+    if (Number(row?.user_version ?? 0) < LATEST_SCHEMA_VERSION) {
       driver.execSync(`PRAGMA user_version = ${LATEST_SCHEMA_VERSION};`);
     }
   });

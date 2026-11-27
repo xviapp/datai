@@ -6,7 +6,7 @@ import {
   type LibraryBlueprint,
   type LibraryViewType,
 } from '@/schema/view-dsl';
-import { runCoreMigrations } from './migrations';
+import { initCoreSchema } from './migrations';
 import type {
   AiSnapshotItem,
   ArchitectLibraryDiff,
@@ -80,7 +80,7 @@ export class OmniRepository {
       this.widgetsStore
     );
 
-    runCoreMigrations(this.driver);
+    initCoreSchema(this.driver);
     this.driver.withTransactionSync(() => {
       this.librariesStore.ensureViewsCompiled();
     });
@@ -321,12 +321,6 @@ export class OmniRepository {
           'SELECT * FROM entries WHERE library_id = ? ORDER BY created_at ASC',
           [libId]
         );
-        const libRelations = this.driver.getAllSync<Record<string, unknown>>(
-          `SELECT * FROM entry_relations
-           WHERE source_entry_id IN (SELECT id FROM entries WHERE library_id = ?)
-              OR target_entry_id IN (SELECT id FROM entries WHERE library_id = ?)`,
-          [libId, libId]
-        );
         const detachedChildLibraries = this.driver.getAllSync<{
           id: string;
           parent_slug: string | null;
@@ -342,16 +336,13 @@ export class OmniRepository {
             sqlReferencesLibraryView(String(w.readonly_sql ?? ''), slug)
         );
 
-        const detachedSources = this.entriesStore.detachReferencesToLibraryInternal(slug, {
-          clearDangling: true,
-        });
+        const detachedSources = this.entriesStore.detachReferencesToLibraryInternal(slug);
 
         this.snapshotsStore.saveSnapshotInternal(`删除记录本「${libName}」`, {
           kind: 'library_deleted',
           library: rawLib,
           libraryViews: libViews,
           entries: libEntries,
-          relations: libRelations,
           widgets: matchedWidgets,
           detachedChildLibraries,
           detachedSources,
@@ -402,7 +393,6 @@ export class OmniRepository {
       snapshotId = this.snapshotsStore.saveSnapshotInternal(`删除记录「${title}」`, {
         kind: 'entry_deleted',
         entry: deleted.entryRow,
-        relations: deleted.relRows,
         detachedSources: deleted.detachedSources,
       });
     });

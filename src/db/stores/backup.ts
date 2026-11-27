@@ -1,6 +1,5 @@
-import type { LibraryLayoutBundle } from '@/schema/view-dsl';
 import type { FullBackupBundle } from '../models';
-import { sqlReferencesLibraryView, type SyncSqlDriver } from '../types';
+import type { SyncSqlDriver } from '../types';
 import { dropLibrarySqlView } from '../view-compiler';
 import type { EntriesStore } from './entries-store';
 import type { LibrariesStore } from './libraries-store';
@@ -8,7 +7,7 @@ import type { WidgetsStore } from './widgets-store';
 
 export function exportBackupBundleFromDriver(driver: SyncSqlDriver): FullBackupBundle {
   return {
-    version: 2,
+    version: 1,
     exportedAt: new Date().toISOString(),
     libraries: driver.getAllSync('SELECT * FROM libraries ORDER BY sort_order ASC'),
     libraryViews: driver.getAllSync(
@@ -26,8 +25,7 @@ export function importBackupBundleInternal(
   libraries: LibrariesStore,
   entries: EntriesStore,
   widgets: WidgetsStore,
-  bundle: FullBackupBundle,
-  options?: { clearSnapshots?: boolean }
+  bundle: FullBackupBundle
 ): void {
   const oldLibs = driver.getAllSync<{ slug: string }>('SELECT slug FROM libraries');
   for (const l of oldLibs) {
@@ -40,77 +38,30 @@ export function importBackupBundleInternal(
   driver.execSync('DELETE FROM library_relations;');
   driver.execSync('DELETE FROM dashboard_widgets;');
   driver.execSync('DELETE FROM libraries;');
-  // 全量导入新备份时清空导入前的撤销历史，避免旧库增量快照跨备份误删导入数据
-  if (options?.clearSnapshots !== false) {
-    driver.execSync('DELETE FROM ai_snapshots;');
-  }
+  // 全量导入新备份时清空导入前的撤销历史，避免跨备份误操作
+  driver.execSync('DELETE FROM ai_snapshots;');
 
   for (const l of bundle.libraries) {
     libraries.insertRawLibrary(l);
   }
 
-  if (bundle.libraryViews && bundle.libraryViews.length > 0) {
-    for (const lv of bundle.libraryViews) {
-      libraries.insertRawLibraryView(lv);
-    }
-  } else {
-    // 兼容旧版 v1 备份：自动由 views_json 生成 library_views 行
-    for (const l of bundle.libraries) {
-      try {
-        libraries.syncLibraryViewsFromBlueprint(
-          String(l.id),
-          JSON.parse(String(l.views_json)) as LibraryLayoutBundle,
-          true
-        );
-      } catch {
-        // ignore malformed legacy views_json
-      }
-    }
+  for (const lv of bundle.libraryViews) {
+    libraries.insertRawLibraryView(lv);
   }
 
   for (const e of bundle.entries) {
     entries.insertRawEntry(e);
   }
 
-  for (const r of bundle.relations) {
-    driver.runSync(
-      `INSERT INTO entry_relations (id, source_entry_id, target_entry_id, source_library_id, field_key, sort_order)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [
-        String(r.id),
-        String(r.source_entry_id),
-        String(r.target_entry_id),
-        String(r.source_library_id),
-        String(r.field_key),
-        Number(r.sort_order ?? 0),
-      ]
-    );
-  }
-
   for (const w of bundle.widgets) {
     widgets.insertRawWidget(w);
-  }
-
-  // 兼容旧版 v1 备份时若没有自带 stats 视图，则根据导入的图表补齐
-  if (!bundle.libraryViews || bundle.libraryViews.length === 0) {
-    for (const l of bundle.libraries) {
-      const slug = String(l.slug);
-      const hasWidget = bundle.widgets.some(
-        (w) =>
-          w.library_slug === slug || sqlReferencesLibraryView(String(w.readonly_sql ?? ''), slug)
-      );
-      if (hasWidget) {
-        libraries.ensureStatsViewForLibrary(slug);
-      }
-    }
   }
 
   libraries.syncAllLibraryRelations();
   libraries.ensureViewsCompiled();
   libraries.invalidateCache();
-  // 先核对旧版备份中仍符合字段定义的 entry_relations 并补回 data_json，避免重建索引时丢失有效关联
-  entries.reconcileImportedRelationsInternal();
-  // 导入后按库字段定义同步 entry_relations 索引（同时清理不再属于 relation 字段的失效关联行）
+
+  // 按库字段定义由 entries.data_json 统一重建 entry_relations 索引，确保字段值与索引严格一致
   for (const lib of libraries.listLibraries()) {
     entries.syncLibraryEntryRelationsInternal(lib.id);
   }

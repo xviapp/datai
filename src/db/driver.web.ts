@@ -1,7 +1,7 @@
 import initSqlJs, { type Database as SqlJsDatabase } from 'sql.js';
 import { sanitizeReadOnlySql, type SqlParam, type SyncSqlDriver } from './types';
 
-const LEGACY_STORAGE_KEY = 'omni_record_sqlite_v1_b64';
+const FALLBACK_STORAGE_KEY = 'folio_sqlite_fallback_v1_b64';
 const IDB_NAME = 'folio_sqlite_store_v1';
 const IDB_STORE = 'database';
 const IDB_KEY = 'main';
@@ -108,21 +108,14 @@ export async function getPlatformSqlDriver(): Promise<SyncSqlDriver> {
       } catch {
         initialBytes = null;
       }
-    }
-
-    // 兼容旧版 localStorage：若 IndexedDB 中尚无数据，则自动迁移旧库并清理 localStorage
-    if (!initialBytes && typeof window !== 'undefined') {
+    } else if (typeof window !== 'undefined') {
       try {
-        const legacyB64 = window.localStorage.getItem(LEGACY_STORAGE_KEY);
-        if (legacyB64) {
-          initialBytes = base64ToUint8(legacyB64);
-          if (idb) {
-            await writeBytesToIdb(idb, initialBytes);
-            window.localStorage.removeItem(LEGACY_STORAGE_KEY);
-          }
+        const fallbackB64 = window.localStorage.getItem(FALLBACK_STORAGE_KEY);
+        if (fallbackB64) {
+          initialBytes = base64ToUint8(fallbackB64);
         }
       } catch {
-        // ignore corrupted legacy data
+        initialBytes = null;
       }
     }
 
@@ -149,7 +142,7 @@ export async function getPlatformSqlDriver(): Promise<SyncSqlDriver> {
           if (idb) {
             await writeBytesToIdb(idb, snapshot);
           } else if (typeof window !== 'undefined') {
-            window.localStorage.setItem(LEGACY_STORAGE_KEY, uint8ToBase64(snapshot));
+            window.localStorage.setItem(FALLBACK_STORAGE_KEY, uint8ToBase64(snapshot));
           }
           reportPersistError(null);
         }

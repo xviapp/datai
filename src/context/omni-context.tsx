@@ -238,17 +238,3 @@ export function useOmniModalState(): OmniModalStateValue {
 export function useOmniModalActions(): OmniModalActionsValue {
   return useContext(OmniModalActionsContext);
 }
-
-/**
- * 兼容旧版聚合 Hook（新代码建议优先按需使用 useRepository / useOmniModalActions / useOmniModalState）
- */
-export function useOmni() {
-  const repoCtx = useRepository();
-  const modalState = useOmniModalState();
-  const modalActions = useOmniModalActions();
-  return {
-    ...repoCtx,
-    ...modalState,
-    ...modalActions,
-  };
-}
